@@ -76,6 +76,26 @@ Non-Pal8 input (e.g. RGBA) is handled via
 runtime this conversion is auto-inserted; standalone, you do it
 explicitly before `send_frame`.
 
+### Per-frame disposal / transparency
+
+The generic `Encoder` trait only carries pixel data and pts, so GIF's
+per-frame metadata (disposal method, transparent colour index) has to be
+set on the concrete [`GifEncoder`] type just before `send_frame`:
+
+```rust
+use oxideav_gif::GifEncoder;
+let mut enc = GifEncoder::new(&params)?;
+enc.set_next_disposal(2);                 // restore-to-background
+enc.set_next_transparent_index(Some(7));  // palette index 7 is transparent
+enc.send_frame(&Frame::Video(frame))?;    // hints consumed + reset
+```
+
+Both hints apply to the next frame only and reset to their defaults
+(`0` / `None`) afterwards. The `make_encoder` path (used by the registry
+and job-graph runtime) always emits disposal = 0 and no transparent
+index — adequate for "paint every frame in full over a static canvas",
+which is the common animation shape.
+
 ### Codec / container IDs
 
 - Codec: `"gif"`; accepted pixel format `Pal8`.
