@@ -19,6 +19,24 @@
 //! way to stay correct when consumers stitch frames with different
 //! palettes. Callers who want a global-palette-only GIF can clear the
 //! local palette themselves between calls.
+//!
+//! ## Per-frame disposal and transparency
+//!
+//! The [`Encoder`] trait only carries pixel data + pts, so per-frame GIF
+//! metadata (disposal method, transparent index) has no slot in the
+//! `Frame` model. Callers that need to emit those have two options:
+//!
+//! * Build the encoder directly via [`GifEncoder::new`] (instead of
+//!   through [`CodecRegistry`]) and call [`GifEncoder::set_next_disposal`]
+//!   / [`GifEncoder::set_next_transparent_index`] before each
+//!   `send_frame`. Both settings are consumed by the next frame and
+//!   reset to their defaults afterwards — there is no "sticky" mode.
+//! * Write the GIF bytes directly via the container layer, skipping the
+//!   encoder.
+//!
+//! The factory-built encoder always emits disposal = 0 and no transparent
+//! index; this is the safe behaviour for the "paint every frame in full
+//! over a static canvas" case.
 
 use std::collections::VecDeque;
 
@@ -37,40 +55,7 @@ use crate::lzw::Lzw;
 pub const DEFAULT_DELAY_CS: u16 = 10;
 
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
-    let width = params
-        .width
-        .ok_or_else(|| Error::invalid("GIF encoder: missing width"))?;
-    let height = params
-        .height
-        .ok_or_else(|| Error::invalid("GIF encoder: missing height"))?;
-    let pix = params.pixel_format.unwrap_or(PixelFormat::Pal8);
-    if pix != PixelFormat::Pal8 {
-        return Err(Error::unsupported(format!(
-            "GIF encoder: pixel format {:?} not supported — feed Pal8",
-            pix
-        )));
-    }
-    let mut output_params = params.clone();
-    output_params.media_type = MediaType::Video;
-    output_params.codec_id = CodecId::new(super::GIF_CODEC_ID);
-    output_params.pixel_format = Some(PixelFormat::Pal8);
-    output_params.width = Some(width);
-    output_params.height = Some(height);
-
-    // Time base: 1/100 s — matches GIF's native delay unit.
-    let time_base = TimeBase::new(1, 100);
-
-    Ok(Box::new(GifEncoder {
-        output_params,
-        width,
-        height,
-        time_base,
-        pending: VecDeque::new(),
-        frame_count: 0,
-        delay_cs: DEFAULT_DELAY_CS,
-        global_palette_set: false,
-        buffered: None,
-    }))
+    Ok(Box::new(GifEncoder::new(params)?))
 }
 
 /// A frame that has been LZW-compressed but whose delay is still
@@ -82,9 +67,17 @@ struct BufferedFrame {
     min_code_size: u8,
     lzw_data: Vec<u8>,
     pts_cs: i64,
+    disposal: u8,
+    transparent_index: Option<u8>,
 }
 
-struct GifEncoder {
+/// Concrete GIF encoder.
+///
+/// Prefer [`make_encoder`] when working through [`CodecRegistry`]. Use
+/// `GifEncoder` directly when you need per-frame disposal or transparency
+/// control — the [`Encoder`] trait exposes no side-channel for those, so
+/// they have to be set on the concrete type just before `send_frame`.
+pub struct GifEncoder {
     output_params: CodecParameters,
     width: u32,
     height: u32,
@@ -93,9 +86,78 @@ struct GifEncoder {
     frame_count: u64,
     delay_cs: u16,
     global_palette_set: bool,
+    /// Disposal to attach to the next `send_frame` call, then cleared.
+    next_disposal: u8,
+    /// Transparent index to attach to the next `send_frame` call, then
+    /// cleared. `None` means the frame is fully opaque.
+    next_transparent: Option<u8>,
     /// Most recently received frame — held until either the next
     /// frame or a `flush()` establishes its display duration.
     buffered: Option<BufferedFrame>,
+}
+
+impl GifEncoder {
+    /// Build a fresh encoder from `CodecParameters`. Requires `width`,
+    /// `height`, and (if set) `pixel_format == Pal8`.
+    pub fn new(params: &CodecParameters) -> Result<Self> {
+        let width = params
+            .width
+            .ok_or_else(|| Error::invalid("GIF encoder: missing width"))?;
+        let height = params
+            .height
+            .ok_or_else(|| Error::invalid("GIF encoder: missing height"))?;
+        let pix = params.pixel_format.unwrap_or(PixelFormat::Pal8);
+        if pix != PixelFormat::Pal8 {
+            return Err(Error::unsupported(format!(
+                "GIF encoder: pixel format {:?} not supported — feed Pal8",
+                pix
+            )));
+        }
+        let mut output_params = params.clone();
+        output_params.media_type = MediaType::Video;
+        output_params.codec_id = CodecId::new(super::GIF_CODEC_ID);
+        output_params.pixel_format = Some(PixelFormat::Pal8);
+        output_params.width = Some(width);
+        output_params.height = Some(height);
+
+        let time_base = TimeBase::new(1, 100);
+
+        Ok(Self {
+            output_params,
+            width,
+            height,
+            time_base,
+            pending: VecDeque::new(),
+            frame_count: 0,
+            delay_cs: DEFAULT_DELAY_CS,
+            global_palette_set: false,
+            next_disposal: 0,
+            next_transparent: None,
+            buffered: None,
+        })
+    }
+
+    /// Set the GIF disposal method for the next frame emitted.
+    ///
+    /// Legal values:
+    /// * `0` — unspecified (no special disposal; the implementations in
+    ///   the wild treat this the same as 1).
+    /// * `1` — keep the rendered pixels on the canvas.
+    /// * `2` — restore the frame area to the background after display.
+    /// * `3` — restore the canvas to its state before the frame drew.
+    ///
+    /// The hint is consumed by the next `send_frame` call and then reset
+    /// to `0`.
+    pub fn set_next_disposal(&mut self, disposal: u8) {
+        self.next_disposal = disposal & 0x07;
+    }
+
+    /// Set the transparent-colour index for the next frame emitted, or
+    /// `None` to emit a fully opaque frame. Consumed by the next
+    /// `send_frame` call and then reset to `None`.
+    pub fn set_next_transparent_index(&mut self, idx: Option<u8>) {
+        self.next_transparent = idx;
+    }
 }
 
 impl Encoder for GifEncoder {
@@ -144,11 +206,16 @@ impl Encoder for GifEncoder {
                     self.emit(prev, delay);
                 }
 
+                let disposal = self.next_disposal;
+                let transparent_index = self.next_transparent.take();
+                self.next_disposal = 0;
                 self.buffered = Some(BufferedFrame {
                     palette,
                     min_code_size,
                     lzw_data,
                     pts_cs,
+                    disposal,
+                    transparent_index,
                 });
                 Ok(())
             }
@@ -178,8 +245,8 @@ impl GifEncoder {
             w: self.width,
             h: self.height,
             delay_cs,
-            disposal: 0,
-            transparent_index: None,
+            disposal: bf.disposal,
+            transparent_index: bf.transparent_index,
             interlaced: false,
             min_code_size: bf.min_code_size,
             local_palette: bf.palette.clone(),

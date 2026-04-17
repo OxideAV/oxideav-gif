@@ -65,5 +65,5 @@ pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) 
     register_containers(containers);
 }
 
-pub use encoder::DEFAULT_DELAY_CS;
+pub use encoder::{GifEncoder, DEFAULT_DELAY_CS};
 pub use lzw::{Lzw, LzwDecoder, LzwEncoder};
