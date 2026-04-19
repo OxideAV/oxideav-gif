@@ -32,7 +32,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod lzw;
 
-use oxideav_codec::CodecRegistry;
+use oxideav_codec::{CodecInfo, CodecRegistry};
 use oxideav_container::ContainerRegistry;
 use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
 
@@ -46,11 +46,11 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
         .with_intra_only(true)
         .with_max_size(65535, 65535)
         .with_pixel_format(PixelFormat::Pal8);
-    reg.register_both(
-        CodecId::new(GIF_CODEC_ID),
-        caps,
-        decoder::make_decoder,
-        encoder::make_encoder,
+    reg.register(
+        CodecInfo::new(CodecId::new(GIF_CODEC_ID))
+            .capabilities(caps)
+            .decoder(decoder::make_decoder)
+            .encoder(encoder::make_encoder),
     );
 }
 
