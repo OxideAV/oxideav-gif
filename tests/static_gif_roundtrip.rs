@@ -112,7 +112,9 @@ fn static_gif_preserves_indices_and_palette() {
 
     let cursor = Cursor::new(buf.clone());
     let boxed: Box<dyn oxideav_container::ReadSeek> = Box::new(cursor);
-    let mut demuxer = containers.open_demuxer("gif", boxed).expect("demux");
+    let mut demuxer = containers
+        .open_demuxer("gif", boxed, &oxideav_core::NullCodecResolver)
+        .expect("demux");
     let si = demuxer.streams()[0].clone();
     assert_eq!(si.params.width, Some(w));
     assert_eq!(si.params.height, Some(h));

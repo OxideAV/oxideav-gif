@@ -150,7 +150,9 @@ fn mux_then_decode(pkts: Vec<Packet>, op: CodecParameters) -> Vec<VideoFrame> {
     register_codecs(&mut codecs);
     let cursor = Cursor::new(buf);
     let boxed: Box<dyn oxideav_container::ReadSeek> = Box::new(cursor);
-    let mut demuxer = containers.open_demuxer("gif", boxed).expect("demux");
+    let mut demuxer = containers
+        .open_demuxer("gif", boxed, &oxideav_core::NullCodecResolver)
+        .expect("demux");
     let si = demuxer.streams()[0].clone();
     let mut decoder = codecs.make_decoder(&si.params).expect("decoder");
 
@@ -244,11 +246,7 @@ fn disposal_3_restores_previous_canvas() {
     let f2_idx = vec![3u8; (W * H) as usize];
     let f2 = frame_from_indices(f2_idx, 20);
 
-    let (pkts, op) = run_encoder(vec![
-        (0u8, None, f0),
-        (3u8, None, f1),
-        (0u8, Some(3u8), f2),
-    ]);
+    let (pkts, op) = run_encoder(vec![(0u8, None, f0), (3u8, None, f1), (0u8, Some(3u8), f2)]);
     let frames = mux_then_decode(pkts, op);
     assert_eq!(frames.len(), 3);
 

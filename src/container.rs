@@ -30,7 +30,8 @@ use std::io::{Read, SeekFrom, Write};
 
 use oxideav_container::{ContainerRegistry, Demuxer, Muxer, ProbeData, ReadSeek, WriteSeek};
 use oxideav_core::{
-    CodecId, CodecParameters, Error, MediaType, Packet, PixelFormat, Result, StreamInfo, TimeBase,
+    CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, PixelFormat, Result,
+    StreamInfo, TimeBase,
 };
 
 /// Codec id registered for GIF image frames.
@@ -53,7 +54,7 @@ fn probe(p: &ProbeData) -> u8 {
     0
 }
 
-fn open(mut input: Box<dyn ReadSeek>) -> Result<Box<dyn Demuxer>> {
+fn open(mut input: Box<dyn ReadSeek>, _codecs: &dyn CodecResolver) -> Result<Box<dyn Demuxer>> {
     let mut buf = Vec::new();
     input.seek(SeekFrom::Start(0))?;
     input.read_to_end(&mut buf)?;
