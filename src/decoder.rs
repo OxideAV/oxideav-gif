@@ -20,7 +20,7 @@
 //! already there"). Interlaced frames are unwoven from GIF's 4-pass
 //! order into progressive row storage before compositing.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
     VideoPlane,

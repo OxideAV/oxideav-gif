@@ -18,12 +18,12 @@ mod common;
 
 use std::io::Cursor;
 
-use oxideav_codec::CodecRegistry;
-use oxideav_container::{ContainerRegistry, WriteSeek};
+use oxideav_core::CodecRegistry;
 use oxideav_core::{
     CodecId, CodecParameters, Frame, MediaType, Packet, PixelFormat, TimeBase, VideoFrame,
     VideoPlane,
 };
+use oxideav_core::{ContainerRegistry, WriteSeek};
 use oxideav_gif::{register_codecs, register_containers, GifEncoder, GIF_CODEC_ID};
 
 use common::SharedSink;
@@ -108,16 +108,16 @@ fn run_encoder(spec: Vec<(u8, Option<u8>, VideoFrame)>) -> (Vec<Packet>, CodecPa
     for (disposal, transp, frame) in spec {
         enc.set_next_disposal(disposal);
         enc.set_next_transparent_index(transp);
-        oxideav_codec::Encoder::send_frame(&mut enc, &Frame::Video(frame)).expect("send");
-        while let Ok(p) = oxideav_codec::Encoder::receive_packet(&mut enc) {
+        oxideav_core::Encoder::send_frame(&mut enc, &Frame::Video(frame)).expect("send");
+        while let Ok(p) = oxideav_core::Encoder::receive_packet(&mut enc) {
             pkts.push(p);
         }
     }
-    oxideav_codec::Encoder::flush(&mut enc).expect("flush");
-    while let Ok(p) = oxideav_codec::Encoder::receive_packet(&mut enc) {
+    oxideav_core::Encoder::flush(&mut enc).expect("flush");
+    while let Ok(p) = oxideav_core::Encoder::receive_packet(&mut enc) {
         pkts.push(p);
     }
-    let op = oxideav_codec::Encoder::output_params(&enc).clone();
+    let op = oxideav_core::Encoder::output_params(&enc).clone();
     (pkts, op)
 }
 
@@ -149,7 +149,7 @@ fn mux_then_decode(pkts: Vec<Packet>, op: CodecParameters) -> Vec<VideoFrame> {
     let mut codecs = CodecRegistry::new();
     register_codecs(&mut codecs);
     let cursor = Cursor::new(buf);
-    let boxed: Box<dyn oxideav_container::ReadSeek> = Box::new(cursor);
+    let boxed: Box<dyn oxideav_core::ReadSeek> = Box::new(cursor);
     let mut demuxer = containers
         .open_demuxer("gif", boxed, &oxideav_core::NullCodecResolver)
         .expect("demux");

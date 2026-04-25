@@ -28,11 +28,11 @@
 
 use std::io::{Read, SeekFrom, Write};
 
-use oxideav_container::{ContainerRegistry, Demuxer, Muxer, ProbeData, ReadSeek, WriteSeek};
 use oxideav_core::{
     CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, PixelFormat, Result,
     StreamInfo, TimeBase,
 };
+use oxideav_core::{ContainerRegistry, Demuxer, Muxer, ProbeData, ReadSeek, WriteSeek};
 
 /// Codec id registered for GIF image frames.
 pub const GIF_CODEC_ID: &str = "gif";

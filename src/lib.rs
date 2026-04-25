@@ -32,9 +32,9 @@ pub mod decoder;
 pub mod encoder;
 pub mod lzw;
 
-use oxideav_codec::{CodecInfo, CodecRegistry};
-use oxideav_container::ContainerRegistry;
+use oxideav_core::ContainerRegistry;
 use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
+use oxideav_core::{CodecInfo, CodecRegistry};
 
 /// Codec id for GIF image frames.
 pub const GIF_CODEC_ID: &str = "gif";

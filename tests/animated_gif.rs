@@ -6,11 +6,11 @@ mod common;
 
 use std::io::Cursor;
 
-use oxideav_codec::CodecRegistry;
-use oxideav_container::{ContainerRegistry, WriteSeek};
+use oxideav_core::CodecRegistry;
 use oxideav_core::{
     CodecId, CodecParameters, Frame, MediaType, PixelFormat, TimeBase, VideoFrame, VideoPlane,
 };
+use oxideav_core::{ContainerRegistry, WriteSeek};
 use oxideav_gif::{register_codecs, register_containers, GIF_CODEC_ID};
 
 use common::SharedSink;
@@ -132,7 +132,7 @@ fn animated_5_frames_roundtrip() {
 
     // Demux + decode.
     let cursor = Cursor::new(buf.clone());
-    let boxed: Box<dyn oxideav_container::ReadSeek> = Box::new(cursor);
+    let boxed: Box<dyn oxideav_core::ReadSeek> = Box::new(cursor);
     let mut demuxer = containers
         .open_demuxer("gif", boxed, &oxideav_core::NullCodecResolver)
         .expect("demux");
