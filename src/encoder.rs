@@ -172,19 +172,8 @@ impl Encoder for GifEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
-                if v.format != PixelFormat::Pal8 {
-                    return Err(Error::invalid(format!(
-                        "GIF encoder: frame format {:?} != Pal8",
-                        v.format
-                    )));
-                }
-                if v.width != self.width || v.height != self.height {
-                    return Err(Error::invalid(
-                        "GIF encoder: frame dimensions do not match encoder config",
-                    ));
-                }
                 let palette = extract_palette(v)?;
-                let indices = pack_indices(v);
+                let indices = pack_indices(v, self.width, self.height);
                 let min_code_size = min_code_size_for(palette.len());
 
                 let mut lzw_data = Vec::new();
@@ -193,9 +182,11 @@ impl Encoder for GifEncoder {
                 enc.finish(&mut lzw_data);
 
                 // Normalise pts into centiseconds — our encoder time base.
+                // The frame's pts is in the encoder's input time_base
+                // (1/100s) by convention; callers wrap their own time base
+                // by passing pts pre-rescaled.
                 let pts_cs = v
                     .pts
-                    .map(|p| v.time_base.rescale(p, TimeBase::new(1, 100)))
                     .unwrap_or(self.frame_count as i64 * self.delay_cs as i64);
 
                 // If we have a buffered previous frame, resolve its
@@ -300,9 +291,9 @@ fn extract_palette(v: &VideoFrame) -> Result<Vec<[u8; 4]>> {
     Ok(out)
 }
 
-fn pack_indices(v: &VideoFrame) -> Vec<u8> {
-    let w = v.width as usize;
-    let h = v.height as usize;
+fn pack_indices(v: &VideoFrame, width: u32, height: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
     let plane = &v.planes[0];
     let stride = plane.stride;
     if stride == w {

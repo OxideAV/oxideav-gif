@@ -53,11 +53,7 @@ fn rgba_palette() -> Vec<u8> {
 
 fn solid_frame(idx: u8, pts_cs: i64) -> VideoFrame {
     VideoFrame {
-        format: PixelFormat::Pal8,
-        width: W,
-        height: H,
         pts: Some(pts_cs),
-        time_base: TimeBase::new(1, 100),
         planes: vec![
             VideoPlane {
                 stride: W as usize,
@@ -74,11 +70,7 @@ fn solid_frame(idx: u8, pts_cs: i64) -> VideoFrame {
 fn frame_from_indices(indices: Vec<u8>, pts_cs: i64) -> VideoFrame {
     assert_eq!(indices.len(), (W * H) as usize);
     VideoFrame {
-        format: PixelFormat::Pal8,
-        width: W,
-        height: H,
         pts: Some(pts_cs),
-        time_base: TimeBase::new(1, 100),
         planes: vec![
             VideoPlane {
                 stride: W as usize,

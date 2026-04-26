@@ -39,11 +39,7 @@ fn build_pal8_frame(w: u32, h: u32, n_colors: usize) -> VideoFrame {
     }
     let palette = build_palette(n_colors);
     VideoFrame {
-        format: PixelFormat::Pal8,
-        width: w,
-        height: h,
         pts: Some(0),
-        time_base: TimeBase::new(1, 100),
         planes: vec![
             VideoPlane {
                 stride: w as usize,
@@ -127,9 +123,10 @@ fn static_gif_preserves_indices_and_palette() {
         _ => panic!("non-video frame"),
     };
 
-    assert_eq!(out_frame.format, PixelFormat::Pal8);
-    assert_eq!(out_frame.width, w);
-    assert_eq!(out_frame.height, h);
+    // Stream-level format/dimensions live on `si.params`, not the frame.
+    assert_eq!(si.params.pixel_format, Some(PixelFormat::Pal8));
+    assert_eq!(si.params.width, Some(w));
+    assert_eq!(si.params.height, Some(h));
 
     let indices_in = &frame_in.planes[0].data;
     let indices_out = &out_frame.planes[0].data;

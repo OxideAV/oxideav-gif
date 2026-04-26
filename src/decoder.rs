@@ -22,8 +22,7 @@
 
 use oxideav_core::Decoder;
 use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
-    VideoPlane,
+    CodecId, CodecParameters, Error, Frame, Packet, Result, TimeBase, VideoFrame, VideoPlane,
 };
 
 use crate::container::{decode_frame_payload, extradata_to_palette};
@@ -190,11 +189,7 @@ impl Decoder for GifDecoder {
         ];
 
         let out = VideoFrame {
-            format: PixelFormat::Pal8,
-            width: self.width,
-            height: self.height,
             pts: pkt.pts,
-            time_base: pkt.time_base,
             planes,
         };
 

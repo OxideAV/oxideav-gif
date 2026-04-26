@@ -32,11 +32,7 @@ fn build_frame(w: u32, h: u32, phase: u32, pts_cs: i64) -> VideoFrame {
         }
     }
     VideoFrame {
-        format: PixelFormat::Pal8,
-        width: w,
-        height: h,
         pts: Some(pts_cs),
-        time_base: TimeBase::new(1, 100),
         planes: vec![
             VideoPlane {
                 stride: w as usize,
@@ -175,9 +171,8 @@ fn animated_5_frames_roundtrip() {
     // indices (they've been composited onto the canvas, but since
     // x=y=0 and w/h cover the whole canvas, the composite is
     // index-identity).
+    // Stream-level dimensions are validated via si.params above.
     for (i, (got, want)) in decoded.iter().zip(input_frames.iter()).enumerate() {
-        assert_eq!(got.width, w);
-        assert_eq!(got.height, h);
         assert_eq!(
             got.planes[0].data, want.planes[0].data,
             "frame {} indices differ",
