@@ -15,3 +15,11 @@ categories = ["multimedia::encoding", "multimedia::images"]
 [dependencies]
 oxideav-core = "0.1"
 oxideav-pixfmt = "0.1"
+
+[dev-dependencies]
+# `tests/external_roundtrip.rs` `dlopen`s the system-installed giflib at
+# runtime to drive a four-stage cross-codec round-trip
+# (oxideav-encode → giflib-decode → giflib-encode → oxideav-decode).
+# No giflib source is pulled into the workspace dep tree; the test
+# silently skips when the shared library is missing.
+libloading = "0.8"
