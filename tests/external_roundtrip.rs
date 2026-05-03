@@ -145,7 +145,12 @@ fn oxideav_encode(frame_in: VideoFrame, w: u32, h: u32) -> Vec<u8> {
         muxer.write_packet(&pkt).expect("write_packet");
         muxer.write_trailer().expect("write_trailer");
     }
-    sink_data.lock().unwrap().clone()
+    // Bind the lock guard to a local so the temporary `MutexGuard` is
+    // dropped before `sink_data` itself is — otherwise the implicit
+    // tail-expression lifetime extends the borrow past `sink_data`'s
+    // scope and the borrow-checker rejects it (E0597).
+    let out = sink_data.lock().unwrap().clone();
+    out
 }
 
 /// Decode a GIF byte string through oxideav-gif (demuxer + decoder).
