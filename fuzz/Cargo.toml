@@ -1,0 +1,49 @@
+[package]
+name = "oxideav-gif-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxideav-core = "0.1"
+# libloading is the only giflib interop: each cross-decode harness
+# `dlopen`s the system-installed giflib at startup. No `*-sys` crate,
+# no giflib source pulled into the dep tree. Harnesses skip silently
+# when giflib isn't installed (see fuzz/src/lib.rs).
+libloading = "0.8"
+
+[dependencies.oxideav-gif]
+path = ".."
+
+[lib]
+name = "oxideav_gif_fuzz"
+path = "src/lib.rs"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "gif_self_roundtrip"
+path = "fuzz_targets/gif_self_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "giflib_encode_oxideav_decode"
+path = "fuzz_targets/giflib_encode_oxideav_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "oxideav_encode_giflib_decode"
+path = "fuzz_targets/oxideav_encode_giflib_decode.rs"
+test = false
+doc = false
