@@ -78,7 +78,7 @@ fn build_random_indices(w: u32, h: u32, n_colors: usize, rng: &mut Lcg) -> Vec<u
     out
 }
 
-fn build_pal8_frame(width: u32, height: u32, indices: &[u8], palette: &[[u8; 4]]) -> VideoFrame {
+fn build_pal8_frame(width: u32, _height: u32, indices: &[u8], palette: &[[u8; 4]]) -> VideoFrame {
     let mut palette_plane = Vec::with_capacity(256 * 4);
     for i in 0..256 {
         if i < palette.len() {
@@ -556,7 +556,7 @@ mod giflib {
             let e_close: Symbol<EGifCloseFileFn> = l.get(b"EGifCloseFile").ok()?;
 
             // giflib requires a power-of-two-sized colormap (2,4,...,256).
-            let padded = palette_rgb.len().next_power_of_two().max(2).min(256);
+            let padded = palette_rgb.len().next_power_of_two().clamp(2, 256);
             let mut colors: Vec<GifColorType> = Vec::with_capacity(padded);
             for c in palette_rgb {
                 colors.push(GifColorType {
