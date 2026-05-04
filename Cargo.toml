@@ -13,8 +13,22 @@ keywords = ["multimedia", "image", "gif", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 
 [dependencies]
-oxideav-core = "0.1"
-oxideav-pixfmt = "0.1"
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-gif` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely. Without `registry` the crate exposes a free-standing
+# `decode_gif` / `encode_gif` API plus local `GifImage` / `GifFrame` /
+# `GifError` types and never references `oxideav-core`.
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+
+# Wires up the codec / encoder / decoder / demuxer / muxer trait
+# implementations against `oxideav-core` so the crate can plug into the
+# `oxideav` framework registry. Default-on; turn off for image-library
+# use-cases that just want the standalone `decode_gif` API.
+registry = ["dep:oxideav-core"]
 
 [dev-dependencies]
 # `tests/external_roundtrip.rs` `dlopen`s the system-installed giflib at

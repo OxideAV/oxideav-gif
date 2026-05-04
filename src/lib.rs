@@ -24,46 +24,46 @@
 //!
 //! The encoder requires `Pal8` input. The DAG pipeline resolver will
 //! auto-insert a pixfmt conversion when the upstream frame is RGBA.
+//!
+//! ## Standalone (no `oxideav-core`) mode
+//!
+//! `oxideav-core` is gated behind the default-on `registry` feature. With
+//! the feature off, the crate exposes a free-standing
+//! [`decode_gif`] / [`encode_gif`] API plus crate-local
+//! [`GifImage`] / [`GifFrame`] / [`GifError`] types and never references
+//! `oxideav-core`. Image-library consumers depend on this crate with
+//! `default-features = false` to skip the framework dependency tree
+//! entirely.
 
 #![allow(clippy::needless_range_loop)]
+// When built without the `registry` feature, the trait wrappers don't
+// exist so a few helpers go unused. Suppress crate-wide rather than
+// gating each individually.
+#![cfg_attr(not(feature = "registry"), allow(dead_code))]
 
 pub mod container;
 pub mod decoder;
 pub mod encoder;
+pub mod error;
+pub mod image;
 pub mod lzw;
-
-use oxideav_core::ContainerRegistry;
-use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
-use oxideav_core::{CodecInfo, CodecRegistry};
+#[cfg(feature = "registry")]
+pub mod registry;
 
 /// Codec id for GIF image frames.
 pub const GIF_CODEC_ID: &str = "gif";
 
-/// Register both the encoder and the decoder under codec id `"gif"`.
-pub fn register_codecs(reg: &mut CodecRegistry) {
-    let caps = CodecCapabilities::video("gif_sw")
-        .with_lossless(true)
-        .with_intra_only(true)
-        .with_max_size(65535, 65535)
-        .with_pixel_format(PixelFormat::Pal8);
-    reg.register(
-        CodecInfo::new(CodecId::new(GIF_CODEC_ID))
-            .capabilities(caps)
-            .decoder(decoder::make_decoder)
-            .encoder(encoder::make_encoder),
-    );
-}
-
-/// Register the GIF container's demuxer + muxer + probe + extension.
-pub fn register_containers(reg: &mut ContainerRegistry) {
-    container::register(reg);
-}
-
-/// Combined registration — matches the shape of `oxideav_webp::register` etc.
-pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) {
-    register_codecs(codecs);
-    register_containers(containers);
-}
-
-pub use encoder::{GifEncoder, DEFAULT_DELAY_CS};
+// Public unconditional API — works whether or not `registry` is enabled.
+pub use decoder::decode_gif;
+pub use encoder::{encode_gif, GifEncoderFrame, DEFAULT_DELAY_CS};
+pub use error::{GifError, Result};
+pub use image::{GifFrame, GifImage};
 pub use lzw::{Lzw, LzwDecoder, LzwEncoder};
+
+// Public registry-gated API — keeps the framework integration surface
+// (Decoder/Encoder/Demuxer/Muxer trait impls, `register*` helpers,
+// `GifEncoder` trait wrapper) behind the default-on `registry` feature
+// so image-library callers can build the crate without dragging in
+// `oxideav-core`.
+#[cfg(feature = "registry")]
+pub use registry::{register, register_codecs, register_containers, GifEncoder};

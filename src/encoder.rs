@@ -1,310 +1,284 @@
 //! GIF frame encoder.
 //!
-//! Accepts `Pal8` video frames. Plane 0 carries palette indices (1 byte
-//! per pixel); plane 1 carries a packed RGBA palette (4 bytes per entry,
-//! up to 256 entries). The encoder:
+//! The standalone API ([`encode_gif`]) takes a sequence of
+//! [`GifFrame`]s and emits a complete GIF89a byte stream. The first
+//! frame's palette becomes the global colour table; every frame can
+//! still carry its own palette and the muxer-side path will emit a
+//! local colour table when those palettes diverge.
 //!
-//! 1. Picks an LZW minimum code size (`ceil(log2(palette_len))`, clamped
-//!    to `[2, 8]`).
-//! 2. Compresses the index plane with [`Lzw`], padding the input stride
-//!    out of the way so the packed output is plain
-//!    `width*height` bytes of raw indices.
-//! 3. Emits the result as an `OGIF` packet matching the container's
-//!    [`decode_frame_payload`](crate::container::decode_frame_payload)
-//!    expectations.
-//!
-//! The first frame emitted writes its palette into `output_params.extradata`
-//! via the muxer path (muxer reads `CodecParameters::extradata`). Every
-//! frame also emits a local palette entry by default — that's the simplest
-//! way to stay correct when consumers stitch frames with different
-//! palettes. Callers who want a global-palette-only GIF can clear the
-//! local palette themselves between calls.
+//! The [`crate::registry`]-gated [`Encoder`](oxideav_core::Encoder)
+//! trait wrapper accepts `Pal8` `VideoFrame`s (plane 0 = indices,
+//! plane 1 = packed RGBA palette) and emits container packets via the
+//! same code path.
 //!
 //! ## Per-frame disposal and transparency
 //!
-//! The [`Encoder`] trait only carries pixel data + pts, so per-frame GIF
-//! metadata (disposal method, transparent index) has no slot in the
-//! `Frame` model. Callers that need to emit those have two options:
-//!
-//! * Build the encoder directly via [`GifEncoder::new`] (instead of
-//!   through [`CodecRegistry`]) and call [`GifEncoder::set_next_disposal`]
-//!   / [`GifEncoder::set_next_transparent_index`] before each
-//!   `send_frame`. Both settings are consumed by the next frame and
-//!   reset to their defaults afterwards — there is no "sticky" mode.
-//! * Write the GIF bytes directly via the container layer, skipping the
-//!   encoder.
-//!
-//! The factory-built encoder always emits disposal = 0 and no transparent
-//! index; this is the safe behaviour for the "paint every frame in full
-//! over a static canvas" case.
+//! The standalone `encode_gif` API takes per-frame `disposal` /
+//! `transparent_index` values directly via [`GifEncoderFrame`]. The
+//! framework `Encoder` trait only carries pixel data + pts, so the
+//! [`GifEncoder`] type exposes
+//! [`GifEncoder::set_next_disposal`] / [`GifEncoder::set_next_transparent_index`]
+//! side-channel hooks consumed by the next `send_frame` call.
 
-use std::collections::VecDeque;
-
-use oxideav_core::Encoder;
-use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, MediaType, Packet, PixelFormat, Result, TimeBase,
-    VideoFrame,
-};
-
-use crate::container::{encode_frame_payload, palette_to_extradata, ParsedFrame};
+use crate::container::{encode_frame_payload, ParsedFrame};
+use crate::error::{GifError as Error, Result};
+use crate::image::GifFrame;
 use crate::lzw::Lzw;
+
+// Backward-compat re-export: existing callers reach for
+// `oxideav_gif::encoder::make_encoder` to construct a framework-side
+// encoder. Keep that path live by re-exporting the registry-side
+// factory.
+#[cfg(feature = "registry")]
+pub use crate::registry::{make_encoder, GifEncoder};
 
 /// Default frame delay when the caller doesn't specify one, in GIF time
 /// units (1/100 s). 10 cs ≈ 10 fps — a sensible baseline that every
 /// viewer handles.
 pub const DEFAULT_DELAY_CS: u16 = 10;
 
-pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
-    Ok(Box::new(GifEncoder::new(params)?))
+/// Per-frame metadata accepted by [`encode_gif`]. Carries the index
+/// plane + palette plus the GIF-specific knobs (disposal /
+/// transparency / interlace) the standalone surface can't fold onto
+/// the framework's `Frame` model.
+#[derive(Clone, Debug)]
+pub struct GifEncoderFrame {
+    /// The frame to encode. `width` / `height` must match the canvas;
+    /// `delay_cs` becomes the GCE delay.
+    pub frame: GifFrame,
+    /// Disposal method (`0` unspecified, `1` keep, `2` background,
+    /// `3` previous). See the GIF89a spec §23.
+    pub disposal: u8,
+    /// Optional transparent palette index. `None` = fully opaque.
+    pub transparent_index: Option<u8>,
+    /// If `true`, the frame is encoded as a 4-pass interlace.
+    /// Defaults to `false`.
+    pub interlaced: bool,
 }
 
-/// A frame that has been LZW-compressed but whose delay is still
-/// unknown (we only know how long it's displayed once the NEXT frame
-/// arrives with a later pts). We carry everything we need to serialise
-/// it to an `OGIF` payload once the delay is resolved.
-struct BufferedFrame {
-    palette: Vec<[u8; 4]>,
-    min_code_size: u8,
-    lzw_data: Vec<u8>,
-    pts_cs: i64,
-    disposal: u8,
-    transparent_index: Option<u8>,
-}
-
-/// Concrete GIF encoder.
-///
-/// Prefer [`make_encoder`] when working through [`CodecRegistry`]. Use
-/// `GifEncoder` directly when you need per-frame disposal or transparency
-/// control — the [`Encoder`] trait exposes no side-channel for those, so
-/// they have to be set on the concrete type just before `send_frame`.
-pub struct GifEncoder {
-    output_params: CodecParameters,
-    width: u32,
-    height: u32,
-    time_base: TimeBase,
-    pending: VecDeque<Packet>,
-    frame_count: u64,
-    delay_cs: u16,
-    global_palette_set: bool,
-    /// Disposal to attach to the next `send_frame` call, then cleared.
-    next_disposal: u8,
-    /// Transparent index to attach to the next `send_frame` call, then
-    /// cleared. `None` means the frame is fully opaque.
-    next_transparent: Option<u8>,
-    /// Most recently received frame — held until either the next
-    /// frame or a `flush()` establishes its display duration.
-    buffered: Option<BufferedFrame>,
-}
-
-impl GifEncoder {
-    /// Build a fresh encoder from `CodecParameters`. Requires `width`,
-    /// `height`, and (if set) `pixel_format == Pal8`.
-    pub fn new(params: &CodecParameters) -> Result<Self> {
-        let width = params
-            .width
-            .ok_or_else(|| Error::invalid("GIF encoder: missing width"))?;
-        let height = params
-            .height
-            .ok_or_else(|| Error::invalid("GIF encoder: missing height"))?;
-        let pix = params.pixel_format.unwrap_or(PixelFormat::Pal8);
-        if pix != PixelFormat::Pal8 {
-            return Err(Error::unsupported(format!(
-                "GIF encoder: pixel format {:?} not supported — feed Pal8",
-                pix
-            )));
-        }
-        let mut output_params = params.clone();
-        output_params.media_type = MediaType::Video;
-        output_params.codec_id = CodecId::new(super::GIF_CODEC_ID);
-        output_params.pixel_format = Some(PixelFormat::Pal8);
-        output_params.width = Some(width);
-        output_params.height = Some(height);
-
-        let time_base = TimeBase::new(1, 100);
-
-        Ok(Self {
-            output_params,
-            width,
-            height,
-            time_base,
-            pending: VecDeque::new(),
-            frame_count: 0,
-            delay_cs: DEFAULT_DELAY_CS,
-            global_palette_set: false,
-            next_disposal: 0,
-            next_transparent: None,
-            buffered: None,
-        })
-    }
-
-    /// Set the GIF disposal method for the next frame emitted.
-    ///
-    /// Legal values:
-    /// * `0` — unspecified (no special disposal; the implementations in
-    ///   the wild treat this the same as 1).
-    /// * `1` — keep the rendered pixels on the canvas.
-    /// * `2` — restore the frame area to the background after display.
-    /// * `3` — restore the canvas to its state before the frame drew.
-    ///
-    /// The hint is consumed by the next `send_frame` call and then reset
-    /// to `0`.
-    pub fn set_next_disposal(&mut self, disposal: u8) {
-        self.next_disposal = disposal & 0x07;
-    }
-
-    /// Set the transparent-colour index for the next frame emitted, or
-    /// `None` to emit a fully opaque frame. Consumed by the next
-    /// `send_frame` call and then reset to `None`.
-    pub fn set_next_transparent_index(&mut self, idx: Option<u8>) {
-        self.next_transparent = idx;
-    }
-}
-
-impl Encoder for GifEncoder {
-    fn codec_id(&self) -> &CodecId {
-        &self.output_params.codec_id
-    }
-
-    fn output_params(&self) -> &CodecParameters {
-        &self.output_params
-    }
-
-    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
-        match frame {
-            Frame::Video(v) => {
-                let palette = extract_palette(v)?;
-                let indices = pack_indices(v, self.width, self.height);
-                let min_code_size = min_code_size_for(palette.len());
-
-                let mut lzw_data = Vec::new();
-                let mut enc = Lzw::encoder(min_code_size)?;
-                enc.write(&indices, &mut lzw_data);
-                enc.finish(&mut lzw_data);
-
-                // Normalise pts into centiseconds — our encoder time base.
-                // The frame's pts is in the encoder's input time_base
-                // (1/100s) by convention; callers wrap their own time base
-                // by passing pts pre-rescaled.
-                let pts_cs = v
-                    .pts
-                    .unwrap_or(self.frame_count as i64 * self.delay_cs as i64);
-
-                // If we have a buffered previous frame, resolve its
-                // delay from the pts-delta and emit it as a packet.
-                if let Some(prev) = self.buffered.take() {
-                    let delta = (pts_cs - prev.pts_cs).max(1);
-                    let delay = delta.min(u16::MAX as i64) as u16;
-                    self.emit(prev, delay);
-                }
-
-                let disposal = self.next_disposal;
-                let transparent_index = self.next_transparent.take();
-                self.next_disposal = 0;
-                self.buffered = Some(BufferedFrame {
-                    palette,
-                    min_code_size,
-                    lzw_data,
-                    pts_cs,
-                    disposal,
-                    transparent_index,
-                });
-                Ok(())
-            }
-            _ => Err(Error::invalid("GIF encoder: video frames only")),
-        }
-    }
-
-    fn receive_packet(&mut self) -> Result<Packet> {
-        self.pending.pop_front().ok_or(Error::NeedMore)
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        if let Some(prev) = self.buffered.take() {
-            // The last frame uses the default delay — nothing after it
-            // defines the display duration.
-            self.emit(prev, self.delay_cs);
-        }
-        Ok(())
-    }
-}
-
-impl GifEncoder {
-    fn emit(&mut self, bf: BufferedFrame, delay_cs: u16) {
-        let parsed = ParsedFrame {
-            x: 0,
-            y: 0,
-            w: self.width,
-            h: self.height,
-            delay_cs,
-            disposal: bf.disposal,
-            transparent_index: bf.transparent_index,
+impl From<GifFrame> for GifEncoderFrame {
+    fn from(frame: GifFrame) -> Self {
+        Self {
+            frame,
+            disposal: 0,
+            transparent_index: None,
             interlaced: false,
-            min_code_size: bf.min_code_size,
-            local_palette: bf.palette.clone(),
-            lzw_data: bf.lzw_data,
-        };
-        if !self.global_palette_set {
-            self.output_params.extradata = palette_to_extradata(&bf.palette);
-            self.global_palette_set = true;
         }
-        let data = encode_frame_payload(&parsed, (self.width, self.height));
-        let mut pkt = Packet::new(0, self.time_base, data);
-        pkt.pts = Some(bf.pts_cs);
-        pkt.dts = pkt.pts;
-        pkt.duration = Some(delay_cs as i64);
-        pkt.flags.keyframe = true;
-        self.pending.push_back(pkt);
-        self.frame_count += 1;
+    }
+}
+
+/// Encode a sequence of [`GifEncoderFrame`]s as a complete GIF89a file.
+/// Standalone (no `oxideav-core`) entry point.
+///
+/// All frames must share the same `width` / `height` (= the canvas
+/// size). The first frame's palette becomes the global colour table;
+/// `loop_count` controls the NETSCAPE2.0 extension (`Some(0)` = loop
+/// forever, `None` = no loop extension at all).
+pub fn encode_gif(frames: &[GifEncoderFrame], loop_count: Option<u16>) -> Result<Vec<u8>> {
+    if frames.is_empty() {
+        return Err(Error::invalid("GIF encoder: no frames"));
+    }
+    let canvas_w = frames[0].frame.width;
+    let canvas_h = frames[0].frame.height;
+    for f in &frames[1..] {
+        if f.frame.width != canvas_w || f.frame.height != canvas_h {
+            return Err(Error::invalid(
+                "GIF encoder: every frame's width / height must match the first frame",
+            ));
+        }
+    }
+
+    let gct = frames[0].frame.palette.clone();
+    let gct_present = !gct.is_empty();
+    let gct_size_exp = if gct_present {
+        size_exp_for(gct.len())
+    } else {
+        0
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    // Signature.
+    buf.extend_from_slice(b"GIF89a");
+    // Logical Screen Descriptor.
+    buf.extend_from_slice(&(canvas_w as u16).to_le_bytes());
+    buf.extend_from_slice(&(canvas_h as u16).to_le_bytes());
+    let mut packed: u8 = 0;
+    if gct_present {
+        packed |= 0x80;
+        packed |= 0x70; // color resolution = 7 (common default)
+        packed |= (gct_size_exp as u8) & 0x07;
+    }
+    buf.push(packed);
+    buf.push(0); // background color index
+    buf.push(0); // pixel aspect ratio
+
+    if gct_present {
+        let padded_len = 1usize << (gct_size_exp + 1);
+        write_palette(&mut buf, &gct, padded_len);
+    }
+
+    // NETSCAPE2.0 loop extension when requested.
+    if let Some(lc) = loop_count {
+        buf.push(0x21);
+        buf.push(0xFF);
+        buf.push(0x0B);
+        buf.extend_from_slice(b"NETSCAPE2.0");
+        buf.push(0x03);
+        buf.push(0x01);
+        buf.extend_from_slice(&lc.to_le_bytes());
+        buf.push(0x00);
+    }
+
+    for f in frames {
+        write_frame(&mut buf, f, &gct)?;
+    }
+
+    // Trailer.
+    buf.push(0x3B);
+    Ok(buf)
+}
+
+fn write_frame(buf: &mut Vec<u8>, ef: &GifEncoderFrame, global: &[[u8; 4]]) -> Result<()> {
+    // Graphic Control Extension.
+    buf.push(0x21);
+    buf.push(0xF9);
+    buf.push(0x04);
+    let mut flags = 0u8;
+    flags |= (ef.disposal & 0x07) << 2;
+    if ef.transparent_index.is_some() {
+        flags |= 0x01;
+    }
+    buf.push(flags);
+    buf.extend_from_slice(&ef.frame.delay_cs.to_le_bytes());
+    buf.push(ef.transparent_index.unwrap_or(0));
+    buf.push(0); // block terminator
+
+    // Image Descriptor.
+    buf.push(0x2C);
+    buf.extend_from_slice(&0u16.to_le_bytes()); // x
+    buf.extend_from_slice(&0u16.to_le_bytes()); // y
+    buf.extend_from_slice(&(ef.frame.width as u16).to_le_bytes());
+    buf.extend_from_slice(&(ef.frame.height as u16).to_le_bytes());
+    let has_local = ef.frame.palette != global;
+    let mut packed: u8 = 0;
+    let lct_exp = if has_local {
+        size_exp_for(ef.frame.palette.len())
+    } else {
+        0
+    };
+    if has_local {
+        packed |= 0x80;
+        packed |= (lct_exp as u8) & 0x07;
+    }
+    if ef.interlaced {
+        packed |= 0x40;
+    }
+    buf.push(packed);
+    if has_local {
+        let padded = 1usize << (lct_exp + 1);
+        write_palette(buf, &ef.frame.palette, padded);
+    } else if global.is_empty() {
+        return Err(Error::invalid(
+            "GIF muxer: frame has no local palette and no global palette",
+        ));
+    }
+
+    // LZW min-code-size + compressed sub-block chain.
+    let min_code_size = min_code_size_for(ef.frame.palette.len());
+    buf.push(min_code_size);
+    let mut enc = Lzw::encoder(min_code_size)?;
+    let mut lzw_data = Vec::new();
+    enc.write(&ef.frame.indices, &mut lzw_data);
+    enc.finish(&mut lzw_data);
+    write_sub_blocks(buf, &lzw_data);
+    Ok(())
+}
+
+fn write_palette(buf: &mut Vec<u8>, pal: &[[u8; 4]], padded_len: usize) {
+    for i in 0..padded_len {
+        if i < pal.len() {
+            buf.push(pal[i][0]);
+            buf.push(pal[i][1]);
+            buf.push(pal[i][2]);
+        } else {
+            buf.push(0);
+            buf.push(0);
+            buf.push(0);
+        }
+    }
+}
+
+fn write_sub_blocks(buf: &mut Vec<u8>, data: &[u8]) {
+    let mut p = 0;
+    while p < data.len() {
+        let chunk = (data.len() - p).min(255);
+        buf.push(chunk as u8);
+        buf.extend_from_slice(&data[p..p + chunk]);
+        p += chunk;
+    }
+    buf.push(0);
+}
+
+fn size_exp_for(n: usize) -> u32 {
+    // GIF stores size-1 as `2^(size+1)` entries, so for N colours the
+    // exponent is `ceil(log2(N)) - 1`, clamped to `[0, 7]`.
+    if n <= 2 {
+        0
+    } else if n <= 4 {
+        1
+    } else if n <= 8 {
+        2
+    } else if n <= 16 {
+        3
+    } else if n <= 32 {
+        4
+    } else if n <= 64 {
+        5
+    } else if n <= 128 {
+        6
+    } else {
+        7
     }
 }
 
 /// Compute `ceil(log2(max(2, palette_len)))`, clamped to `[2, 8]`. GIF
 /// requires the LZW initial-code-width to fit the whole palette plus
 /// the two reserved codes, and the minimum alphabet width is 2 bits.
-fn min_code_size_for(palette_len: usize) -> u8 {
+pub(crate) fn min_code_size_for(palette_len: usize) -> u8 {
     let n = palette_len.max(2) as u32;
     let bits = 32 - (n - 1).leading_zeros();
     bits.clamp(2, 8) as u8
 }
 
-fn extract_palette(v: &VideoFrame) -> Result<Vec<[u8; 4]>> {
-    if v.planes.len() < 2 {
-        return Err(Error::invalid(
-            "GIF encoder: Pal8 frame missing palette plane",
-        ));
-    }
-    let p = &v.planes[1];
-    // The palette plane is RGBA bytes, padded to at most 256 entries.
-    let n = p.data.len() / 4;
-    let mut out = Vec::with_capacity(n.min(256));
-    for i in 0..n.min(256) {
-        out.push([
-            p.data[i * 4],
-            p.data[i * 4 + 1],
-            p.data[i * 4 + 2],
-            p.data[i * 4 + 3],
-        ]);
-    }
-    // Historically we tried to trim trailing zero-alpha entries here to
-    // shrink the palette, but palette entries can legitimately be black,
-    // so we keep what the caller gave us.
-    Ok(out)
-}
+/// Compress one [`GifFrame`]'s indices into LZW + container payload
+/// bytes ready for the framework `Muxer`. Used by the registry-side
+/// `Encoder` trait impl.
+pub(crate) fn frame_to_payload(
+    frame: &GifFrame,
+    canvas: (u32, u32),
+    disposal: u8,
+    transparent_index: Option<u8>,
+) -> Vec<u8> {
+    let min_code_size = min_code_size_for(frame.palette.len());
+    let mut enc = Lzw::encoder(min_code_size).expect("min_code_size_for clamps to 2..=8");
+    let mut lzw_data = Vec::new();
+    enc.write(&frame.indices, &mut lzw_data);
+    enc.finish(&mut lzw_data);
 
-fn pack_indices(v: &VideoFrame, width: u32, height: u32) -> Vec<u8> {
-    let w = width as usize;
-    let h = height as usize;
-    let plane = &v.planes[0];
-    let stride = plane.stride;
-    if stride == w {
-        plane.data[..w * h].to_vec()
-    } else {
-        let mut out = Vec::with_capacity(w * h);
-        for row in 0..h {
-            out.extend_from_slice(&plane.data[row * stride..row * stride + w]);
-        }
-        out
-    }
+    let parsed = ParsedFrame {
+        x: 0,
+        y: 0,
+        w: frame.width,
+        h: frame.height,
+        delay_cs: frame.delay_cs,
+        disposal,
+        transparent_index,
+        interlaced: false,
+        min_code_size,
+        local_palette: frame.palette.clone(),
+        lzw_data,
+    };
+    encode_frame_payload(&parsed, canvas)
 }
 
 #[cfg(test)]

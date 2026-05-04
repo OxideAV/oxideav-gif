@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Standalone-friendly retrofit: `oxideav-core` is now gated behind the
+  default-on `registry` feature. Image-library consumers can depend on
+  `oxideav-gif` with `default-features = false` to skip the framework
+  dependency tree entirely. The standalone API exposes
+  `decode_gif` / `encode_gif` plus crate-local `GifImage` / `GifFrame`
+  / `GifEncoderFrame` / `GifError` types using std primitives only.
+  `Decoder` / `Encoder` / `Demuxer` / `Muxer` trait impls and
+  `register*` helpers stay behind the `registry` feature gate.
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-gif/compare/v0.0.6...v0.0.7) - 2026-05-03
 
 ### Fixed

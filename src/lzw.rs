@@ -30,7 +30,7 @@
 //!
 //! Both sides restrict code width to `2..=12` bits.
 
-use oxideav_core::{Error, Result};
+use crate::error::{GifError as Error, Result};
 
 const MAX_CODE_WIDTH: u8 = 12;
 const MAX_DICT_LEN: usize = 1 << MAX_CODE_WIDTH; // 4096

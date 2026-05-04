@@ -1,4 +1,4 @@
-//! GIF container (demuxer + muxer).
+//! GIF container parser + (registry-only) demuxer / muxer.
 //!
 //! A GIF file is a header (signature + Logical Screen Descriptor + optional
 //! Global Color Table) followed by an unbounded chain of blocks:
@@ -17,119 +17,21 @@
 //! a sub-block chain: `<len><len bytes of compressed data>...<0>`. Extension
 //! blocks use the same sub-block chain after their header.
 //!
-//! The demuxer emits one packet per image frame (there is exactly one image
-//! block per frame; the preceding GCE binds to it). Every packet's payload
-//! is a self-contained frame record the decoder consumes — see
-//! [`encode_frame_payload`] / [`decode_frame_payload`] for the layout.
-//!
-//! The muxer accepts packets produced by the encoder and emits a GIF89a
-//! file. When more than one packet is written it also emits a NETSCAPE2.0
-//! application extension to set the loop count (0 = infinite).
+//! [`parse_gif`] walks the on-disk bytes and returns a [`ParsedFile`]
+//! the standalone decoder consumes directly. The [`Demuxer`] /
+//! [`Muxer`] trait impls in [`crate::registry`] reuse the same
+//! parser; they're gated behind the `registry` feature so the parser
+//! itself stays framework-free.
 
-use std::io::{Read, SeekFrom, Write};
-
-use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, PixelFormat, Result,
-    StreamInfo, TimeBase,
-};
-use oxideav_core::{ContainerRegistry, Demuxer, Muxer, ProbeData, ReadSeek, WriteSeek};
+use crate::error::{GifError as Error, Result};
 
 /// Codec id registered for GIF image frames.
 pub const GIF_CODEC_ID: &str = "gif";
 
-pub fn register(reg: &mut ContainerRegistry) {
-    reg.register_demuxer("gif", open);
-    reg.register_muxer("gif", open_muxer);
-    reg.register_extension("gif", "gif");
-    reg.register_probe("gif", probe);
-}
-
-fn probe(p: &ProbeData) -> u8 {
-    if p.buf.len() < 6 {
-        return 0;
-    }
-    if &p.buf[0..6] == b"GIF87a" || &p.buf[0..6] == b"GIF89a" {
-        return 100;
-    }
-    0
-}
-
-fn open(mut input: Box<dyn ReadSeek>, _codecs: &dyn CodecResolver) -> Result<Box<dyn Demuxer>> {
-    let mut buf = Vec::new();
-    input.seek(SeekFrom::Start(0))?;
-    input.read_to_end(&mut buf)?;
-    drop(input);
-    let parsed = parse_gif(&buf)?;
-
-    let mut params = CodecParameters::video(CodecId::new(GIF_CODEC_ID));
-    params.media_type = MediaType::Video;
-    params.width = Some(parsed.canvas_w);
-    params.height = Some(parsed.canvas_h);
-    params.pixel_format = Some(PixelFormat::Pal8);
-    // Extradata: global palette (RGBA bytes, 4 per entry) — empty when none.
-    params.extradata = palette_to_extradata(&parsed.global_palette);
-
-    // GIF durations are in hundredths of a second. Use 1/100 s time base.
-    let time_base = TimeBase::new(1, 100);
-    let total: i64 = parsed.frames.iter().map(|f| f.delay_cs.max(1) as i64).sum();
-    let stream = StreamInfo {
-        index: 0,
-        time_base,
-        duration: Some(total),
-        start_time: Some(0),
-        params,
-    };
-
-    let metadata: Vec<(String, String)> = if let Some(loop_count) = parsed.loop_count {
-        vec![("loop_count".into(), loop_count.to_string())]
-    } else {
-        Vec::new()
-    };
-
-    Ok(Box::new(GifDemuxer {
-        stream,
-        packets: parsed.into_packets(time_base),
-        pos: 0,
-        metadata,
-    }))
-}
-
-fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<Box<dyn Muxer>> {
-    if streams.len() != 1 {
-        return Err(Error::invalid(
-            "GIF muxer: exactly one video stream is required",
-        ));
-    }
-    let s = &streams[0];
-    if s.params.codec_id.as_str() != GIF_CODEC_ID {
-        return Err(Error::invalid(format!(
-            "GIF muxer: expected codec id `gif`, got `{}`",
-            s.params.codec_id
-        )));
-    }
-    let w = s
-        .params
-        .width
-        .ok_or_else(|| Error::invalid("GIF muxer: missing width"))?;
-    let h = s
-        .params
-        .height
-        .ok_or_else(|| Error::invalid("GIF muxer: missing height"))?;
-    let gct = extradata_to_palette(&s.params.extradata);
-    Ok(Box::new(GifMuxer {
-        out: output,
-        canvas: (w, h),
-        gct,
-        header_written: false,
-        packets_written: 0,
-        buffered_packets: Vec::new(),
-    }))
-}
-
 // ---- Internal frame payload format ---------------------------------------
 
 /// Serialise one parsed frame into a self-contained packet payload the
-/// decoder consumes. Layout:
+/// framework decoder consumes. Layout:
 ///
 /// ```text
 ///   magic    "OGIF" (4)
@@ -285,8 +187,8 @@ pub(crate) struct DecodedFrame<'a> {
 // ---- Parser --------------------------------------------------------------
 
 /// Frame extracted from the on-disk GIF file.
-#[derive(Debug)]
-pub(crate) struct ParsedFrame {
+#[derive(Debug, Clone)]
+pub struct ParsedFrame {
     pub x: u32,
     pub y: u32,
     pub w: u32,
@@ -300,8 +202,8 @@ pub(crate) struct ParsedFrame {
     pub lzw_data: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub(crate) struct ParsedFile {
+#[derive(Debug, Clone)]
+pub struct ParsedFile {
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub global_palette: Vec<[u8; 4]>,
@@ -309,15 +211,16 @@ pub(crate) struct ParsedFile {
     pub loop_count: Option<u16>,
 }
 
+#[cfg(feature = "registry")]
 impl ParsedFile {
-    fn into_packets(self, tb: TimeBase) -> Vec<Packet> {
+    pub(crate) fn into_packets(self, tb: oxideav_core::TimeBase) -> Vec<oxideav_core::Packet> {
         let mut pkts = Vec::with_capacity(self.frames.len());
         let mut pts: i64 = 0;
         let canvas = (self.canvas_w, self.canvas_h);
         for (i, f) in self.frames.into_iter().enumerate() {
             let dur = f.delay_cs.max(1) as i64;
             let data = encode_frame_payload(&f, canvas);
-            let mut pkt = Packet::new(0, tb, data);
+            let mut pkt = oxideav_core::Packet::new(0, tb, data);
             pkt.pts = Some(pts);
             pkt.dts = Some(pts);
             pkt.duration = Some(dur);
@@ -329,7 +232,7 @@ impl ParsedFile {
     }
 }
 
-pub(crate) fn parse_gif(buf: &[u8]) -> Result<ParsedFile> {
+pub fn parse_gif(buf: &[u8]) -> Result<ParsedFile> {
     if buf.len() < 13 {
         return Err(Error::invalid("GIF: file too short"));
     }
@@ -567,275 +470,381 @@ pub(crate) fn extradata_to_palette(data: &[u8]) -> Vec<[u8; 4]> {
     out
 }
 
-// ---- Demuxer -------------------------------------------------------------
+#[cfg(feature = "registry")]
+mod framework {
+    //! Registry-gated demuxer / muxer / probe wiring.
 
-struct GifDemuxer {
-    stream: StreamInfo,
-    packets: Vec<Packet>,
-    pos: usize,
-    metadata: Vec<(String, String)>,
-}
+    use super::*;
+    use std::io::{Read, SeekFrom, Write};
 
-impl Demuxer for GifDemuxer {
-    fn format_name(&self) -> &str {
-        "gif"
-    }
-
-    fn streams(&self) -> &[StreamInfo] {
-        std::slice::from_ref(&self.stream)
-    }
-
-    fn next_packet(&mut self) -> Result<Packet> {
-        if self.pos >= self.packets.len() {
-            return Err(Error::Eof);
-        }
-        let pkt = self.packets[self.pos].clone();
-        self.pos += 1;
-        Ok(pkt)
-    }
-
-    fn duration_micros(&self) -> Option<i64> {
-        // Centiseconds → microseconds.
-        self.stream.duration.map(|d| d * 10_000)
-    }
-
-    fn metadata(&self) -> &[(String, String)] {
-        &self.metadata
-    }
-}
-
-// ---- Muxer ---------------------------------------------------------------
-
-struct GifMuxer {
-    out: Box<dyn WriteSeek>,
-    canvas: (u32, u32),
-    gct: Vec<[u8; 4]>,
-    header_written: bool,
-    packets_written: usize,
-    buffered_packets: Vec<Packet>,
-}
-
-impl Muxer for GifMuxer {
-    fn format_name(&self) -> &str {
-        "gif"
-    }
-
-    fn write_header(&mut self) -> Result<()> {
-        // Buffered — the muxer needs to know whether there will be more
-        // than one packet before deciding whether to emit NETSCAPE2.0.
-        // We delay the actual header write until write_trailer(); collect
-        // packets in the meantime.
-        self.header_written = true;
-        Ok(())
-    }
-
-    fn write_packet(&mut self, packet: &Packet) -> Result<()> {
-        if !self.header_written {
-            return Err(Error::invalid("GIF muxer: write_header not called"));
-        }
-        self.buffered_packets.push(packet.clone());
-        Ok(())
-    }
-
-    fn write_trailer(&mut self) -> Result<()> {
-        let (cw, ch) = self.canvas;
-        let mut buf: Vec<u8> = Vec::new();
-        // Signature.
-        buf.extend_from_slice(b"GIF89a");
-        // Logical Screen Descriptor.
-        buf.extend_from_slice(&(cw as u16).to_le_bytes());
-        buf.extend_from_slice(&(ch as u16).to_le_bytes());
-        let gct_present = !self.gct.is_empty();
-        let gct_size_exp = if gct_present {
-            size_exp_for(self.gct.len())
-        } else {
-            0
-        };
-        let mut packed: u8 = 0;
-        if gct_present {
-            packed |= 0x80;
-            packed |= 0x70; // color resolution = 7 (common default)
-            packed |= (gct_size_exp as u8) & 0x07;
-        }
-        buf.push(packed);
-        buf.push(0); // background color index
-        buf.push(0); // pixel aspect ratio
-
-        if gct_present {
-            let padded_len = 1usize << (gct_size_exp + 1);
-            write_palette(&mut buf, &self.gct, padded_len);
-        }
-
-        // NETSCAPE2.0 loop extension when we have >1 frame.
-        if self.buffered_packets.len() > 1 {
-            // 0x21 0xFF 0x0B "NETSCAPE2.0" 0x03 0x01 loop_lo loop_hi 0x00
-            buf.push(0x21);
-            buf.push(0xFF);
-            buf.push(0x0B);
-            buf.extend_from_slice(b"NETSCAPE2.0");
-            buf.push(0x03);
-            buf.push(0x01);
-            buf.push(0x00);
-            buf.push(0x00);
-            buf.push(0x00);
-        }
-
-        for pkt in &self.buffered_packets {
-            write_frame(&mut buf, pkt, gct_present)?;
-        }
-        // Trailer.
-        buf.push(0x3B);
-        self.out.write_all(&buf)?;
-        self.packets_written = self.buffered_packets.len();
-        self.buffered_packets.clear();
-        Ok(())
-    }
-}
-
-fn size_exp_for(n: usize) -> u32 {
-    // GIF stores size-1 as `2^(size+1)` entries, so for N colours the
-    // exponent is `ceil(log2(N)) - 1`, clamped to `[0, 7]`.
-    if n <= 2 {
-        0
-    } else if n <= 4 {
-        1
-    } else if n <= 8 {
-        2
-    } else if n <= 16 {
-        3
-    } else if n <= 32 {
-        4
-    } else if n <= 64 {
-        5
-    } else if n <= 128 {
-        6
-    } else {
-        7
-    }
-}
-
-fn write_palette(buf: &mut Vec<u8>, pal: &[[u8; 4]], padded_len: usize) {
-    for i in 0..padded_len {
-        if i < pal.len() {
-            buf.push(pal[i][0]);
-            buf.push(pal[i][1]);
-            buf.push(pal[i][2]);
-        } else {
-            buf.push(0);
-            buf.push(0);
-            buf.push(0);
-        }
-    }
-}
-
-fn write_frame(buf: &mut Vec<u8>, pkt: &Packet, gct_present: bool) -> Result<()> {
-    let df = decode_frame_payload(&pkt.data)?;
-    // Graphic Control Extension — emit always when we have animation info.
-    buf.push(0x21);
-    buf.push(0xF9);
-    buf.push(0x04); // block size
-    let mut flags = 0u8;
-    flags |= (df.disposal & 0x07) << 2;
-    if df.has_transparent {
-        flags |= 0x01;
-    }
-    buf.push(flags);
-    buf.extend_from_slice(&df.delay_cs.to_le_bytes());
-    buf.push(df.transparent_index);
-    buf.push(0); // block terminator
-
-    // Image Descriptor.
-    buf.push(0x2C);
-    buf.extend_from_slice(&(df.x as u16).to_le_bytes());
-    buf.extend_from_slice(&(df.y as u16).to_le_bytes());
-    buf.extend_from_slice(&(df.w as u16).to_le_bytes());
-    buf.extend_from_slice(&(df.h as u16).to_le_bytes());
-    // Packed: LCT? / interlace / sort / reserved / LCT size.
-    let has_local = !df.local_palette.is_empty();
-    let mut packed: u8 = 0;
-    let lct_exp = if has_local {
-        let n = df.local_palette.len() / 4;
-        size_exp_for(n)
-    } else {
-        0
+    use oxideav_core::{
+        CodecId, CodecParameters, CodecResolver, MediaType, Packet, PixelFormat, Result,
+        StreamInfo, TimeBase,
     };
-    if has_local {
-        packed |= 0x80;
-        packed |= (lct_exp as u8) & 0x07;
+    use oxideav_core::{ContainerRegistry, Demuxer, Error, Muxer, ProbeData, ReadSeek, WriteSeek};
+
+    pub fn register(reg: &mut ContainerRegistry) {
+        reg.register_demuxer("gif", open);
+        reg.register_muxer("gif", open_muxer);
+        reg.register_extension("gif", "gif");
+        reg.register_probe("gif", probe);
     }
-    if df.interlaced {
-        packed |= 0x40;
+
+    pub fn probe(p: &ProbeData) -> u8 {
+        if p.buf.len() < 6 {
+            return 0;
+        }
+        if &p.buf[0..6] == b"GIF87a" || &p.buf[0..6] == b"GIF89a" {
+            return 100;
+        }
+        0
     }
-    buf.push(packed);
-    if has_local {
-        let padded = 1usize << (lct_exp + 1);
-        // Convert RGBA palette to RGB in-file.
-        for i in 0..padded {
-            if i * 4 + 3 < df.local_palette.len() {
-                buf.push(df.local_palette[i * 4]);
-                buf.push(df.local_palette[i * 4 + 1]);
-                buf.push(df.local_palette[i * 4 + 2]);
+
+    fn open(
+        mut input: Box<dyn ReadSeek>,
+        _codecs: &dyn CodecResolver,
+    ) -> Result<Box<dyn Demuxer>> {
+        let mut buf = Vec::new();
+        input.seek(SeekFrom::Start(0))?;
+        input.read_to_end(&mut buf)?;
+        drop(input);
+        let parsed = parse_gif(&buf)?;
+
+        let mut params = CodecParameters::video(CodecId::new(GIF_CODEC_ID));
+        params.media_type = MediaType::Video;
+        params.width = Some(parsed.canvas_w);
+        params.height = Some(parsed.canvas_h);
+        params.pixel_format = Some(PixelFormat::Pal8);
+        params.extradata = palette_to_extradata(&parsed.global_palette);
+
+        let time_base = TimeBase::new(1, 100);
+        let total: i64 = parsed.frames.iter().map(|f| f.delay_cs.max(1) as i64).sum();
+        let stream = StreamInfo {
+            index: 0,
+            time_base,
+            duration: Some(total),
+            start_time: Some(0),
+            params,
+        };
+
+        let metadata: Vec<(String, String)> = if let Some(loop_count) = parsed.loop_count {
+            vec![("loop_count".into(), loop_count.to_string())]
+        } else {
+            Vec::new()
+        };
+
+        Ok(Box::new(GifDemuxer {
+            stream,
+            packets: parsed.into_packets(time_base),
+            pos: 0,
+            metadata,
+        }))
+    }
+
+    fn open_muxer(
+        output: Box<dyn WriteSeek>,
+        streams: &[StreamInfo],
+    ) -> Result<Box<dyn Muxer>> {
+        if streams.len() != 1 {
+            return Err(Error::invalid(
+                "GIF muxer: exactly one video stream is required",
+            ));
+        }
+        let s = &streams[0];
+        if s.params.codec_id.as_str() != GIF_CODEC_ID {
+            return Err(Error::invalid(format!(
+                "GIF muxer: expected codec id `gif`, got `{}`",
+                s.params.codec_id
+            )));
+        }
+        let w = s
+            .params
+            .width
+            .ok_or_else(|| Error::invalid("GIF muxer: missing width"))?;
+        let h = s
+            .params
+            .height
+            .ok_or_else(|| Error::invalid("GIF muxer: missing height"))?;
+        let gct = extradata_to_palette(&s.params.extradata);
+        Ok(Box::new(GifMuxer {
+            out: output,
+            canvas: (w, h),
+            gct,
+            header_written: false,
+            packets_written: 0,
+            buffered_packets: Vec::new(),
+        }))
+    }
+
+    struct GifDemuxer {
+        stream: StreamInfo,
+        packets: Vec<Packet>,
+        pos: usize,
+        metadata: Vec<(String, String)>,
+    }
+
+    impl Demuxer for GifDemuxer {
+        fn format_name(&self) -> &str {
+            "gif"
+        }
+
+        fn streams(&self) -> &[StreamInfo] {
+            std::slice::from_ref(&self.stream)
+        }
+
+        fn next_packet(&mut self) -> Result<Packet> {
+            if self.pos >= self.packets.len() {
+                return Err(Error::Eof);
+            }
+            let pkt = self.packets[self.pos].clone();
+            self.pos += 1;
+            Ok(pkt)
+        }
+
+        fn duration_micros(&self) -> Option<i64> {
+            // Centiseconds → microseconds.
+            self.stream.duration.map(|d| d * 10_000)
+        }
+
+        fn metadata(&self) -> &[(String, String)] {
+            &self.metadata
+        }
+    }
+
+    struct GifMuxer {
+        out: Box<dyn WriteSeek>,
+        canvas: (u32, u32),
+        gct: Vec<[u8; 4]>,
+        header_written: bool,
+        packets_written: usize,
+        buffered_packets: Vec<Packet>,
+    }
+
+    impl Muxer for GifMuxer {
+        fn format_name(&self) -> &str {
+            "gif"
+        }
+
+        fn write_header(&mut self) -> Result<()> {
+            // Buffered — the muxer needs to know whether there will be more
+            // than one packet before deciding whether to emit NETSCAPE2.0.
+            // We delay the actual header write until write_trailer(); collect
+            // packets in the meantime.
+            self.header_written = true;
+            Ok(())
+        }
+
+        fn write_packet(&mut self, packet: &Packet) -> Result<()> {
+            if !self.header_written {
+                return Err(Error::invalid("GIF muxer: write_header not called"));
+            }
+            self.buffered_packets.push(packet.clone());
+            Ok(())
+        }
+
+        fn write_trailer(&mut self) -> Result<()> {
+            let (cw, ch) = self.canvas;
+            let mut buf: Vec<u8> = Vec::new();
+            // Signature.
+            buf.extend_from_slice(b"GIF89a");
+            // Logical Screen Descriptor.
+            buf.extend_from_slice(&(cw as u16).to_le_bytes());
+            buf.extend_from_slice(&(ch as u16).to_le_bytes());
+            let gct_present = !self.gct.is_empty();
+            let gct_size_exp = if gct_present {
+                size_exp_for(self.gct.len())
+            } else {
+                0
+            };
+            let mut packed: u8 = 0;
+            if gct_present {
+                packed |= 0x80;
+                packed |= 0x70; // color resolution = 7 (common default)
+                packed |= (gct_size_exp as u8) & 0x07;
+            }
+            buf.push(packed);
+            buf.push(0); // background color index
+            buf.push(0); // pixel aspect ratio
+
+            if gct_present {
+                let padded_len = 1usize << (gct_size_exp + 1);
+                write_palette(&mut buf, &self.gct, padded_len);
+            }
+
+            // NETSCAPE2.0 loop extension when we have >1 frame.
+            if self.buffered_packets.len() > 1 {
+                // 0x21 0xFF 0x0B "NETSCAPE2.0" 0x03 0x01 loop_lo loop_hi 0x00
+                buf.push(0x21);
+                buf.push(0xFF);
+                buf.push(0x0B);
+                buf.extend_from_slice(b"NETSCAPE2.0");
+                buf.push(0x03);
+                buf.push(0x01);
+                buf.push(0x00);
+                buf.push(0x00);
+                buf.push(0x00);
+            }
+
+            for pkt in &self.buffered_packets {
+                write_frame(&mut buf, pkt, gct_present)?;
+            }
+            // Trailer.
+            buf.push(0x3B);
+            self.out.write_all(&buf)?;
+            self.packets_written = self.buffered_packets.len();
+            self.buffered_packets.clear();
+            Ok(())
+        }
+    }
+
+    fn size_exp_for(n: usize) -> u32 {
+        // GIF stores size-1 as `2^(size+1)` entries, so for N colours the
+        // exponent is `ceil(log2(N)) - 1`, clamped to `[0, 7]`.
+        if n <= 2 {
+            0
+        } else if n <= 4 {
+            1
+        } else if n <= 8 {
+            2
+        } else if n <= 16 {
+            3
+        } else if n <= 32 {
+            4
+        } else if n <= 64 {
+            5
+        } else if n <= 128 {
+            6
+        } else {
+            7
+        }
+    }
+
+    fn write_palette(buf: &mut Vec<u8>, pal: &[[u8; 4]], padded_len: usize) {
+        for i in 0..padded_len {
+            if i < pal.len() {
+                buf.push(pal[i][0]);
+                buf.push(pal[i][1]);
+                buf.push(pal[i][2]);
             } else {
                 buf.push(0);
                 buf.push(0);
                 buf.push(0);
             }
         }
-    } else if !gct_present {
-        return Err(Error::invalid(
-            "GIF muxer: frame has no local palette and no global palette",
-        ));
     }
-    // LZW min-code-size + compressed sub-block chain.
-    buf.push(df.min_code_size);
-    write_sub_blocks(buf, df.lzw);
-    Ok(())
+
+    fn write_frame(buf: &mut Vec<u8>, pkt: &Packet, gct_present: bool) -> Result<()> {
+        let df = decode_frame_payload(&pkt.data)?;
+        // Graphic Control Extension — emit always when we have animation info.
+        buf.push(0x21);
+        buf.push(0xF9);
+        buf.push(0x04); // block size
+        let mut flags = 0u8;
+        flags |= (df.disposal & 0x07) << 2;
+        if df.has_transparent {
+            flags |= 0x01;
+        }
+        buf.push(flags);
+        buf.extend_from_slice(&df.delay_cs.to_le_bytes());
+        buf.push(df.transparent_index);
+        buf.push(0); // block terminator
+
+        // Image Descriptor.
+        buf.push(0x2C);
+        buf.extend_from_slice(&(df.x as u16).to_le_bytes());
+        buf.extend_from_slice(&(df.y as u16).to_le_bytes());
+        buf.extend_from_slice(&(df.w as u16).to_le_bytes());
+        buf.extend_from_slice(&(df.h as u16).to_le_bytes());
+        // Packed: LCT? / interlace / sort / reserved / LCT size.
+        let has_local = !df.local_palette.is_empty();
+        let mut packed: u8 = 0;
+        let lct_exp = if has_local {
+            let n = df.local_palette.len() / 4;
+            size_exp_for(n)
+        } else {
+            0
+        };
+        if has_local {
+            packed |= 0x80;
+            packed |= (lct_exp as u8) & 0x07;
+        }
+        if df.interlaced {
+            packed |= 0x40;
+        }
+        buf.push(packed);
+        if has_local {
+            let padded = 1usize << (lct_exp + 1);
+            // Convert RGBA palette to RGB in-file.
+            for i in 0..padded {
+                if i * 4 + 3 < df.local_palette.len() {
+                    buf.push(df.local_palette[i * 4]);
+                    buf.push(df.local_palette[i * 4 + 1]);
+                    buf.push(df.local_palette[i * 4 + 2]);
+                } else {
+                    buf.push(0);
+                    buf.push(0);
+                    buf.push(0);
+                }
+            }
+        } else if !gct_present {
+            return Err(Error::invalid(
+                "GIF muxer: frame has no local palette and no global palette",
+            ));
+        }
+        // LZW min-code-size + compressed sub-block chain.
+        buf.push(df.min_code_size);
+        write_sub_blocks(buf, df.lzw);
+        Ok(())
+    }
+
+    fn write_sub_blocks(buf: &mut Vec<u8>, data: &[u8]) {
+        let mut p = 0;
+        while p < data.len() {
+            let chunk = (data.len() - p).min(255);
+            buf.push(chunk as u8);
+            buf.extend_from_slice(&data[p..p + chunk]);
+            p += chunk;
+        }
+        buf.push(0);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn probe_gif89a() {
+            let mut buf = vec![0u8; 16];
+            buf[..6].copy_from_slice(b"GIF89a");
+            let p = ProbeData {
+                buf: &buf,
+                ext: None,
+            };
+            assert_eq!(probe(&p), 100);
+        }
+
+        #[test]
+        fn probe_gif87a() {
+            let mut buf = vec![0u8; 16];
+            buf[..6].copy_from_slice(b"GIF87a");
+            let p = ProbeData {
+                buf: &buf,
+                ext: None,
+            };
+            assert_eq!(probe(&p), 100);
+        }
+
+        #[test]
+        fn probe_other() {
+            let buf = vec![0u8; 16];
+            let p = ProbeData {
+                buf: &buf,
+                ext: None,
+            };
+            assert_eq!(probe(&p), 0);
+        }
+    }
 }
 
-fn write_sub_blocks(buf: &mut Vec<u8>, data: &[u8]) {
-    let mut p = 0;
-    while p < data.len() {
-        let chunk = (data.len() - p).min(255);
-        buf.push(chunk as u8);
-        buf.extend_from_slice(&data[p..p + chunk]);
-        p += chunk;
-    }
-    buf.push(0);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn probe_gif89a() {
-        let mut buf = vec![0u8; 16];
-        buf[..6].copy_from_slice(b"GIF89a");
-        let p = ProbeData {
-            buf: &buf,
-            ext: None,
-        };
-        assert_eq!(probe(&p), 100);
-    }
-
-    #[test]
-    fn probe_gif87a() {
-        let mut buf = vec![0u8; 16];
-        buf[..6].copy_from_slice(b"GIF87a");
-        let p = ProbeData {
-            buf: &buf,
-            ext: None,
-        };
-        assert_eq!(probe(&p), 100);
-    }
-
-    #[test]
-    fn probe_other() {
-        let buf = vec![0u8; 16];
-        let p = ProbeData {
-            buf: &buf,
-            ext: None,
-        };
-        assert_eq!(probe(&p), 0);
-    }
-}
+#[cfg(feature = "registry")]
+pub use framework::register;
