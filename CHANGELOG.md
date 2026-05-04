@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-gif/compare/v0.0.7...v0.0.8) - 2026-05-04
+
+### Added
+
+- standalone-friendly retrofit (registry feature gate)
+
+### Other
+
+- gate registry-dependent integration tests behind `registry` feature
+- pending cleanup after standalone refactor
+
 ### Added
 
 - Standalone-friendly retrofit: `oxideav-core` is now gated behind the
