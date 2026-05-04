@@ -500,10 +500,7 @@ mod framework {
         0
     }
 
-    fn open(
-        mut input: Box<dyn ReadSeek>,
-        _codecs: &dyn CodecResolver,
-    ) -> Result<Box<dyn Demuxer>> {
+    fn open(mut input: Box<dyn ReadSeek>, _codecs: &dyn CodecResolver) -> Result<Box<dyn Demuxer>> {
         let mut buf = Vec::new();
         input.seek(SeekFrom::Start(0))?;
         input.read_to_end(&mut buf)?;
@@ -541,10 +538,7 @@ mod framework {
         }))
     }
 
-    fn open_muxer(
-        output: Box<dyn WriteSeek>,
-        streams: &[StreamInfo],
-    ) -> Result<Box<dyn Muxer>> {
+    fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<Box<dyn Muxer>> {
         if streams.len() != 1 {
             return Err(Error::invalid(
                 "GIF muxer: exactly one video stream is required",

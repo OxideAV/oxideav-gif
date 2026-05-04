@@ -412,7 +412,8 @@ impl GifEncoder {
             delay_cs,
         };
         let canvas = (self.width, self.height);
-        let data = crate::encoder::frame_to_payload(&frame, canvas, bf.disposal, bf.transparent_index);
+        let data =
+            crate::encoder::frame_to_payload(&frame, canvas, bf.disposal, bf.transparent_index);
         if !self.global_palette_set {
             self.output_params.extradata = palette_to_extradata(&bf.palette);
             self.global_palette_set = true;
