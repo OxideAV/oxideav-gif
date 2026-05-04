@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / `GifEncoderFrame` / `GifError` types using std primitives only.
   `Decoder` / `Encoder` / `Demuxer` / `Muxer` trait impls and
   `register*` helpers stay behind the `registry` feature gate.
+- Integration tests that exercise the framework registry (`probe`,
+  `static_gif_roundtrip`, `animated_gif`, `disposal_and_transparency`,
+  `external_roundtrip`) are now `#![cfg(feature = "registry")]` so
+  `cargo test --no-default-features` compiles and runs (only the
+  pure-Rust LZW round-trip suite remains active in that mode).
 
 ## [0.0.7](https://github.com/OxideAV/oxideav-gif/compare/v0.0.6...v0.0.7) - 2026-05-03
 

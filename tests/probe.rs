@@ -1,5 +1,7 @@
 //! Container probe tests.
 
+#![cfg(feature = "registry")]
+
 use std::io::Cursor;
 
 use oxideav_core::ContainerRegistry;

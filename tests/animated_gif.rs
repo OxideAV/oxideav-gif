@@ -2,6 +2,8 @@
 //! delays, encode, mux, demux, decode, and check every frame survives
 //! with its palette indices + delay timing intact.
 
+#![cfg(feature = "registry")]
+
 mod common;
 
 use std::io::Cursor;

@@ -1,6 +1,8 @@
 //! Round-trip a synthetic 128x128 Pal8 frame through the encoder +
 //! container + demuxer + decoder and confirm palette + indices survive.
 
+#![cfg(feature = "registry")]
+
 mod common;
 
 use std::io::Cursor;

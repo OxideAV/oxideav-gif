@@ -27,6 +27,7 @@
 //! storage instead of touching the struct tail.
 
 #![allow(unsafe_code)]
+#![cfg(feature = "registry")]
 
 mod common;
 

@@ -14,6 +14,8 @@
 //! * Transparency: a transparent pixel in a frame must leave the
 //!   existing canvas contents untouched in that pixel slot.
 
+#![cfg(feature = "registry")]
+
 mod common;
 
 use std::io::Cursor;
