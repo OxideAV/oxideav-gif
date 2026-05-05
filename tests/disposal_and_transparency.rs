@@ -148,7 +148,7 @@ fn mux_then_decode(pkts: Vec<Packet>, op: CodecParameters) -> Vec<VideoFrame> {
         .open_demuxer("gif", boxed, &oxideav_core::NullCodecResolver)
         .expect("demux");
     let si = demuxer.streams()[0].clone();
-    let mut decoder = codecs.make_decoder(&si.params).expect("decoder");
+    let mut decoder = codecs.first_decoder(&si.params).expect("decoder");
 
     let mut out = Vec::new();
     loop {

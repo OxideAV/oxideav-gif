@@ -121,7 +121,7 @@ fn oxideav_encode(frame_in: VideoFrame, w: u32, h: u32) -> Vec<u8> {
     register_containers(&mut containers);
 
     let params_enc = build_params(w, h);
-    let mut encoder = codecs.make_encoder(&params_enc).expect("make_encoder");
+    let mut encoder = codecs.first_encoder(&params_enc).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(frame_in))
         .expect("send_frame");
@@ -172,7 +172,7 @@ fn oxideav_decode(gif_bytes: &[u8]) -> (u32, u32, Vec<u8>, Vec<u8>) {
     let si = demuxer.streams()[0].clone();
     let w = si.params.width.expect("stream width");
     let h = si.params.height.expect("stream height");
-    let mut decoder = codecs.make_decoder(&si.params).expect("make_decoder");
+    let mut decoder = codecs.first_decoder(&si.params).expect("make_decoder");
     let pkt = demuxer.next_packet().expect("next_packet");
     decoder.send_packet(&pkt).expect("send_packet");
     let frame = match decoder.receive_frame().expect("receive_frame") {

@@ -78,7 +78,7 @@ fn animated_5_frames_roundtrip() {
         p.pixel_format = Some(PixelFormat::Pal8);
         p
     };
-    let mut encoder = codecs.make_encoder(&params_enc).expect("encoder");
+    let mut encoder = codecs.first_encoder(&params_enc).expect("encoder");
     let mut packets: Vec<oxideav_core::Packet> = Vec::new();
     for f in &input_frames {
         encoder.send_frame(&Frame::Video(f.clone())).expect("send");
@@ -139,7 +139,7 @@ fn animated_5_frames_roundtrip() {
     assert_eq!(si.params.height, Some(h));
     assert_eq!(si.time_base, TimeBase::new(1, 100));
 
-    let mut decoder = codecs.make_decoder(&si.params).expect("decoder");
+    let mut decoder = codecs.first_decoder(&si.params).expect("decoder");
 
     let mut decoded: Vec<VideoFrame> = Vec::new();
     let mut durations: Vec<i64> = Vec::new();

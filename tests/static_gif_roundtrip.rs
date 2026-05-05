@@ -72,7 +72,7 @@ fn static_gif_preserves_indices_and_palette() {
         p.pixel_format = Some(PixelFormat::Pal8);
         p
     };
-    let mut encoder = codecs.make_encoder(&params_enc).expect("encoder");
+    let mut encoder = codecs.first_encoder(&params_enc).expect("encoder");
     encoder
         .send_frame(&Frame::Video(frame_in.clone()))
         .expect("send");
@@ -117,7 +117,7 @@ fn static_gif_preserves_indices_and_palette() {
     assert_eq!(si.params.width, Some(w));
     assert_eq!(si.params.height, Some(h));
 
-    let mut decoder = codecs.make_decoder(&si.params).expect("decoder");
+    let mut decoder = codecs.first_decoder(&si.params).expect("decoder");
     let out_pkt = demuxer.next_packet().expect("next_packet");
     decoder.send_packet(&out_pkt).expect("send");
     let out_frame = match decoder.receive_frame().expect("recv") {

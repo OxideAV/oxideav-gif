@@ -26,7 +26,7 @@ fuzz_target!(|data: &[u8]| {
     // Encode through the trait API.
     let frame_in = build_pal8_frame(width, height, &indices, &palette);
     let params_enc = build_params(width, height);
-    let mut encoder = codecs.make_encoder(&params_enc).expect("make_encoder");
+    let mut encoder = codecs.first_encoder(&params_enc).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(frame_in))
         .expect("send_frame");
@@ -64,7 +64,7 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(si.params.width, Some(width));
     assert_eq!(si.params.height, Some(height));
 
-    let mut decoder = codecs.make_decoder(&si.params).expect("make_decoder");
+    let mut decoder = codecs.first_decoder(&si.params).expect("make_decoder");
     let out_pkt = demuxer.next_packet().expect("next_packet");
     decoder.send_packet(&out_pkt).expect("send_packet");
     let out_frame = match decoder.receive_frame().expect("receive_frame") {

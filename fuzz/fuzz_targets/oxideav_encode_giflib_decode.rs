@@ -29,7 +29,7 @@ fuzz_target!(|data: &[u8]| {
 
     let frame_in = build_pal8_frame(width, height, &indices, &palette);
     let params_enc = build_params(width, height);
-    let mut encoder = codecs.make_encoder(&params_enc).expect("make_encoder");
+    let mut encoder = codecs.first_encoder(&params_enc).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(frame_in))
         .expect("send_frame");

@@ -41,7 +41,7 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(si.params.width, Some(width));
     assert_eq!(si.params.height, Some(height));
 
-    let mut decoder = codecs.make_decoder(&si.params).expect("make_decoder");
+    let mut decoder = codecs.first_decoder(&si.params).expect("make_decoder");
     let pkt = demuxer.next_packet().expect("next_packet");
     decoder.send_packet(&pkt).expect("send_packet");
     let out_frame = match decoder.receive_frame().expect("receive_frame") {
