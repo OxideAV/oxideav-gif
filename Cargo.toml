@@ -20,6 +20,10 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # `decode_gif` / `encode_gif` API plus local `GifImage` / `GifFrame` /
 # `GifError` types and never references `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
+# Distributed-slice auto-registration into `oxideav_core::REGISTRARS`
+# via the `oxideav_core::register!` macro. Tiny crate, no transitive
+# deps; works on every target including wasm.
+linkme = "0.3"
 
 [features]
 default = ["registry"]
