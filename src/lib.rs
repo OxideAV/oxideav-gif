@@ -66,4 +66,4 @@ pub use lzw::{Lzw, LzwDecoder, LzwEncoder};
 // so image-library callers can build the crate without dragging in
 // `oxideav-core`.
 #[cfg(feature = "registry")]
-pub use registry::{register, register_codecs, register_containers, GifEncoder};
+pub use registry::{__oxideav_entry, register, register_codecs, register_containers, GifEncoder};
