@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-gif/compare/v0.0.8...v0.0.9) - 2026-05-06
+
+### Other
+
+- drop dead `linkme` dep
+- re-export __oxideav_entry from registry sub-module
+- registry calls: rename make_decoder/make_encoder → first_decoder/first_encoder
+- auto-register via oxideav_core::register! macro (linkme distributed slice)
+- unify entry point on register(&mut RuntimeContext) ([#502](https://github.com/OxideAV/oxideav-gif/pull/502))
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-gif/compare/v0.0.7...v0.0.8) - 2026-05-04
 
 ### Added
