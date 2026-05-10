@@ -14,3 +14,17 @@ keywords = ["multimedia", "image", "gif", "lzw", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 
 [dependencies]
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-gif` with
+# `default-features = false` and avoid the framework dep tree entirely.
+# Without `registry` the crate exposes only the standalone
+# `decode` / `encode` / `compose` API plus crate-local `GifImage` /
+# `Error` types using std primitives.
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+# Wires up the `Decoder` / `Encoder` trait impls + the framework
+# `register()` entry point against `oxideav-core`. Default-on; turn
+# off for image-library use-cases that just want the standalone API.
+registry = ["dep:oxideav-core"]

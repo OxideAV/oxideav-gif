@@ -28,6 +28,17 @@
 //!   no-ops on the canvas.
 //!
 //! [`Application`]: crate::Application
+//!
+//! ## Standalone vs registry-integrated
+//!
+//! With the default `registry` Cargo feature on, the crate exposes
+//! [`oxideav_core::Decoder`] / [`oxideav_core::Encoder`] trait impls
+//! plus a [`registry::register`] entry point against `oxideav-core`.
+//! With the feature off the crate ships only the standalone
+//! [`decode`] / [`encode`] / [`compose`] API plus the local
+//! [`GifImage`] / [`Error`] types, with no `oxideav-core` dep in the
+//! tree. Image-library consumers should depend on `oxideav-gif` with
+//! `default-features = false`.
 
 pub mod compose;
 pub mod decoder;
@@ -36,6 +47,8 @@ pub mod error;
 pub mod image;
 pub mod interlace;
 pub mod lzw;
+#[cfg(feature = "registry")]
+pub mod registry;
 
 pub use compose::{compose, ComposedFrame, RgbaCanvas};
 pub use decoder::decode;
@@ -43,4 +56,14 @@ pub use encoder::encode;
 pub use error::{Error, Result};
 pub use image::{
     Application, Block, DisposalMethod, Frame, GifImage, GraphicControl, PlainText, Rgb, Version,
+};
+
+// Registry-gated public surface. The `__oxideav_entry` re-export is
+// load-bearing: `oxideav-meta`'s build-script-generated `register_all`
+// looks up `oxideav_gif::__oxideav_entry`, which only exists at the
+// crate root via this re-export.
+#[cfg(feature = "registry")]
+pub use registry::{
+    __oxideav_entry, register, register_codecs, register_containers, GifDecoder, GifEncoder,
+    CODEC_ID_STR,
 };
