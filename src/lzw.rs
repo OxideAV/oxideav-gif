@@ -21,12 +21,18 @@
 //! Decoder implementation is the classic KwKwK loop: when a received
 //! code is exactly the next dictionary entry, emit `prefix + prefix[0]`.
 //!
-//! The compliance corner: some encoders "defer" the code-width increase
-//! — when reading we accept the code that exactly matches the boundary
-//! (`code == 2^width`) at the width that was valid when it was written.
-//! This decoder follows the common convention that matches libgif and
-//! ffmpeg: after adding an entry, increase the width *before* reading the
-//! next code when `dict_len == (1 << current_width)` and `width < 12`.
+//! The compliance corner: width grows on the giflib boundary —
+//! conceptually, "bump after emitting / reading the code that allocated
+//! the dictionary slot at index `(1 << width) - 1`". In our encoder
+//! variables: bump when the post-insert `dict_len` first exceeds
+//! `1 << code_width`. In our decoder variables: bump when the
+//! post-insert `prefix.len()` first reaches `1 << width`. The naïve
+//! `dict_len == 1 << code_width` check (used by an earlier draft of
+//! this module) bumps one emit too early and produces streams that
+//! libgif's decoder rejects with "code N past dictionary length N-1";
+//! see GIF89a Appendix F's worked LZW example for the canonical
+//! encoder and `dgif_lib.c::DGifDecompressInput`'s
+//! `++RunningCode > MaxCode1` for the decoder side of the same rule.
 //!
 //! Both sides restrict code width to `2..=12` bits.
 
@@ -153,11 +159,16 @@ impl LzwEncoder {
                     if self.dict_len < MAX_DICT_LEN as u16 {
                         self.dict_insert(pref, b, self.dict_len);
                         self.dict_len += 1;
-                        // Grow width after emission if next insertion
-                        // will need it. The "boundary" convention is
-                        // post-insert: if the insert brought dict_len to
-                        // exactly (1 << code_width), bump the width.
-                        if self.dict_len == (1u16 << self.code_width)
+                        // Grow width on the giflib boundary: bump when
+                        // the just-inserted slot's index has overrun
+                        // the current width. Equivalently, bump when
+                        // post-insert `dict_len` first exceeds
+                        // `1 << code_width` — i.e., the next-to-allocate
+                        // slot wouldn't fit. Bumping at `dict_len ==
+                        // 1 << code_width` (the "natural-looking"
+                        // condition) bumps one emit too early and
+                        // produces output libgif's decoder rejects.
+                        if self.dict_len == (1u16 << self.code_width) + 1
                             && self.code_width < MAX_CODE_WIDTH
                         {
                             self.code_width += 1;
@@ -288,15 +299,19 @@ impl LzwDecoder {
                     prefix.push(p);
                     suffix.push(fb);
                     first_byte.push(first_byte[p as usize]);
-                    // GIF LZW decoder off-by-one: the decoder's
-                    // dict_len lags the encoder's by exactly one entry
-                    // (the decoder doesn't insert on the very first
-                    // code after a clear, while the encoder inserts
-                    // on every emit). To keep the code width in sync,
-                    // bump when the next insert WILL hit `1 << width`,
-                    // which is equivalent to `dict_len + 1 ==
-                    // 1 << width` right now.
-                    if prefix.len() + 1 == (1usize << width) && width < MAX_CODE_WIDTH {
+                    // Mirror giflib's `dgif_lib.c::DGifDecompressInput`
+                    // bump rule (`++RunningCode > MaxCode1`). After
+                    // the post-insert push above, `prefix.len()` is
+                    // the same number of dictionary entries that
+                    // giflib's `RunningCode` (post-increment) would
+                    // hold for the same input. Bumping when
+                    // `prefix.len()` first reaches `1 << width` keeps
+                    // the decoder in lock-step with a giflib-style
+                    // encoder; bumping at `prefix.len() + 1 == 1 <<
+                    // width` (the previous condition) bumps one read
+                    // too early and rejects valid streams with
+                    // "code N past dictionary length N-1".
+                    if prefix.len() == (1usize << width) && width < MAX_CODE_WIDTH {
                         width += 1;
                     }
                 }
@@ -428,6 +443,85 @@ mod tests {
     fn roundtrip_monotonous() {
         let buf: Vec<u8> = std::iter::repeat(7u8).take(4000).collect();
         roundtrip(3, &buf);
+    }
+
+    #[test]
+    fn roundtrip_min_code_size_2_width_boundaries() {
+        // 4-colour palette → min_code_size = 2, initial code width = 3
+        // bits, dictionary holds {0..3, clear=4, eoi=5} (6 entries).
+        // The first width bump happens AFTER reading the third post-
+        // clear code (giflib-style boundary). Drive ≥ 4 unique
+        // sequences to force the encoder past the bump and exercise
+        // the post-bump width-4 emits — this is the regression test
+        // for the "code N past dictionary length N-1" fuzz panic where
+        // the encoder bumped width one emit too early.
+        let pattern: Vec<u8> = (0..256u32)
+            .map(|i| (i.wrapping_mul(13).wrapping_add(7) & 0x03) as u8)
+            .collect();
+        roundtrip(2, &pattern);
+    }
+
+    #[test]
+    fn roundtrip_min_code_size_2_one_byte_per_code() {
+        // Worst case for dictionary growth: every byte triggers a new
+        // dict entry because the prefix-suffix pair has never been
+        // seen. Walks the encoder through every width transition from
+        // 3 -> 4 -> 5 -> 6 -> 7 -> 8 bits and back via clear codes,
+        // covering both "fresh after clear" and "deep dictionary"
+        // boundary conditions for the smallest legal min_code_size.
+        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut state: u32 = 0xC0FFEE11;
+        for _ in 0..8192 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            buf.push(((state >> 16) & 0x03) as u8);
+        }
+        roundtrip(2, &buf);
+    }
+
+    #[test]
+    fn decode_giflib_style_boundary_stream() {
+        // Hand-crafted LZW bit stream that mirrors what giflib would
+        // emit for `min_code_size = 2`. We feed three distinct 3-bit
+        // codes after the leading clear, all of which giflib emits at
+        // the OLD width (3 bits) before bumping to width 4 — pinning
+        // the decoder's width-bump timing. Bytes are LSB-first packed.
+        //
+        // Codes (in order): clear=4, 0, 1, 2, 3, eoi=5. All emitted at
+        // width 3 except `eoi`, which giflib also emits at width 3
+        // because its bump fires AFTER the third dictionary insert
+        // (i.e. after emitting `2`). Then `3` and `eoi` both emit at
+        // the new width 4.
+        //
+        // Bit layout (LSB-first within each byte, codes concatenated
+        // from low bit upward):
+        //   clear=4 (3b: 100)
+        //   code  0 (3b: 000)
+        //   code  1 (3b: 001)
+        //   code  2 (3b: 010)
+        //   code  3 (4b: 0011) <- new width
+        //   eoi   5 (4b: 0101) <- new width
+        // Concatenated bits (LSB-first):
+        //   100 000 001 010 0011 0101
+        // Repacked into bytes LSB-first (low bit of byte 0 = first
+        // bit emitted):
+        //   bit 0..7  :  1 0 0 | 0 0 0 | 0 0 1 -> wait, I miscounted.
+        //
+        // Easier: build the same stream programmatically with our
+        // `BitWriter`, then verify `LzwDecoder` decodes it back to
+        // [0,1,2,3] (the four literal indices).
+        let mut bw = BitWriter::new();
+        let mut bytes = Vec::new();
+        bw.put(4, 3, &mut bytes); // clear
+        bw.put(0, 3, &mut bytes);
+        bw.put(1, 3, &mut bytes);
+        bw.put(2, 3, &mut bytes);
+        bw.put(3, 4, &mut bytes); // first code at the bumped width
+        bw.put(5, 4, &mut bytes); // eoi at the bumped width
+        bw.flush(&mut bytes);
+
+        let dec = Lzw::decoder(2).unwrap();
+        let decoded = dec.read(&bytes).unwrap();
+        assert_eq!(decoded, vec![0, 1, 2, 3]);
     }
 
     #[test]

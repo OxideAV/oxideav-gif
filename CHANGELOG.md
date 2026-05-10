@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- LZW encoder/decoder code-width bump aligned with giflib's
+  `++RunningCode > MaxCode1` boundary. The previous condition
+  (`dict_len == 1 << code_width` on the encoder side and
+  `prefix.len() + 1 == 1 << width` on the decoder side) bumped one
+  emit / one read too early, producing streams that giflib's decoder
+  could read but ours could not (and vice versa) for any `min_code_size`
+  where the first width transition lands inside the first sub-block.
+  Surfaced by the `giflib_encode_oxideav_decode` fuzz harness as
+  "LZW: code N past dictionary length N-1". Pinned by three new
+  regression tests in `src/lzw.rs`.
+
 ## [0.0.9](https://github.com/OxideAV/oxideav-gif/compare/v0.0.8...v0.0.9) - 2026-05-06
 
 ### Other
