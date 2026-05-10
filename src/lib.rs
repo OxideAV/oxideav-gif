@@ -15,20 +15,21 @@
 //! * Trailer (§27).
 //! * Four-pass interlace transform (Appendix E) on both decode and
 //!   encode.
+//! * Multi-frame compositing onto the §18 Logical Screen using the
+//!   §23 Disposal Method state machine — see [`compose`].
 //!
 //! ## Not implemented
 //!
-//! * Frame compositing semantics on top of the prior raster — the
-//!   [`Frame::graphic_control`] disposal field is preserved verbatim,
-//!   but reading a multi-frame stream into a final pixel buffer is
-//!   left to a higher layer.
 //! * Higher-level animation control extensions that ride on top of
 //!   §26 Application Extensions (loop-count, etc.) — exposed as raw
 //!   [`Application`] data.
+//! * Plain Text Extension glyph rendering — the spec leaves font
+//!   choice to the decoder; [`compose`] treats Plain Text blocks as
+//!   no-ops on the canvas.
 //!
-//! [`Frame::graphic_control`]: crate::Frame::graphic_control
 //! [`Application`]: crate::Application
 
+pub mod compose;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
@@ -36,6 +37,7 @@ pub mod image;
 pub mod interlace;
 pub mod lzw;
 
+pub use compose::{compose, ComposedFrame, RgbaCanvas};
 pub use decoder::decode;
 pub use encoder::encode;
 pub use error::{Error, Result};

@@ -16,17 +16,21 @@ Implements every block type defined by the CompuServe specifications:
 - Comment Extension (§24)
 - Plain Text Extension (§25)
 - Application Extension (§26)
+- Multi-frame compositing onto the §18 Logical Screen using the §23
+  disposal-method state machine (`compose`). Returns a sequence of
+  fully-rendered RGBA canvases plus per-frame delay; covers all four
+  defined disposal values (None / Keep / RestoreBackground /
+  RestorePrevious) and §23.c.viii transparent-index handling.
 
 ## Not implemented
 
-- Frame compositing onto a virtual screen using the disposal-method
-  semantics. The graphic-control extension is preserved verbatim and
-  attached to the appropriate frame; combining successive frames into
-  a final pixel buffer is left to a higher layer.
 - Interpretation of higher-level Application Extensions (loop control,
   XMP, ICC, EXIF, etc.) — these are exposed as raw `Application`
   blocks with their identifier, authentication code, and concatenated
   payload bytes.
+- Plain Text Extension glyph rendering — the spec leaves font choice to
+  the decoder, so `compose` treats Plain Text blocks as no-ops on the
+  canvas.
 
 ## Specifications
 
