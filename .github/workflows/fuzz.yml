@@ -1,0 +1,16 @@
+name: Fuzz
+
+# Daily fuzz run for the cargo-fuzz harnesses under fuzz/. Splits the
+# 30-minute total budget across the 2 targets (~15 min each).
+
+on:
+  schedule:
+    - cron: "37 5 * * *"   # daily 05:37 UTC, jittered off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

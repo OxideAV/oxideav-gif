@@ -1,0 +1,16 @@
+[package]
+name = "oxideav-gif"
+version = "0.0.10"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/OxideAV/oxideav-gif"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust GIF87a / GIF89a decoder and encoder"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-gif"
+keywords = ["multimedia", "image", "gif", "lzw", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
