@@ -1,0 +1,31 @@
+[package]
+name = "oxideav-gif"
+version = "0.0.10"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/OxideAV/oxideav-gif"
+homepage = "https://github.com/OxideAV/oxideav-gif"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust GIF87a / GIF89a decoder + encoder for oxideav (LZW per CompuServe Appendix F)"
+readme = "README.md"
+keywords = ["multimedia", "image", "gif", "lzw", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-gif` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely. Without `registry` the crate exposes the standalone
+# `decode_gif` / `encode_gif` API plus crate-local `GifImage` / `GifError`
+# types and never references `oxideav-core`.
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+
+# Wires up the `Decoder` / `Encoder` trait implementations against
+# `oxideav-core` so the crate can plug into the `oxideav` framework
+# registry. Default-on; disable for image-library use-cases that just
+# want the standalone `decode_gif` API.
+registry = ["dep:oxideav-core"]

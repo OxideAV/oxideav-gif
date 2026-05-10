@@ -1,0 +1,44 @@
+[package]
+name = "oxideav-gif-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-gif]
+path = ".."
+default-features = false
+
+[lib]
+name = "oxideav_gif_fuzz"
+path = "src/lib.rs"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode_panic_free"
+path = "fuzz_targets/decode_panic_free.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "lzw_roundtrip"
+path = "fuzz_targets/lzw_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_decode_roundtrip"
+path = "fuzz_targets/encode_decode_roundtrip.rs"
+test = false
+doc = false
