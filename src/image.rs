@@ -187,4 +187,82 @@ impl GifImage {
             _ => None,
         })
     }
+
+    /// Iterate every Application Extension carried by this stream.
+    pub fn application_extensions(&self) -> impl Iterator<Item = &Application> {
+        self.blocks.iter().filter_map(|b| match b {
+            Block::Application(a) => Some(a),
+            _ => None,
+        })
+    }
+
+    /// Animation loop count expressed by the NETSCAPE2.0 Application
+    /// Extension *Looping* sub-block (sub-block ID `0x01`).
+    ///
+    /// * `None` — no NETSCAPE2.0 block, or one that lacks a *Looping*
+    ///   sub-block. Per the de-facto convention this means "play
+    ///   once".
+    /// * `Some(0)` — loop forever.
+    /// * `Some(N)` — play `N + 1` times in total (one initial pass
+    ///   plus `N` repeats).
+    ///
+    /// The byte layout is documented in
+    /// `docs/image/gif/netscape2.0-loop-extension.md`. The first
+    /// matching block wins if the stream carries more than one (which
+    /// is non-portable and discouraged).
+    pub fn loop_count(&self) -> Option<u16> {
+        for app in self.application_extensions() {
+            if let Some(lc) = crate::app_ext::LoopControl::from_application(app) {
+                if let Some(n) = lc.loop_count {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
+    /// Buffering hint from the NETSCAPE2.0 *Buffering* sub-block
+    /// (sub-block ID `0x02`). Modern decoders treat this as
+    /// discardable; surfaced so consumers can choose to honour or
+    /// re-emit it.
+    pub fn netscape_buffer_hint(&self) -> Option<u32> {
+        for app in self.application_extensions() {
+            if let Some(lc) = crate::app_ext::LoopControl::from_application(app) {
+                if let Some(n) = lc.buffer_size {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
+    /// Raw XMP packet bytes from the `XMP Data` Application Extension
+    /// (typically a UTF-8 RDF/XML envelope). The decoder does not
+    /// parse the XML — callers can hand these bytes to an XMP library.
+    pub fn xmp_packet(&self) -> Option<&[u8]> {
+        self.application_extensions().find_map(|app| {
+            if &app.identifier == crate::app_ext::XMP_IDENTIFIER
+                && &app.auth_code == crate::app_ext::XMP_AUTH_CODE
+            {
+                Some(app.data.as_slice())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Raw ICC colour-profile bytes from the `ICCRGBG1` Application
+    /// Extension. The decoder does not parse the profile — callers
+    /// can hand these bytes to an ICC library.
+    pub fn icc_profile(&self) -> Option<&[u8]> {
+        self.application_extensions().find_map(|app| {
+            if &app.identifier == crate::app_ext::ICC_IDENTIFIER
+                && &app.auth_code == crate::app_ext::ICC_AUTH_CODE
+            {
+                Some(app.data.as_slice())
+            } else {
+                None
+            }
+        })
+    }
 }

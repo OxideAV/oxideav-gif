@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- `app_ext` module — typed parsers + constructors for the three
+  ecosystem-defined Application Extensions that ride on top of GIF89a
+  §26: NETSCAPE2.0 *Looping* + *Buffering* sub-blocks
+  (`LoopControl`), the Adobe XMP packet (`XmpPacket`), and the ICC
+  colour profile (`IccProfile`). These layer on top of the raw
+  `Block::Application` representation — the raw block stays in
+  `GifImage::blocks` for byte-stable round-trip.
+- `GifImage::loop_count()` / `netscape_buffer_hint()` /
+  `xmp_packet()` / `icc_profile()` / `application_extensions()`
+  convenience accessors.
 - Initial implementation per GIF87a / GIF89a specs.
 - `compose` module — multi-frame compositor that walks every image
   block and applies the GIF89a §23 disposal-method state machine

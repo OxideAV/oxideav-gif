@@ -21,13 +21,19 @@ Implements every block type defined by the CompuServe specifications:
   fully-rendered RGBA canvases plus per-frame delay; covers all four
   defined disposal values (None / Keep / RestoreBackground /
   RestorePrevious) and §23.c.viii transparent-index handling.
+- Structured views over the three ecosystem-defined Application
+  Extensions (`app_ext` module) — NETSCAPE2.0 looping +
+  buffering sub-blocks, the Adobe XMP packet (`XMP Data`), and ICC
+  colour profile (`ICCRGBG1`). `GifImage::loop_count()` /
+  `xmp_packet()` / `icc_profile()` are convenience accessors over
+  the same raw `Block::Application` data, which stays in
+  `GifImage::blocks` for byte-stable round-trip.
 
 ## Not implemented
 
-- Interpretation of higher-level Application Extensions (loop control,
-  XMP, ICC, EXIF, etc.) — these are exposed as raw `Application`
-  blocks with their identifier, authentication code, and concatenated
-  payload bytes.
+- Other vendor Application Extensions (EXIF, ANIMEXTS1.0, etc.) —
+  these stay surfaced as raw `Block::Application` data with the
+  identifier, authentication code, and concatenated payload bytes.
 - Plain Text Extension glyph rendering — the spec leaves font choice to
   the decoder, so `compose` treats Plain Text blocks as no-ops on the
   canvas.

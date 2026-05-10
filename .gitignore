@@ -2,3 +2,8 @@
 Cargo.lock
 **/*.rs.bk
 .DS_Store
+
+# cargo-fuzz inputs/outputs — corpus is a flywheel built locally,
+# crash artifacts are not pinned in the tree.
+fuzz/corpus/
+fuzz/artifacts/

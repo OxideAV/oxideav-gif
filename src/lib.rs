@@ -18,11 +18,27 @@
 //! * Multi-frame compositing onto the §18 Logical Screen using the
 //!   §23 Disposal Method state machine — see [`compose`].
 //!
+//! ## Application-extension structured views
+//!
+//! The CompuServe spec defines no concrete §26 Application
+//! Extensions. The [`app_ext`] module layers typed parsers on top of
+//! the raw [`Application`] block for the three ecosystem-defined
+//! shapes that achieved cross-decoder de-facto interoperability:
+//!
+//! * NETSCAPE2.0 looping + buffering sub-blocks
+//!   ([`app_ext::LoopControl`]) — see also [`GifImage::loop_count`]
+//!   and [`GifImage::netscape_buffer_hint`].
+//! * XMP packet ([`app_ext::XmpPacket`]) — see also
+//!   [`GifImage::xmp_packet`].
+//! * ICC colour profile ([`app_ext::IccProfile`]) — see also
+//!   [`GifImage::icc_profile`].
+//!
+//! These accessors layer on top of the raw block list — the
+//! [`Application`] block stays in [`GifImage::blocks`] regardless,
+//! preserving byte-stable round-trip.
+//!
 //! ## Not implemented
 //!
-//! * Higher-level animation control extensions that ride on top of
-//!   §26 Application Extensions (loop-count, etc.) — exposed as raw
-//!   [`Application`] data.
 //! * Plain Text Extension glyph rendering — the spec leaves font
 //!   choice to the decoder; [`compose`] treats Plain Text blocks as
 //!   no-ops on the canvas.
@@ -40,6 +56,7 @@
 //! tree. Image-library consumers should depend on `oxideav-gif` with
 //! `default-features = false`.
 
+pub mod app_ext;
 pub mod compose;
 pub mod decoder;
 pub mod encoder;
