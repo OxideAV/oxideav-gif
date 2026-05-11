@@ -16,7 +16,10 @@
 //! * Four-pass interlace transform (Appendix E) on both decode and
 //!   encode.
 //! * Multi-frame compositing onto the §18 Logical Screen using the
-//!   §23 Disposal Method state machine — see [`compose`].
+//!   §23 Disposal Method state machine — see [`compose`] for the
+//!   eager `Vec<ComposedFrame>` form, [`playback::Playback`] for the
+//!   lazy iterator form (one canvas at a time, plus a NETSCAPE2.0
+//!   loop-count-aware [`playback::LoopingFrameIter`]).
 //!
 //! ## Application-extension structured views
 //!
@@ -64,6 +67,7 @@ pub mod error;
 pub mod image;
 pub mod interlace;
 pub mod lzw;
+pub mod playback;
 #[cfg(feature = "registry")]
 pub mod registry;
 
@@ -74,6 +78,7 @@ pub use error::{Error, Result};
 pub use image::{
     Application, Block, DisposalMethod, Frame, GifImage, GraphicControl, PlainText, Rgb, Version,
 };
+pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};
 
 // Registry-gated public surface. The `__oxideav_entry` re-export is
 // load-bearing: `oxideav-meta`'s build-script-generated `register_all`

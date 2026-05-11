@@ -17,10 +17,18 @@ Implements every block type defined by the CompuServe specifications:
 - Plain Text Extension (§25)
 - Application Extension (§26)
 - Multi-frame compositing onto the §18 Logical Screen using the §23
-  disposal-method state machine (`compose`). Returns a sequence of
-  fully-rendered RGBA canvases plus per-frame delay; covers all four
-  defined disposal values (None / Keep / RestoreBackground /
-  RestorePrevious) and §23.c.viii transparent-index handling.
+  disposal-method state machine. `compose()` returns the eager
+  `Vec<ComposedFrame>`; `Playback::frames()` is the lazy iterator
+  form (one canvas per call). Both cover all four defined disposal
+  values (None / Keep / RestoreBackground / RestorePrevious) and the
+  §23.c.viii transparent-index handling.
+- Animation playback iterator `Playback::looping_frames()` that
+  honours the NETSCAPE2.0 *Looping* sub-block: no extension plays one
+  pass, `loop_count = 0` loops forever, `loop_count = N` plays
+  `N + 1` total passes per the de-facto convention documented in
+  `docs/image/gif/netscape2.0-loop-extension.md`. Each yielded
+  `PlaybackFrame` carries its delay as a `Duration` for ergonomic
+  `thread::sleep` calls.
 - Structured views over the three ecosystem-defined Application
   Extensions (`app_ext` module) — NETSCAPE2.0 looping +
   buffering sub-blocks, the Adobe XMP packet (`XMP Data`), and ICC

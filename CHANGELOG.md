@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- `playback` module — lazy `Playback` / `FrameIter` /
+  `LoopingFrameIter` iterators that walk the §23 disposal-method
+  state machine one frame at a time. Yields `PlaybackFrame`
+  (`RgbaCanvas` + `Duration`) so a downstream player can `sleep` on
+  the §23.c.vii delay directly. `LoopingFrameIter` honours the
+  NETSCAPE2.0 *Looping* sub-block: no extension → 1 pass,
+  `loop_count = 0` → infinite, `loop_count = N` → `N + 1` total
+  passes per the de-facto convention. Works with the registry feature
+  on or off.
 - `app_ext` module — typed parsers + constructors for the three
   ecosystem-defined Application Extensions that ride on top of GIF89a
   §26: NETSCAPE2.0 *Looping* + *Buffering* sub-blocks
