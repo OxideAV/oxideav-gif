@@ -52,7 +52,8 @@
 //! get straight RGBA so they can choose their own blend convention).
 
 use crate::error::{Error, Result};
-use crate::image::{Block, DisposalMethod, Frame, GifImage, Rgb};
+use crate::font;
+use crate::image::{Block, DisposalMethod, Frame, GifImage, PlainText, Rgb};
 
 /// One composited canvas — `screen_width × screen_height` RGBA pixels.
 ///
@@ -92,14 +93,17 @@ pub struct ComposedFrame {
     pub delay_centis: u16,
 }
 
-/// Compose every image-bearing block in `image` into a sequence of
-/// fully rendered RGBA canvases per the §23 disposal-method state
+/// Compose every graphic-rendering block in `image` into a sequence
+/// of fully rendered RGBA canvases per the §23 disposal-method state
 /// machine.
 ///
-/// Plain Text Extensions (§25) are graphic-rendering blocks too, but
-/// rendering glyphs requires a font choice the spec leaves to the
-/// decoder; this routine treats them as no-ops on the canvas (they
-/// pass through without affecting later frames).
+/// Plain Text Extensions (§25) are rendered against the crate-local
+/// 8×8 monospace bitmap font ([`crate::font`]) — §25.e leaves the
+/// font choice to the decoder, and this routine picks the minimal
+/// stylised font supplied here. Plain Text blocks require an active
+/// Global Color Table (§25.a "This block requires a Global Color
+/// Table to be available"); when none is present the block is
+/// skipped (visible behaviour matches the older no-render path).
 ///
 /// # Errors
 ///
@@ -134,41 +138,72 @@ pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
     let mut out = Vec::new();
 
     for block in &image.blocks {
-        let frame = match block {
-            Block::Image(f) => f,
-            // §25 Plain Text — graphic-rendering block but glyph
-            // bitmap is not part of the codec's scope. Skip.
-            // Comment / Application — non-rendering, also skip.
-            _ => continue,
-        };
+        // Identify graphic-rendering blocks (§20 image + §25 plain
+        // text) and pull their bounding rectangle + GCE; everything
+        // else (§24 comments, §26 application extensions) doesn't
+        // render and is skipped without touching the canvas.
+        let (rect, gce, kind): (Rect, Option<&crate::image::GraphicControl>, BlockKind) =
+            match block {
+                Block::Image(f) => (
+                    Rect {
+                        left: f.left,
+                        top: f.top,
+                        width: f.width,
+                        height: f.height,
+                    },
+                    f.graphic_control.as_ref(),
+                    BlockKind::Image(f),
+                ),
+                Block::PlainText {
+                    params,
+                    graphic_control,
+                } => (
+                    Rect {
+                        left: params.left,
+                        top: params.top,
+                        width: params.width,
+                        height: params.height,
+                    },
+                    graphic_control.as_ref(),
+                    BlockKind::PlainText(params),
+                ),
+                _ => continue,
+            };
 
-        check_frame_in_screen(image, frame)?;
+        check_rect_in_screen(image, &rect)?;
 
         // §23.f.i — snapshot the *pre-render* canvas so a later
         // RestorePrevious can revert to exactly the image the user was
         // looking at before this frame appeared.
         let pre_render_snapshot = canvas.pixels.clone();
 
-        render_frame(&mut canvas, frame, image.global_palette.as_deref())?;
+        match kind {
+            BlockKind::Image(f) => {
+                render_frame(&mut canvas, f, image.global_palette.as_deref())?;
+            }
+            BlockKind::PlainText(p) => {
+                // §25.a — "This block requires a Global Color Table to
+                // be available". Without one the block has no defined
+                // fg/bg colour mapping; treat it as a no-op.
+                if let Some(gct) = image.global_palette.as_deref() {
+                    render_plain_text(&mut canvas, p, gct);
+                }
+            }
+        }
 
-        let delay_centis = frame
-            .graphic_control
-            .as_ref()
-            .map(|gce| gce.delay_centis)
-            .unwrap_or(0);
+        let delay_centis = gce.map(|g| g.delay_centis).unwrap_or(0);
 
         out.push(ComposedFrame {
             canvas: canvas.clone(),
             delay_centis,
         });
 
-        // Apply this frame's disposal method to *prepare* the canvas
-        // for the next frame.
-        let disposal = frame
-            .graphic_control
-            .as_ref()
-            .map(|gce| gce.disposal)
-            .unwrap_or(DisposalMethod::None);
+        // Apply this block's disposal method to *prepare* the canvas
+        // for the next frame. Plain Text is a §25 graphic-rendering
+        // block so it participates in §23 disposal just like §20
+        // images do (§23.d "scope is the graphic rendering block that
+        // follows it").
+        let disposal = gce.map(|g| g.disposal).unwrap_or(DisposalMethod::None);
 
         match disposal {
             // §23.c.iv values 0 + 1 — "no disposal" / "do not dispose"
@@ -178,14 +213,12 @@ pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
             DisposalMethod::RestoreBackground => {
                 // §23.c.iv value 2 — "the area used by the graphic
                 // must be restored to the background color." Only the
-                // rectangle the frame just drew is cleared; pixels
-                // outside it are untouched.
-                clear_rect_to_color(&mut canvas, frame, background_rgba);
+                // rectangle the block just drew is cleared.
+                clear_rect_to_color(&mut canvas, &rect, background_rgba);
             }
             DisposalMethod::RestorePrevious => {
                 // §23.c.iv value 3 — restore what was visible before
-                // this frame rendered. The pre-render snapshot taken
-                // above is exactly that state.
+                // this block rendered.
                 canvas.pixels = pre_render_snapshot;
             }
         }
@@ -194,22 +227,30 @@ pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
     Ok(out)
 }
 
+/// Axis-aligned rectangle on the logical screen.
+struct Rect {
+    left: u16,
+    top: u16,
+    width: u16,
+    height: u16,
+}
+
+enum BlockKind<'a> {
+    Image(&'a Frame),
+    PlainText(&'a PlainText),
+}
+
 // ---------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------
 
-fn check_frame_in_screen(image: &GifImage, frame: &Frame) -> Result<()> {
-    let right = (frame.left as u32) + (frame.width as u32);
-    let bottom = (frame.top as u32) + (frame.height as u32);
+fn check_rect_in_screen(image: &GifImage, rect: &Rect) -> Result<()> {
+    let right = (rect.left as u32) + (rect.width as u32);
+    let bottom = (rect.top as u32) + (rect.height as u32);
     if right > image.screen_width as u32 || bottom > image.screen_height as u32 {
         return Err(Error::InvalidData(format!(
-            "frame placement ({},{},{}×{}) escapes logical screen ({}×{})",
-            frame.left,
-            frame.top,
-            frame.width,
-            frame.height,
-            image.screen_width,
-            image.screen_height
+            "block placement ({},{},{}×{}) escapes logical screen ({}×{})",
+            rect.left, rect.top, rect.width, rect.height, image.screen_width, image.screen_height
         )));
     }
     Ok(())
@@ -267,18 +308,99 @@ fn render_frame(
     Ok(())
 }
 
-fn clear_rect_to_color(canvas: &mut RgbaCanvas, frame: &Frame, rgba: [u8; 4]) {
+fn clear_rect_to_color(canvas: &mut RgbaCanvas, rect: &Rect, rgba: [u8; 4]) {
     let canvas_w = canvas.width as usize;
-    let frame_w = frame.width as usize;
-    let frame_h = frame.height as usize;
-    let frame_left = frame.left as usize;
-    let frame_top = frame.top as usize;
-    for fy in 0..frame_h {
-        let dst_row_start = ((frame_top + fy) * canvas_w + frame_left) * 4;
-        for fx in 0..frame_w {
+    let rw = rect.width as usize;
+    let rh = rect.height as usize;
+    let rl = rect.left as usize;
+    let rt = rect.top as usize;
+    for fy in 0..rh {
+        let dst_row_start = ((rt + fy) * canvas_w + rl) * 4;
+        for fx in 0..rw {
             let dst = dst_row_start + fx * 4;
             canvas.pixels[dst..dst + 4].copy_from_slice(&rgba);
         }
+    }
+}
+
+/// Render a §25 Plain Text block against `canvas` using the active
+/// Global Color Table. The text grid is `params.width × params.height`
+/// pixels at `(params.left, params.top)` and contains
+/// `floor(width/cell_w) × floor(height/cell_h)` character cells per
+/// §25.a ("fractional cells must be discarded").
+///
+/// Each cell paints a `params.cell_width × params.cell_height`
+/// background-coloured rectangle, then stamps the cell's glyph from
+/// [`crate::font`] in foreground colour. Glyphs are anchored to the
+/// cell's top-left; pixels beyond the glyph's 8×8 footprint stay
+/// background-coloured (no scaling — over-sized cells are read as
+/// "more padding around the same 8×8 glyph"). Characters outside
+/// `0x20..=0x7E` (or the spec's wider 0x20..=0xF7 with no glyph
+/// available) render as space per §25.e.
+fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
+    // §25.a — fractional cells are discarded. Integer division here
+    // is exactly that.
+    if params.cell_width == 0 || params.cell_height == 0 {
+        // Degenerate cell size; nothing to render.
+        return;
+    }
+    let cols = params.width / (params.cell_width as u16);
+    let rows = params.height / (params.cell_height as u16);
+    let cell_w = params.cell_width as u16;
+    let cell_h = params.cell_height as u16;
+
+    // §25.c.x / xi reference the *Global Color Table*. Out-of-range
+    // indices are not specified by the spec; clamp to fully
+    // transparent black to avoid panicking and to make the block
+    // visually disappear, which matches the conservative behaviour the
+    // earlier "no Plain Text rendering" path effectively provided.
+    let fg_rgba = palette_index_to_rgba(gct, params.fg_color_index);
+    let bg_rgba = palette_index_to_rgba(gct, params.bg_color_index);
+
+    let canvas_w = canvas.width as usize;
+    let mut text_iter = params.text.iter().copied();
+    for cell_row in 0..rows {
+        for cell_col in 0..cols {
+            let ch = text_iter.next().unwrap_or(b' ');
+            // §25.e — bytes outside the legal Plain Text range render
+            // as space. Anything our minimal font doesn't have a glyph
+            // for falls back to space via `font::glyph`.
+            let g = font::glyph(ch);
+            let cell_left = params.left + cell_col * cell_w;
+            let cell_top = params.top + cell_row * cell_h;
+            for dy in 0..cell_h {
+                let py = (cell_top + dy) as usize;
+                for dx in 0..cell_w {
+                    let px = (cell_left + dx) as usize;
+                    let dst = (py * canvas_w + px) * 4;
+                    // Bit-blit: glyph pixels where the bitmap is set
+                    // use the foreground colour; everything else
+                    // (cell padding around the 8×8 glyph + glyph
+                    // background pixels) uses the cell background
+                    // colour. §25 makes no distinction between
+                    // "background" and "no pixel" — every cell pixel
+                    // must resolve to either fg or bg.
+                    let painted = if dx < font::GLYPH_WIDTH as u16 && dy < font::GLYPH_HEIGHT as u16
+                    {
+                        font::pixel(&g, dx as u8, dy as u8)
+                    } else {
+                        false
+                    };
+                    let rgba = if painted { fg_rgba } else { bg_rgba };
+                    canvas.pixels[dst..dst + 4].copy_from_slice(&rgba);
+                }
+            }
+        }
+    }
+}
+
+fn palette_index_to_rgba(palette: &[Rgb], idx: u8) -> [u8; 4] {
+    let i = idx as usize;
+    if i >= palette.len() {
+        [0, 0, 0, 0]
+    } else {
+        let Rgb { r, g, b } = palette[i];
+        [r, g, b, 0xFF]
     }
 }
 
@@ -566,6 +688,167 @@ mod tests {
         assert_eq!(px(f2_canvas, 0, 0), [0xFF, 0, 0, 0xFF]);
         // Pixel (1,0) — F2 said green.
         assert_eq!(px(f2_canvas, 1, 0), [0, 0xFF, 0, 0xFF]);
+    }
+
+    /// §25 Plain Text Extension renders glyphs from the crate-local
+    /// 8×8 bitmap font in the foreground colour against a background-
+    /// coloured cell rectangle. Verify by composing a single
+    /// "A"-character cell at the canvas origin and checking that
+    /// pixel coverage matches the font table.
+    #[test]
+    fn plain_text_renders_glyph_against_background() {
+        // Build a stream whose only graphic block is a §25 Plain Text
+        // extension placing one 8×8 cell at (0,0) with text "A".
+        // Foreground = red (idx 1), Background = green (idx 2).
+        let pt = crate::image::PlainText {
+            left: 0,
+            top: 0,
+            width: 8,
+            height: 8,
+            cell_width: 8,
+            cell_height: 8,
+            fg_color_index: 1,
+            bg_color_index: 2,
+            text: b"A".to_vec(),
+        };
+        let img = GifImage {
+            version: Version::Gif89a,
+            screen_width: 8,
+            screen_height: 8,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(palette_4()),
+            blocks: vec![Block::PlainText {
+                params: pt,
+                graphic_control: None,
+            }],
+        };
+        let frames = compose(&img).unwrap();
+        assert_eq!(frames.len(), 1);
+        let canvas = &frames[0].canvas;
+        let glyph_a = crate::font::glyph(b'A');
+        // Cross-check: for every pixel inside the 8×8 cell, font-bit
+        // set → red, clear → green.
+        for row in 0u8..8 {
+            for col in 0u8..8 {
+                let expected = if crate::font::pixel(&glyph_a, col, row) {
+                    [0xFF, 0, 0, 0xFF]
+                } else {
+                    [0, 0xFF, 0, 0xFF]
+                };
+                assert_eq!(
+                    px(canvas, col as u16, row as u16),
+                    expected,
+                    "mismatch at ({col},{row})"
+                );
+            }
+        }
+    }
+
+    /// Plain Text participates in the §23 disposal state machine
+    /// exactly like an image block — `RestoreBackground` after
+    /// rendering clears the text-grid rectangle before the next
+    /// frame.
+    #[test]
+    fn plain_text_disposal_restore_background_clears_grid() {
+        let pt = crate::image::PlainText {
+            left: 0,
+            top: 0,
+            width: 8,
+            height: 8,
+            cell_width: 8,
+            cell_height: 8,
+            fg_color_index: 1,
+            bg_color_index: 2,
+            text: b"#".to_vec(),
+        };
+        let img = GifImage {
+            version: Version::Gif89a,
+            screen_width: 8,
+            screen_height: 8,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0, // black
+            pixel_aspect_ratio: 0,
+            global_palette: Some(palette_4()),
+            blocks: vec![
+                Block::PlainText {
+                    params: pt,
+                    graphic_control: Some(GraphicControl {
+                        disposal: DisposalMethod::RestoreBackground,
+                        user_input: false,
+                        transparent_index: None,
+                        delay_centis: 0,
+                    }),
+                },
+                Block::Image(Frame {
+                    left: 0,
+                    top: 0,
+                    width: 8,
+                    height: 8,
+                    local_palette: None,
+                    palette_sorted: false,
+                    interlaced: false,
+                    indices: vec![3; 64], // all blue
+                    graphic_control: None,
+                }),
+            ],
+        };
+        let frames = compose(&img).unwrap();
+        assert_eq!(frames.len(), 2);
+        // After RestoreBackground wipes the text-grid rect to bg-black,
+        // the image frame then paints blue everywhere → final canvas
+        // is solid blue (no leftover plain-text glyph pixels).
+        let f2 = &frames[1].canvas;
+        for row in 0..8 {
+            for col in 0..8 {
+                assert_eq!(px(f2, col, row), [0, 0, 0xFF, 0xFF]);
+            }
+        }
+    }
+
+    /// §25.a — "This block requires a Global Color Table to be
+    /// available". Without a GCT the Plain Text block must be a
+    /// no-op on the canvas (the cell rectangle stays whatever it
+    /// was before).
+    #[test]
+    fn plain_text_with_no_global_palette_is_noop() {
+        let pt = crate::image::PlainText {
+            left: 0,
+            top: 0,
+            width: 8,
+            height: 8,
+            cell_width: 8,
+            cell_height: 8,
+            fg_color_index: 1,
+            bg_color_index: 2,
+            text: b"A".to_vec(),
+        };
+        let img = GifImage {
+            version: Version::Gif89a,
+            screen_width: 8,
+            screen_height: 8,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: None, // No GCT
+            blocks: vec![Block::PlainText {
+                params: pt,
+                graphic_control: None,
+            }],
+        };
+        let frames = compose(&img).unwrap();
+        // Canvas remains transparent-black throughout (the §25.a
+        // requirement is unmet so render_plain_text declines to
+        // touch the canvas).
+        for row in 0..8 {
+            for col in 0..8 {
+                assert_eq!(px(&frames[0].canvas, col, row), [0, 0, 0, 0]);
+            }
+        }
     }
 
     /// A frame whose placement rectangle escapes the logical screen

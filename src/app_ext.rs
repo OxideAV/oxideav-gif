@@ -26,6 +26,17 @@
 //!   The whole framing is documented in
 //!   `docs/image/gif/netscape2.0-loop-extension.md`.
 //!
+//! * **ANIMEXTS1.0 looping** — identifier `b"ANIMEXTS"`, auth code
+//!   `b"1.0"`. Same 3-byte *Looping* sub-block layout as NETSCAPE2.0
+//!   (sub-block ID `0x01` followed by a little-endian `u16` loop
+//!   count). Authored by Aldus circa 1996 and predates the NETSCAPE2.0
+//!   form; a small minority of legacy producers still emit it.
+//!   Decoders that accept NETSCAPE2.0 are expected to accept this too
+//!   per the cross-tool convention noted in
+//!   `docs/image/gif/netscape2.0-loop-extension.md`. Surfaced here as a
+//!   distinct typed view so a decode → re-encode round-trip preserves
+//!   the producer's choice of identifier.
+//!
 //! * **XMP packet** — identifier `b"XMP Data"` (note the trailing
 //!   space, padding to 8 bytes), auth code `b"XMP"`. Carries a single
 //!   UTF-8 RDF/XML XMP packet. We don't parse the XML — the caller
@@ -69,6 +80,12 @@ use crate::image::Application;
 /// NETSCAPE2.0 Application Extension.
 pub const NETSCAPE_IDENTIFIER: &[u8; 8] = b"NETSCAPE";
 pub const NETSCAPE_AUTH_CODE: &[u8; 3] = b"2.0";
+
+/// 8-byte identifier + 3-byte authentication code for the legacy
+/// ANIMEXTS1.0 Application Extension. Same *Looping* sub-block layout
+/// as NETSCAPE2.0.
+pub const ANIMEXTS_IDENTIFIER: &[u8; 8] = b"ANIMEXTS";
+pub const ANIMEXTS_AUTH_CODE: &[u8; 3] = b"1.0";
 
 /// Identifier + auth code for the Adobe XMP packet extension.
 /// The 8-byte identifier is `"XMP Data"` with a trailing space so it
@@ -196,6 +213,69 @@ impl LoopControl {
         Application {
             identifier: *NETSCAPE_IDENTIFIER,
             auth_code: *NETSCAPE_AUTH_CODE,
+            data,
+        }
+    }
+}
+
+/// Parsed ANIMEXTS1.0 Application Extension contents.
+///
+/// The wire framing reuses the NETSCAPE2.0 *Looping* sub-block:
+/// sub-block ID `0x01` followed by a little-endian `u16` loop count.
+/// The *Buffering* sub-block (`0x02`) is NETSCAPE2.0-specific and does
+/// not appear under this identifier in any observed producer; this
+/// parser ignores any byte other than the *Looping* sub-block ID, which
+/// matches the conservative "first matching sub-block wins" rule used
+/// elsewhere in this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AnimextsLoopControl {
+    /// Loop count from the *Looping* sub-block. `Some(0)` means
+    /// "loop forever"; `Some(N)` means "play `N + 1` times" by
+    /// de-facto convention. `None` means the sub-block was absent.
+    pub loop_count: Option<u16>,
+}
+
+impl AnimextsLoopControl {
+    /// Parse a [`crate::Application`] block as an ANIMEXTS1.0 loop
+    /// control. Returns `None` when the identifier or auth code does
+    /// not match the ANIMEXTS1.0 namespace.
+    pub fn from_application(app: &Application) -> Option<Self> {
+        if &app.identifier != ANIMEXTS_IDENTIFIER || &app.auth_code != ANIMEXTS_AUTH_CODE {
+            return None;
+        }
+        let mut out = AnimextsLoopControl::default();
+        let mut i = 0;
+        while i < app.data.len() {
+            match app.data[i] {
+                NETSCAPE_SUBBLOCK_LOOP => {
+                    if app.data.len() < i + 3 {
+                        break;
+                    }
+                    let lo = app.data[i + 1] as u16;
+                    let hi = app.data[i + 2] as u16;
+                    out.loop_count = Some(lo | (hi << 8));
+                    i += 3;
+                }
+                _ => break,
+            }
+        }
+        Some(out)
+    }
+
+    /// Build an ANIMEXTS1.0 [`Application`] block from a parsed loop
+    /// control. Emits a 3-byte *Looping* sub-block when
+    /// `loop_count.is_some()`; otherwise the returned block carries an
+    /// empty payload.
+    pub fn to_application(&self) -> Application {
+        let mut data = Vec::with_capacity(3);
+        if let Some(n) = self.loop_count {
+            data.push(NETSCAPE_SUBBLOCK_LOOP);
+            data.push((n & 0xFF) as u8);
+            data.push(((n >> 8) & 0xFF) as u8);
+        }
+        Application {
+            identifier: *ANIMEXTS_IDENTIFIER,
+            auth_code: *ANIMEXTS_AUTH_CODE,
             data,
         }
     }
@@ -526,6 +606,81 @@ mod tests {
             data: vec![],
         };
         assert!(ExifMetadata::from_application(&app).is_none());
+    }
+
+    #[test]
+    fn animexts_loop_roundtrip() {
+        let original = AnimextsLoopControl {
+            loop_count: Some(5),
+        };
+        let app = original.to_application();
+        assert_eq!(&app.identifier, ANIMEXTS_IDENTIFIER);
+        assert_eq!(&app.auth_code, ANIMEXTS_AUTH_CODE);
+        assert_eq!(app.data, vec![NETSCAPE_SUBBLOCK_LOOP, 0x05, 0x00]);
+        let parsed = AnimextsLoopControl::from_application(&app).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn animexts_loop_forever() {
+        let lc = AnimextsLoopControl {
+            loop_count: Some(0),
+        };
+        let parsed = AnimextsLoopControl::from_application(&lc.to_application()).unwrap();
+        assert_eq!(parsed.loop_count, Some(0));
+    }
+
+    #[test]
+    fn animexts_wrong_identifier_returns_none() {
+        let app = Application {
+            identifier: *NETSCAPE_IDENTIFIER,
+            auth_code: *ANIMEXTS_AUTH_CODE,
+            data: vec![NETSCAPE_SUBBLOCK_LOOP, 0x01, 0x00],
+        };
+        assert!(AnimextsLoopControl::from_application(&app).is_none());
+    }
+
+    #[test]
+    fn animexts_wrong_auth_returns_none() {
+        let app = Application {
+            identifier: *ANIMEXTS_IDENTIFIER,
+            auth_code: *NETSCAPE_AUTH_CODE,
+            data: vec![NETSCAPE_SUBBLOCK_LOOP, 0x01, 0x00],
+        };
+        assert!(AnimextsLoopControl::from_application(&app).is_none());
+    }
+
+    #[test]
+    fn animexts_truncated_loop_subblock_does_not_panic() {
+        let app = Application {
+            identifier: *ANIMEXTS_IDENTIFIER,
+            auth_code: *ANIMEXTS_AUTH_CODE,
+            data: vec![NETSCAPE_SUBBLOCK_LOOP, 0x42], // missing high byte
+        };
+        let parsed = AnimextsLoopControl::from_application(&app).unwrap();
+        assert_eq!(parsed.loop_count, None);
+    }
+
+    #[test]
+    fn animexts_namespace_distinct_from_netscape() {
+        // A NETSCAPE2.0 block must NOT parse as an ANIMEXTS1.0 block
+        // and vice versa, even though the looping sub-block layout is
+        // identical.
+        let netscape = LoopControl {
+            loop_count: Some(3),
+            buffer_size: None,
+        }
+        .to_application();
+        assert!(AnimextsLoopControl::from_application(&netscape).is_none());
+
+        let animexts = AnimextsLoopControl {
+            loop_count: Some(3),
+        }
+        .to_application();
+        let parsed = LoopControl::from_application(&animexts);
+        // LoopControl checks identifier+auth strictly, so ANIMEXTS1.0
+        // must NOT decode as a NETSCAPE2.0 view.
+        assert!(parsed.is_none());
     }
 
     #[test]

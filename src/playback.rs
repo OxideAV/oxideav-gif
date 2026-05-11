@@ -32,7 +32,8 @@ use core::time::Duration;
 
 use crate::compose::RgbaCanvas;
 use crate::error::{Error, Result};
-use crate::image::{Block, DisposalMethod, Frame, GifImage, Rgb};
+use crate::font;
+use crate::image::{Block, DisposalMethod, Frame, GifImage, PlainText, Rgb};
 
 /// Playback handle for a parsed [`GifImage`]. Cheap to construct;
 /// holds a borrow of the image plus enough state to walk the §23
@@ -124,20 +125,45 @@ impl<'a> Iterator for FrameIter<'a> {
         if self.finished {
             return None;
         }
-        // Find the next image-bearing block.
-        let frame = loop {
+        // Find the next graphic-rendering block (§20 Image or §25
+        // Plain Text). §24 Comment / §26 Application have no rendered
+        // output and are skipped without touching the canvas.
+        let (rect, gce, kind) = loop {
             let block = self.image.blocks.get(self.cursor)?;
             self.cursor += 1;
             match block {
-                Block::Image(f) => break f,
-                // §25 Plain Text and the §24 / §26 special-purpose
-                // blocks have no rendered output: skip without
-                // touching the canvas.
+                Block::Image(f) => {
+                    break (
+                        Rect {
+                            left: f.left,
+                            top: f.top,
+                            width: f.width,
+                            height: f.height,
+                        },
+                        f.graphic_control,
+                        Kind::Image(f),
+                    );
+                }
+                Block::PlainText {
+                    params,
+                    graphic_control,
+                } => {
+                    break (
+                        Rect {
+                            left: params.left,
+                            top: params.top,
+                            width: params.width,
+                            height: params.height,
+                        },
+                        *graphic_control,
+                        Kind::PlainText(params),
+                    );
+                }
                 _ => continue,
             }
         };
 
-        if let Err(e) = check_frame_in_screen(self.image, frame) {
+        if let Err(e) = check_rect_in_screen(self.image, &rect) {
             self.finished = true;
             return Some(Err(e));
         }
@@ -147,37 +173,40 @@ impl<'a> Iterator for FrameIter<'a> {
         // was looking at before this frame appeared.
         let pre_render_snapshot = self.canvas.pixels.clone();
 
-        if let Err(e) = render_frame(
-            &mut self.canvas,
-            frame,
-            self.image.global_palette.as_deref(),
-        ) {
-            self.finished = true;
-            return Some(Err(e));
+        match kind {
+            Kind::Image(f) => {
+                if let Err(e) =
+                    render_frame(&mut self.canvas, f, self.image.global_palette.as_deref())
+                {
+                    self.finished = true;
+                    return Some(Err(e));
+                }
+            }
+            Kind::PlainText(p) => {
+                // §25.a — needs a Global Color Table; skip-render
+                // when absent so the block is visually a no-op.
+                if let Some(gct) = self.image.global_palette.as_deref() {
+                    render_plain_text(&mut self.canvas, p, gct);
+                }
+            }
         }
 
-        let delay_centis = frame
-            .graphic_control
-            .as_ref()
-            .map(|gce| gce.delay_centis)
-            .unwrap_or(0);
+        let delay_centis = gce.map(|g| g.delay_centis).unwrap_or(0);
 
         let yielded = PlaybackFrame {
             canvas: self.canvas.clone(),
             delay: centis_to_duration(delay_centis),
         };
 
-        // Apply this frame's disposal method to *prepare* the canvas
-        // for the next frame. Identical to compose.rs.
-        let disposal = frame
-            .graphic_control
-            .as_ref()
-            .map(|gce| gce.disposal)
-            .unwrap_or(DisposalMethod::None);
+        // Apply this block's disposal method to *prepare* the canvas
+        // for the next frame. Plain Text is a §25 graphic-rendering
+        // block so it participates in §23 disposal exactly like an
+        // image does.
+        let disposal = gce.map(|g| g.disposal).unwrap_or(DisposalMethod::None);
         match disposal {
             DisposalMethod::None | DisposalMethod::Keep => {}
             DisposalMethod::RestoreBackground => {
-                clear_rect_to_color(&mut self.canvas, frame, self.background_rgba);
+                clear_rect_to_color(&mut self.canvas, &rect, self.background_rgba);
             }
             DisposalMethod::RestorePrevious => {
                 self.canvas.pixels = pre_render_snapshot;
@@ -186,6 +215,19 @@ impl<'a> Iterator for FrameIter<'a> {
 
         Some(Ok(yielded))
     }
+}
+
+/// Axis-aligned rectangle on the logical screen.
+struct Rect {
+    left: u16,
+    top: u16,
+    width: u16,
+    height: u16,
+}
+
+enum Kind<'a> {
+    Image(&'a Frame),
+    PlainText(&'a PlainText),
 }
 
 // ---------------------------------------------------------------------
@@ -208,11 +250,11 @@ pub struct LoopingFrameIter<'a> {
     ///     de-facto convention.
     total_passes: Option<u32>,
     passes_completed: u32,
-    /// `true` when the image carries no image-bearing blocks. With
-    /// loop-forever semantics the iterator would otherwise spin
-    /// completing zero-frame passes; this flag short-circuits to
-    /// `None` immediately.
-    image_block_free: bool,
+    /// `true` when the image carries no graphic-rendering blocks
+    /// (§20 Image or §25 Plain Text). With loop-forever semantics
+    /// the iterator would otherwise spin completing zero-frame
+    /// passes; this flag short-circuits to `None` immediately.
+    no_rendering_blocks: bool,
 }
 
 impl<'a> LoopingFrameIter<'a> {
@@ -222,13 +264,16 @@ impl<'a> LoopingFrameIter<'a> {
             Some(0) => None,
             Some(n) => Some((n as u32) + 1),
         };
-        let image_block_free = !image.blocks.iter().any(|b| matches!(b, Block::Image(_)));
+        let no_rendering_blocks = !image
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Image(_) | Block::PlainText { .. }));
         Self {
             image,
             inner: FrameIter::new(image),
             total_passes,
             passes_completed: 0,
-            image_block_free,
+            no_rendering_blocks,
         }
     }
 
@@ -255,7 +300,7 @@ impl<'a> Iterator for LoopingFrameIter<'a> {
         // contributes nothing per pass, so even loop-forever should
         // terminate immediately rather than spin restarting empty
         // inner iterators.
-        if self.image_block_free {
+        if self.no_rendering_blocks {
             return None;
         }
         loop {
@@ -306,18 +351,13 @@ fn compute_background_rgba(image: &GifImage) -> [u8; 4] {
     }
 }
 
-fn check_frame_in_screen(image: &GifImage, frame: &Frame) -> Result<()> {
-    let right = (frame.left as u32) + (frame.width as u32);
-    let bottom = (frame.top as u32) + (frame.height as u32);
+fn check_rect_in_screen(image: &GifImage, rect: &Rect) -> Result<()> {
+    let right = (rect.left as u32) + (rect.width as u32);
+    let bottom = (rect.top as u32) + (rect.height as u32);
     if right > image.screen_width as u32 || bottom > image.screen_height as u32 {
         return Err(Error::InvalidData(format!(
-            "frame placement ({},{},{}×{}) escapes logical screen ({}×{})",
-            frame.left,
-            frame.top,
-            frame.width,
-            frame.height,
-            image.screen_width,
-            image.screen_height
+            "block placement ({},{},{}×{}) escapes logical screen ({}×{})",
+            rect.left, rect.top, rect.width, rect.height, image.screen_width, image.screen_height
         )));
     }
     Ok(())
@@ -375,18 +415,70 @@ fn render_frame(
     Ok(())
 }
 
-fn clear_rect_to_color(canvas: &mut RgbaCanvas, frame: &Frame, rgba: [u8; 4]) {
+fn clear_rect_to_color(canvas: &mut RgbaCanvas, rect: &Rect, rgba: [u8; 4]) {
     let canvas_w = canvas.width as usize;
-    let frame_w = frame.width as usize;
-    let frame_h = frame.height as usize;
-    let frame_left = frame.left as usize;
-    let frame_top = frame.top as usize;
-    for fy in 0..frame_h {
-        let dst_row_start = ((frame_top + fy) * canvas_w + frame_left) * 4;
-        for fx in 0..frame_w {
+    let rw = rect.width as usize;
+    let rh = rect.height as usize;
+    let rl = rect.left as usize;
+    let rt = rect.top as usize;
+    for fy in 0..rh {
+        let dst_row_start = ((rt + fy) * canvas_w + rl) * 4;
+        for fx in 0..rw {
             let dst = dst_row_start + fx * 4;
             canvas.pixels[dst..dst + 4].copy_from_slice(&rgba);
         }
+    }
+}
+
+/// Render a §25 Plain Text block. Mirrors the implementation in
+/// `compose.rs`; duplicated rather than re-exported because both
+/// modules host their own canvas-helper sets and we want each to
+/// evolve independently.
+fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
+    if params.cell_width == 0 || params.cell_height == 0 {
+        return;
+    }
+    let cols = params.width / (params.cell_width as u16);
+    let rows = params.height / (params.cell_height as u16);
+    let cell_w = params.cell_width as u16;
+    let cell_h = params.cell_height as u16;
+    let fg_rgba = palette_index_to_rgba(gct, params.fg_color_index);
+    let bg_rgba = palette_index_to_rgba(gct, params.bg_color_index);
+
+    let canvas_w = canvas.width as usize;
+    let mut text_iter = params.text.iter().copied();
+    for cell_row in 0..rows {
+        for cell_col in 0..cols {
+            let ch = text_iter.next().unwrap_or(b' ');
+            let g = font::glyph(ch);
+            let cell_left = params.left + cell_col * cell_w;
+            let cell_top = params.top + cell_row * cell_h;
+            for dy in 0..cell_h {
+                let py = (cell_top + dy) as usize;
+                for dx in 0..cell_w {
+                    let px = (cell_left + dx) as usize;
+                    let dst = (py * canvas_w + px) * 4;
+                    let painted = if dx < font::GLYPH_WIDTH as u16 && dy < font::GLYPH_HEIGHT as u16
+                    {
+                        font::pixel(&g, dx as u8, dy as u8)
+                    } else {
+                        false
+                    };
+                    let rgba = if painted { fg_rgba } else { bg_rgba };
+                    canvas.pixels[dst..dst + 4].copy_from_slice(&rgba);
+                }
+            }
+        }
+    }
+}
+
+fn palette_index_to_rgba(palette: &[Rgb], idx: u8) -> [u8; 4] {
+    let i = idx as usize;
+    if i >= palette.len() {
+        [0, 0, 0, 0]
+    } else {
+        let Rgb { r, g, b } = palette[i];
+        [r, g, b, 0xFF]
     }
 }
 

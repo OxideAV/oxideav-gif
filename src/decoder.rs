@@ -141,6 +141,57 @@ pub fn decode_first_frame(bytes: &[u8]) -> Result<GifImage> {
 
 /// Read a GIF Data Stream from `bytes` and return it as a [`GifImage`].
 pub fn decode(bytes: &[u8]) -> Result<GifImage> {
+    decode_with(bytes, RecoveryMode::Strict)
+}
+
+/// Read a GIF Data Stream in *lenient* mode — when the parser hits a
+/// malformed block past the §17 header / §18 Logical Screen Descriptor
+/// / §19 Global Color Table prefix, it skips ahead to the next §20
+/// Image Separator or §27 Trailer instead of returning an error.
+///
+/// Recovered blocks are appended to the resulting [`GifImage`] in
+/// source order; corrupted bytes are simply dropped. The header, LSD,
+/// and GCT are still required to parse cleanly — a truncated header
+/// has no recoverable image data behind it, so the function still
+/// returns an [`Error`] in that case.
+///
+/// # Why this exists
+///
+/// Real-world streams can be truncated by network resets, corrupted
+/// by transcoders that miscount sub-block lengths, or stitched
+/// together by tools that produce malformed application extensions.
+/// Strict mode (the [`decode`] entry point) refuses these inputs;
+/// lenient mode lets a viewer recover whatever image-bearing blocks
+/// are still readable behind a broken extension or a malformed prior
+/// frame.
+///
+/// # What is NOT recovered
+///
+/// * A corrupt §22 LZW payload inside an image block — the spec
+///   doesn't define a way to resynchronise mid-LZW. The malformed
+///   image is dropped; the parser then resumes at the next §20 / §27
+///   introducer it finds.
+/// * Header / LSD / GCT corruption — these prefix every block, so
+///   without them the stream is effectively unparseable.
+///
+/// # Why a separate entry point
+///
+/// Production decoders should default to strict ([`decode`]) so a
+/// corrupted stream doesn't silently round-trip to a *different*
+/// stream on re-encode. Lenient mode is opt-in for consumers (viewers,
+/// thumbnailers, recovery tools) that prefer "show what we can" over
+/// "all or nothing".
+pub fn decode_lenient(bytes: &[u8]) -> Result<GifImage> {
+    decode_with(bytes, RecoveryMode::Lenient)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryMode {
+    Strict,
+    Lenient,
+}
+
+fn decode_with(bytes: &[u8], mode: RecoveryMode) -> Result<GifImage> {
     let mut p = Parser::new(bytes);
     let version = p.read_header()?;
     let (screen_width, screen_height, packed, background_index, pixel_aspect_ratio) =
@@ -167,56 +218,120 @@ pub fn decode(bytes: &[u8]) -> Result<GifImage> {
     let mut pending_gce: Option<GraphicControl> = None;
 
     loop {
-        let intro = p.peek_byte()?;
+        let intro = match p.peek_byte() {
+            Ok(b) => b,
+            Err(e) => match mode {
+                RecoveryMode::Strict => return Err(e),
+                // Lenient: ran out of bytes without seeing the §27
+                // Trailer. Surface whatever blocks we successfully
+                // recovered so far.
+                RecoveryMode::Lenient => break,
+            },
+        };
         match intro {
             label::TRAILER => {
                 p.advance(1);
                 break;
             }
             label::IMAGE_SEPARATOR => {
-                let frame = p.read_image_descriptor_and_data(pending_gce.take())?;
-                blocks.push(Block::Image(frame));
+                match p.read_image_descriptor_and_data(pending_gce.take()) {
+                    Ok(frame) => blocks.push(Block::Image(frame)),
+                    Err(e) => match mode {
+                        RecoveryMode::Strict => return Err(e),
+                        // §22 LZW corruption / image-descriptor
+                        // truncation. Drop the partial frame and scan
+                        // forward for the next image-or-trailer
+                        // introducer.
+                        RecoveryMode::Lenient => p.resync_to_image_or_trailer(),
+                    },
+                }
             }
             label::EXTENSION_INTRODUCER => {
                 p.advance(1);
-                let label = p.read_byte()?;
+                let label = match p.read_byte() {
+                    Ok(b) => b,
+                    Err(e) => match mode {
+                        RecoveryMode::Strict => return Err(e),
+                        RecoveryMode::Lenient => break,
+                    },
+                };
                 match label {
-                    label::GRAPHIC_CONTROL => {
-                        let gce = p.read_graphic_control_extension()?;
+                    label::GRAPHIC_CONTROL => match p.read_graphic_control_extension() {
                         // §23 — at most one GCE may precede a graphic
                         // rendering block. A second consecutive GCE is
                         // invalid; drop the previous one with a warning
                         // by silently overwriting (decoders must be
                         // robust against malformed streams).
-                        pending_gce = Some(gce);
-                    }
-                    label::COMMENT => {
-                        let data = p.read_data_sub_blocks()?;
-                        blocks.push(Block::Comment(data));
-                    }
-                    label::PLAIN_TEXT => {
-                        let params = p.read_plain_text_extension()?;
-                        blocks.push(Block::PlainText {
+                        Ok(gce) => pending_gce = Some(gce),
+                        Err(e) => match mode {
+                            RecoveryMode::Strict => return Err(e),
+                            RecoveryMode::Lenient => {
+                                // Corrupted GCE; abandon the pending
+                                // attachment and resync.
+                                pending_gce = None;
+                                p.resync_to_image_or_trailer();
+                            }
+                        },
+                    },
+                    label::COMMENT => match p.read_data_sub_blocks() {
+                        Ok(data) => blocks.push(Block::Comment(data)),
+                        Err(e) => match mode {
+                            RecoveryMode::Strict => return Err(e),
+                            RecoveryMode::Lenient => p.resync_to_image_or_trailer(),
+                        },
+                    },
+                    label::PLAIN_TEXT => match p.read_plain_text_extension() {
+                        Ok(params) => blocks.push(Block::PlainText {
                             params,
                             graphic_control: pending_gce.take(),
-                        });
-                    }
-                    label::APPLICATION => {
-                        let app = p.read_application_extension()?;
-                        blocks.push(Block::Application(app));
-                    }
-                    other => {
-                        return Err(Error::Unsupported(format!(
-                            "unknown extension label 0x{other:02X}"
-                        )));
-                    }
+                        }),
+                        Err(e) => match mode {
+                            RecoveryMode::Strict => return Err(e),
+                            RecoveryMode::Lenient => {
+                                pending_gce = None;
+                                p.resync_to_image_or_trailer();
+                            }
+                        },
+                    },
+                    label::APPLICATION => match p.read_application_extension() {
+                        Ok(app) => blocks.push(Block::Application(app)),
+                        Err(e) => match mode {
+                            RecoveryMode::Strict => return Err(e),
+                            RecoveryMode::Lenient => p.resync_to_image_or_trailer(),
+                        },
+                    },
+                    other => match mode {
+                        RecoveryMode::Strict => {
+                            return Err(Error::Unsupported(format!(
+                                "unknown extension label 0x{other:02X}"
+                            )));
+                        }
+                        RecoveryMode::Lenient => {
+                            // Unknown extension label — every defined
+                            // extension's payload sits behind a §15
+                            // sub-block sequence terminated by a 0
+                            // byte. Skip past the sub-blocks; if that
+                            // also fails, resync to the next image
+                            // separator.
+                            if p.skip_data_sub_blocks().is_err() {
+                                p.resync_to_image_or_trailer();
+                            }
+                        }
+                    },
                 }
             }
-            other => {
-                return Err(Error::InvalidData(format!(
-                    "expected block introducer, got byte 0x{other:02X}"
-                )));
-            }
+            other => match mode {
+                RecoveryMode::Strict => {
+                    return Err(Error::InvalidData(format!(
+                        "expected block introducer, got byte 0x{other:02X}"
+                    )));
+                }
+                RecoveryMode::Lenient => {
+                    // Garbage at the block-introducer position. Drop
+                    // the byte and keep scanning.
+                    p.advance(1);
+                }
+            },
         }
     }
 
@@ -352,6 +467,38 @@ impl<'a> Parser<'a> {
             }
             let chunk = self.read_slice(n as usize)?;
             out.extend_from_slice(chunk);
+        }
+    }
+
+    /// Walk a §15 sub-block sequence without buffering the payload.
+    /// Used by lenient-mode unknown-extension skipping.
+    fn skip_data_sub_blocks(&mut self) -> Result<()> {
+        loop {
+            let n = self.read_byte()?;
+            if n == 0 {
+                return Ok(());
+            }
+            self.need(n as usize)?;
+            self.pos += n as usize;
+        }
+    }
+
+    /// Forward-scan the byte stream for the next §20 Image Separator
+    /// (`0x2C`) or §27 Trailer (`0x3B`), stopping the cursor on it.
+    /// Used by lenient mode to recover after a malformed block.
+    ///
+    /// The scan is byte-by-byte; there is no risk of false-matching
+    /// because the parser is only invoked here after deciding the
+    /// current cursor sits in garbage. If neither byte is found, the
+    /// cursor is left at end-of-stream and the outer loop terminates
+    /// the parse on the next `peek_byte`.
+    fn resync_to_image_or_trailer(&mut self) {
+        while self.pos < self.src.len() {
+            let b = self.src[self.pos];
+            if b == label::IMAGE_SEPARATOR || b == label::TRAILER {
+                return;
+            }
+            self.pos += 1;
         }
     }
 
@@ -636,6 +783,140 @@ mod tests {
             Error::InvalidData(s) => assert!(s.contains("no image block")),
             _ => panic!("unexpected error: {err:?}"),
         }
+    }
+
+    /// Lenient mode accepts a well-formed stream byte-for-byte the
+    /// same way strict mode does.
+    #[test]
+    fn lenient_matches_strict_on_well_formed_stream() {
+        let img = one_frame_image_no_extensions();
+        let bytes = encode(&img).unwrap();
+        let strict = decode(&bytes).unwrap();
+        let lenient = decode_lenient(&bytes).unwrap();
+        assert_eq!(strict, lenient);
+    }
+
+    /// Lenient mode recovers a still-readable second frame after
+    /// catching a corrupted LZW payload in the first one. Strict
+    /// mode aborts on the same input.
+    #[test]
+    fn lenient_recovers_frame_after_corrupted_lzw_payload() {
+        // Build a well-formed two-frame stream, then surgically corrupt
+        // the first frame's LZW sub-block payload — keep enough framing
+        // so the parser identifies the §20 Image Separator and reaches
+        // the §22 minimum-code-size byte, but corrupt the LZW bytes so
+        // they fail to decode to the expected number of pixels.
+        let mut img = one_frame_image_no_extensions();
+        img.blocks.push(Block::Image(GifFrame {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![3, 2, 1, 0],
+            graphic_control: None,
+        }));
+        let mut bytes = encode(&img).unwrap();
+        // Locate the first §20 Image Separator (0x2C) past the LSD/GCT.
+        // Skip 6-byte header + 7-byte LSD + GCT bytes.
+        let lsd_packed = bytes[10];
+        let gct_size = if (lsd_packed & 0x80) != 0 {
+            3 * (1 << ((lsd_packed & 0x07) as u32 + 1))
+        } else {
+            0
+        };
+        let first_sep = 6 + 7 + gct_size;
+        assert_eq!(bytes[first_sep], 0x2C, "expected Image Separator");
+        // Corrupt the LZW Minimum Code Size byte. Image Descriptor
+        // (§20.c) is 10 bytes: 1 separator + 2+2+2+2 LE u16 +
+        // 1 packed = 10. No LCT in this frame, so the §22 min code
+        // size byte sits at `first_sep + 10`. Set it to an illegal
+        // value (9 — above the spec ceiling of 8). The decoder
+        // rejects this with InvalidData *before* it touches the LZW
+        // payload, so strict aborts but lenient skips ahead to the
+        // next §20 separator.
+        let min_code_size_off = first_sep + 10;
+        bytes[min_code_size_off] = 9;
+
+        // Strict decode should fail.
+        let strict = decode(&bytes);
+        assert!(strict.is_err(), "strict should reject");
+
+        // Lenient decode should recover the second frame.
+        let lenient = decode_lenient(&bytes).unwrap();
+        let frames: Vec<_> = lenient.frames().collect();
+        assert_eq!(frames.len(), 1, "expected to recover the second frame");
+        assert_eq!(frames[0].indices, vec![3, 2, 1, 0]);
+    }
+
+    /// Lenient mode handles a truncated stream — missing §27 Trailer —
+    /// by returning whatever has been recovered so far.
+    #[test]
+    fn lenient_tolerates_missing_trailer() {
+        let img = one_frame_image_no_extensions();
+        let bytes = encode(&img).unwrap();
+        let truncated = &bytes[..bytes.len() - 1]; // drop the 0x3B Trailer
+                                                   // Strict still works if the §22 sub-block terminator + GCE
+                                                   // already ended the parse before the trailer — but it more
+                                                   // often won't, depending on the stream. Lenient must always
+                                                   // succeed.
+        let lenient = decode_lenient(truncated).unwrap();
+        assert_eq!(lenient.blocks.len(), 1);
+    }
+
+    /// Lenient mode skips garbage bytes between blocks and resumes at
+    /// the next §20 Image Separator.
+    #[test]
+    fn lenient_skips_garbage_between_blocks() {
+        let mut img = one_frame_image_no_extensions();
+        img.blocks.push(Block::Image(GifFrame {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![1, 1, 1, 1],
+            graphic_control: None,
+        }));
+        let mut bytes = encode(&img).unwrap();
+        // Splice garbage right after the LSD/GCT, before the first
+        // Image Separator. The strict parser would reject the
+        // garbage immediately; the lenient parser drops it byte by
+        // byte until it finds 0x2C.
+        let lsd_packed = bytes[10];
+        let gct_size = if (lsd_packed & 0x80) != 0 {
+            3 * (1 << ((lsd_packed & 0x07) as u32 + 1))
+        } else {
+            0
+        };
+        let insertion_point = 6 + 7 + gct_size;
+        let garbage = [0x55u8, 0x66, 0x77];
+        let mut spliced = bytes[..insertion_point].to_vec();
+        spliced.extend_from_slice(&garbage);
+        spliced.extend_from_slice(&bytes[insertion_point..]);
+        bytes = spliced;
+
+        let lenient = decode_lenient(&bytes).unwrap();
+        let frames: Vec<_> = lenient.frames().collect();
+        // Both frames recovered despite the garbage in between.
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].indices, vec![0, 1, 2, 3]);
+        assert_eq!(frames[1].indices, vec![1, 1, 1, 1]);
+    }
+
+    /// Header / LSD corruption is NOT recoverable: the prefix
+    /// applies to every block, so lenient mode still errors there.
+    #[test]
+    fn lenient_still_errors_on_header_corruption() {
+        let mut bytes = b"NOT".to_vec();
+        bytes.extend_from_slice(b"89a"); // garbage signature
+        bytes.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0]);
+        bytes.push(0x3B);
+        assert!(decode_lenient(&bytes).is_err());
     }
 
     /// Fast-path agrees with the full decoder on the first frame's

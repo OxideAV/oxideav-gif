@@ -3,6 +3,34 @@
 ## [Unreleased]
 
 ### Added
+- `font` module — clean-room minimal 8×8 stylised bitmap font for
+  ASCII 0x20..=0x7E. `font::glyph` returns the 8-byte bitmap (MSB =
+  leftmost pixel) for the given code point and falls back to the
+  all-zero space glyph for anything outside the supported range,
+  matching the §25.e fallback rule.
+- §25 Plain Text Extension glyph rendering in `compose` and
+  `playback`. Plain Text blocks now participate in the §23
+  disposal-method state machine and render against the active Global
+  Color Table using the new `font` module; previously they were
+  no-ops on the canvas. Blocks without an active GCT remain no-ops
+  per §25.a ("This block requires a Global Color Table to be
+  available").
+- `app_ext::AnimextsLoopControl` + the corresponding
+  `ANIMEXTS_IDENTIFIER` / `ANIMEXTS_AUTH_CODE` constants — typed view
+  over the legacy ANIMEXTS1.0 Application Extension, which reuses the
+  NETSCAPE2.0 *Looping* sub-block layout under a different
+  identifier+auth. `GifImage::loop_count()` now falls back to
+  ANIMEXTS1.0 when NETSCAPE2.0 is absent, so consumers don't need to
+  pick between the two.
+- `decode_lenient` error-recovery decoder. Skips malformed sub-blocks,
+  corrupt extensions, and rejected image frames by scanning forward
+  to the next §20 Image Separator / §27 Trailer instead of returning
+  an error. The strict `decode` entry point stays the default
+  byte-stable round-trip behaviour; the new entry point is opt-in for
+  viewers / thumbnailers / recovery tools.
+- `fuzz_targets/decode_lenient_panic_free.rs` — companion fuzz target
+  asserting `decode_lenient` returns on arbitrary input without
+  panicking. 200k iterations clean locally.
 - `app_ext::ExifMetadata` + `GifImage::exif()` — typed view over the
   `Exif    ` Application Extension (Exif 2.3 §4.7.2). Mirrors the
   XMP / ICC pass-through pattern: identifier match yields the raw

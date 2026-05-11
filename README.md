@@ -14,14 +14,21 @@ Implements every block type defined by the CompuServe specifications:
 - Graphic Control Extension (§23) — disposal method, user-input flag,
   transparent index, delay time
 - Comment Extension (§24)
-- Plain Text Extension (§25)
+- Plain Text Extension (§25), including glyph rendering against a
+  crate-local clean-room 8×8 monospace bitmap font (`font` module).
+  §25.e leaves the font choice to the decoder; this crate ships a
+  minimal stylised font covering printable ASCII (0x20..=0x7E) and
+  falls back to space for anything outside that range, matching the
+  §25.e fallback rule.
 - Application Extension (§26)
 - Multi-frame compositing onto the §18 Logical Screen using the §23
   disposal-method state machine. `compose()` returns the eager
   `Vec<ComposedFrame>`; `Playback::frames()` is the lazy iterator
   form (one canvas per call). Both cover all four defined disposal
-  values (None / Keep / RestoreBackground / RestorePrevious) and the
-  §23.c.viii transparent-index handling.
+  values (None / Keep / RestoreBackground / RestorePrevious), the
+  §23.c.viii transparent-index handling, and Plain Text rendering
+  via the same disposal state machine (Plain Text is a §25
+  graphic-rendering block too).
 - Animation playback iterator `Playback::looping_frames()` that
   honours the NETSCAPE2.0 *Looping* sub-block: no extension plays one
   pass, `loop_count = 0` loops forever, `loop_count = N` plays
@@ -29,14 +36,18 @@ Implements every block type defined by the CompuServe specifications:
   `docs/image/gif/netscape2.0-loop-extension.md`. Each yielded
   `PlaybackFrame` carries its delay as a `Duration` for ergonomic
   `thread::sleep` calls.
-- Structured views over the four ecosystem-defined Application
+- Structured views over the five ecosystem-defined Application
   Extensions (`app_ext` module) — NETSCAPE2.0 looping +
-  buffering sub-blocks, the Adobe XMP packet (`XMP Data`), the ICC
-  colour profile (`ICCRGBG1`), and the EXIF metadata blob (`Exif    `,
-  Exif 2.3 §4.7.2). `GifImage::loop_count()` / `xmp_packet()` /
-  `icc_profile()` / `exif()` are convenience accessors over the same
-  raw `Block::Application` data, which stays in `GifImage::blocks`
-  for byte-stable round-trip.
+  buffering sub-blocks, the older ANIMEXTS1.0 looping variant (same
+  *Looping* sub-block layout under a different identifier+auth, used
+  by some pre-Netscape encoders), the Adobe XMP packet (`XMP Data`),
+  the ICC colour profile (`ICCRGBG1`), and the EXIF metadata blob
+  (`Exif    `, Exif 2.3 §4.7.2). `GifImage::loop_count()` /
+  `xmp_packet()` / `icc_profile()` / `exif()` are convenience
+  accessors over the same raw `Block::Application` data, which stays
+  in `GifImage::blocks` for byte-stable round-trip;
+  `GifImage::loop_count()` prefers NETSCAPE2.0 and falls back to
+  ANIMEXTS1.0 when NETSCAPE2.0 is absent.
 - Encoder Global vs Local Color Table optimisation
   (`GifImage::optimize_color_tables`) — when every image frame
   carries the same palette, hoists it into the §18 Global Color
@@ -47,15 +58,19 @@ Implements every block type defined by the CompuServe specifications:
   the first image-bearing block and skips the per-block dispatch
   for everything that follows. Useful when you only need a static
   thumbnail of an animated stream.
+- `decode_lenient` error-recovery decoder that skips corrupted
+  sub-blocks, malformed extensions, and partial frames by scanning
+  forward to the next §20 Image Separator / §27 Trailer. Use for
+  viewers / thumbnailers / recovery tools that prefer "show what
+  we can" over "all or nothing"; the strict `decode` entry point
+  stays the default for round-trip-stable consumers.
 
 ## Not implemented
 
-- Other vendor Application Extensions (ANIMEXTS1.0, etc.) — these
-  stay surfaced as raw `Block::Application` data with the
-  identifier, authentication code, and concatenated payload bytes.
-- Plain Text Extension glyph rendering — the spec leaves font choice to
-  the decoder, so `compose` treats Plain Text blocks as no-ops on the
-  canvas.
+- Other vendor Application Extensions beyond the five surfaced via
+  `app_ext` — these stay surfaced as raw `Block::Application` data
+  with the identifier, authentication code, and concatenated payload
+  bytes.
 
 ## Specifications
 

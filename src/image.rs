@@ -196,23 +196,37 @@ impl GifImage {
         })
     }
 
-    /// Animation loop count expressed by the NETSCAPE2.0 Application
-    /// Extension *Looping* sub-block (sub-block ID `0x01`).
+    /// Animation loop count expressed by the NETSCAPE2.0 *Looping*
+    /// sub-block (sub-block ID `0x01`), falling back to the legacy
+    /// ANIMEXTS1.0 Application Extension when NETSCAPE2.0 is absent.
     ///
-    /// * `None` — no NETSCAPE2.0 block, or one that lacks a *Looping*
-    ///   sub-block. Per the de-facto convention this means "play
-    ///   once".
+    /// * `None` — neither extension is present (or both are present but
+    ///   neither carries a *Looping* sub-block). Per the de-facto
+    ///   convention this means "play once".
     /// * `Some(0)` — loop forever.
     /// * `Some(N)` — play `N + 1` times in total (one initial pass
     ///   plus `N` repeats).
     ///
-    /// The byte layout is documented in
-    /// `docs/image/gif/netscape2.0-loop-extension.md`. The first
-    /// matching block wins if the stream carries more than one (which
-    /// is non-portable and discouraged).
+    /// The NETSCAPE2.0 byte layout is documented in
+    /// `docs/image/gif/netscape2.0-loop-extension.md`. ANIMEXTS1.0
+    /// reuses the same *Looping* sub-block layout under identifier
+    /// `b"ANIMEXTS"` + auth code `b"1.0"`. The first matching block in
+    /// source order wins if the stream carries more than one (which is
+    /// non-portable and discouraged); NETSCAPE2.0 is preferred when both
+    /// shapes are present, matching the cross-tool convention that
+    /// NETSCAPE2.0 superseded ANIMEXTS1.0.
     pub fn loop_count(&self) -> Option<u16> {
         for app in self.application_extensions() {
             if let Some(lc) = crate::app_ext::LoopControl::from_application(app) {
+                if let Some(n) = lc.loop_count {
+                    return Some(n);
+                }
+            }
+        }
+        // Fall back to ANIMEXTS1.0 if NETSCAPE2.0 was absent or carried
+        // no *Looping* sub-block.
+        for app in self.application_extensions() {
+            if let Some(lc) = crate::app_ext::AnimextsLoopControl::from_application(app) {
                 if let Some(n) = lc.loop_count {
                     return Some(n);
                 }

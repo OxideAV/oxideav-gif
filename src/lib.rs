@@ -28,12 +28,17 @@
 //!
 //! The CompuServe spec defines no concrete §26 Application
 //! Extensions. The [`app_ext`] module layers typed parsers on top of
-//! the raw [`Application`] block for the four ecosystem-defined
+//! the raw [`Application`] block for the five ecosystem-defined
 //! shapes that achieved cross-decoder de-facto interoperability:
 //!
 //! * NETSCAPE2.0 looping + buffering sub-blocks
 //!   ([`app_ext::LoopControl`]) — see also [`GifImage::loop_count`]
 //!   and [`GifImage::netscape_buffer_hint`].
+//! * ANIMEXTS1.0 looping ([`app_ext::AnimextsLoopControl`]) — older
+//!   Aldus-era variant that predates NETSCAPE2.0 and reuses the same
+//!   *Looping* sub-block layout under a different identifier+auth.
+//!   [`GifImage::loop_count`] falls back to it when NETSCAPE2.0 is
+//!   absent.
 //! * XMP packet ([`app_ext::XmpPacket`]) — see also
 //!   [`GifImage::xmp_packet`].
 //! * ICC colour profile ([`app_ext::IccProfile`]) — see also
@@ -47,11 +52,14 @@
 //! [`Application`] block stays in [`GifImage::blocks`] regardless,
 //! preserving byte-stable round-trip.
 //!
-//! ## Not implemented
+//! ## Plain Text rendering
 //!
-//! * Plain Text Extension glyph rendering — the spec leaves font
-//!   choice to the decoder; [`compose`] treats Plain Text blocks as
-//!   no-ops on the canvas.
+//! The §25 Plain Text Extension leaves font choice to the decoder
+//! (§25.e). [`compose`] / [`playback`] render Plain Text blocks
+//! against a crate-local clean-room 8×8 monospace bitmap font (see
+//! [`font`]) using the §23.c.viii transparent-index handling for the
+//! background colour. Out-of-range characters fall back to space per
+//! §25.e.
 //!
 //! [`Application`]: crate::Application
 //!
@@ -71,6 +79,7 @@ pub mod compose;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
+pub mod font;
 pub mod image;
 pub mod interlace;
 pub mod lzw;
@@ -79,7 +88,7 @@ pub mod playback;
 pub mod registry;
 
 pub use compose::{compose, ComposedFrame, RgbaCanvas};
-pub use decoder::{decode, decode_first_frame};
+pub use decoder::{decode, decode_first_frame, decode_lenient};
 pub use encoder::encode;
 pub use error::{Error, Result};
 pub use image::{
