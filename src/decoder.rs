@@ -31,6 +31,114 @@ mod label {
     pub const APPLICATION: u8 = 0xFF;
 }
 
+/// Read a GIF Data Stream from `bytes` and return only the first
+/// image-bearing block, packaged as a [`GifImage`] containing exactly
+/// one [`Block::Image`].
+///
+/// Walks the §B grammar header → Logical Screen Descriptor → §15
+/// data sub-blocks the same way [`decode`] does, but short-circuits
+/// the moment the first §20 Image Descriptor finishes. Trailing
+/// §24 Comment / §25 Plain Text / §26 Application Extension blocks
+/// (and the §27 Trailer) are intentionally not consumed — the caller
+/// gets the cover frame and stops paying for parser work it does not
+/// need.
+///
+/// Returns [`Error::InvalidData`] when the stream contains no image
+/// block at all (only extensions, then the trailer).
+///
+/// Use [`decode`] when you need the full block list (animation
+/// frames, comments, application extensions).
+///
+/// # Why this is faster than `decode().frames().next()`
+///
+/// `decode()` allocates a [`Vec<Block>`] sized to every block in the
+/// stream, walks every comment / application block past the first
+/// image, and re-runs the LZW decoder on every animation frame even
+/// when the consumer only wants the first one. `decode_first_frame`
+/// stops at the first image and never allocates the trailing block
+/// list.
+pub fn decode_first_frame(bytes: &[u8]) -> Result<GifImage> {
+    let mut p = Parser::new(bytes);
+    let version = p.read_header()?;
+    let (screen_width, screen_height, packed, background_index, pixel_aspect_ratio) =
+        p.read_logical_screen_descriptor()?;
+    let global_table_flag = (packed & 0b1000_0000) != 0;
+    let color_resolution = (packed >> 4) & 0b0000_0111;
+    let global_palette_sorted = (packed & 0b0000_1000) != 0;
+    let global_table_size_bits = packed & 0b0000_0111;
+    let global_palette = if global_table_flag {
+        Some(p.read_color_table(global_table_size_bits)?)
+    } else {
+        None
+    };
+
+    let mut pending_gce: Option<GraphicControl> = None;
+    loop {
+        let intro = p.peek_byte()?;
+        match intro {
+            label::TRAILER => {
+                return Err(Error::InvalidData(
+                    "decode_first_frame: stream contains no image block".into(),
+                ));
+            }
+            label::IMAGE_SEPARATOR => {
+                let frame = p.read_image_descriptor_and_data(pending_gce.take())?;
+                return Ok(GifImage {
+                    version,
+                    screen_width,
+                    screen_height,
+                    color_resolution,
+                    global_palette_sorted,
+                    background_index,
+                    pixel_aspect_ratio,
+                    global_palette,
+                    blocks: vec![Block::Image(frame)],
+                });
+            }
+            label::EXTENSION_INTRODUCER => {
+                p.advance(1);
+                let label = p.read_byte()?;
+                match label {
+                    label::GRAPHIC_CONTROL => {
+                        // Honour §23.d: the GCE attaches to the next
+                        // graphic-rendering block, which on the
+                        // fast-path is the image we are about to
+                        // accept.
+                        pending_gce = Some(p.read_graphic_control_extension()?);
+                    }
+                    label::COMMENT => {
+                        // §24.c.iv — payload bytes follow as a
+                        // sub-block sequence. Skip them rather than
+                        // materialise; the fast-path discards every
+                        // non-image block.
+                        let _ = p.read_data_sub_blocks()?;
+                    }
+                    label::PLAIN_TEXT => {
+                        // §25 — fixed 12-byte parameter block followed
+                        // by sub-blocks.
+                        let _ = p.read_plain_text_extension()?;
+                    }
+                    label::APPLICATION => {
+                        // §26 — fixed 11-byte header block followed by
+                        // sub-blocks.
+                        let _ = p.read_application_extension()?;
+                    }
+                    other => {
+                        return Err(Error::Unsupported(format!(
+                            "unknown extension label 0x{other:02X}"
+                        )));
+                    }
+                }
+            }
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "expected block introducer, got byte 0x{other:02X}"
+                )));
+            }
+        }
+    }
+}
+
 /// Read a GIF Data Stream from `bytes` and return it as a [`GifImage`].
 pub fn decode(bytes: &[u8]) -> Result<GifImage> {
     let mut p = Parser::new(bytes);
@@ -415,5 +523,151 @@ impl<'a> Parser<'a> {
             auth_code,
             data,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_ext::{ExifMetadata, XmpPacket};
+    use crate::encoder::encode;
+    use crate::image::{Block, Frame as GifFrame, GifImage, Rgb, Version};
+
+    fn one_frame_image_no_extensions() -> GifImage {
+        GifImage {
+            version: Version::Gif89a,
+            screen_width: 2,
+            screen_height: 2,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(vec![
+                Rgb::new(0, 0, 0),
+                Rgb::new(0xFF, 0xFF, 0xFF),
+                Rgb::new(0xFF, 0, 0),
+                Rgb::new(0, 0xFF, 0),
+            ]),
+            blocks: vec![Block::Image(GifFrame {
+                left: 0,
+                top: 0,
+                width: 2,
+                height: 2,
+                local_palette: None,
+                palette_sorted: false,
+                interlaced: false,
+                indices: vec![0, 1, 2, 3],
+                graphic_control: None,
+            })],
+        }
+    }
+
+    /// Fast-path on a one-image stream returns exactly that image.
+    #[test]
+    fn fast_path_returns_single_image_block() {
+        let bytes = encode(&one_frame_image_no_extensions()).unwrap();
+        let img = decode_first_frame(&bytes).unwrap();
+        assert_eq!(img.blocks.len(), 1);
+        let f = img.frames().next().unwrap();
+        assert_eq!(f.indices, vec![0, 1, 2, 3]);
+    }
+
+    /// Fast-path skips Comment / Application / Plain Text blocks that
+    /// sit between the LSD and the first image. The skipped blocks
+    /// must NOT appear in the returned `GifImage`.
+    #[test]
+    fn fast_path_skips_extensions_before_image() {
+        let mut img = one_frame_image_no_extensions();
+        let exif = ExifMetadata::new(b"II*\0\x08\x00\x00\x00".to_vec());
+        let xmp = XmpPacket {
+            bytes: b"<x:xmpmeta/>".to_vec(),
+        };
+        // Re-order so extensions sit BEFORE the image block.
+        let frame_block = img.blocks.remove(0);
+        img.blocks = vec![
+            Block::Comment(b"hi".to_vec()),
+            Block::Application(exif.to_application()),
+            Block::Application(xmp.to_application()),
+            frame_block,
+        ];
+        let bytes = encode(&img).unwrap();
+        let cover = decode_first_frame(&bytes).unwrap();
+        // Only the image block survives.
+        assert_eq!(cover.blocks.len(), 1);
+        assert!(matches!(cover.blocks[0], Block::Image(_)));
+        // Trailing extensions / blocks after the image are NOT
+        // consumed — that is the whole point of the fast-path.
+    }
+
+    /// Fast-path attaches the most recent Graphic Control Extension to
+    /// the image (§23.d "scope is the next graphic-rendering block").
+    #[test]
+    fn fast_path_attaches_pending_gce_to_image() {
+        let mut img = one_frame_image_no_extensions();
+        if let Block::Image(f) = &mut img.blocks[0] {
+            f.graphic_control = Some(GraphicControl {
+                disposal: DisposalMethod::RestoreBackground,
+                user_input: false,
+                transparent_index: Some(2),
+                delay_centis: 25,
+            });
+        }
+        let bytes = encode(&img).unwrap();
+        let cover = decode_first_frame(&bytes).unwrap();
+        let f = cover.frames().next().unwrap();
+        let gce = f.graphic_control.as_ref().unwrap();
+        assert_eq!(gce.disposal, DisposalMethod::RestoreBackground);
+        assert_eq!(gce.transparent_index, Some(2));
+        assert_eq!(gce.delay_centis, 25);
+    }
+
+    /// Fast-path on a stream with zero image blocks (only the trailer
+    /// after the LSD) reports `InvalidData` rather than producing an
+    /// empty `GifImage`.
+    #[test]
+    fn fast_path_errors_on_image_free_stream() {
+        // Hand-rolled minimal stream: header + LSD + trailer, no GCT.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GIF89a");
+        bytes.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0]); // 1×1, no GCT
+        bytes.push(0x3B); // Trailer
+        let err = decode_first_frame(&bytes).unwrap_err();
+        match err {
+            Error::InvalidData(s) => assert!(s.contains("no image block")),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    /// Fast-path agrees with the full decoder on the first frame's
+    /// pixels for streams whose first block IS an image.
+    #[test]
+    fn fast_path_agrees_with_full_decode_on_first_frame() {
+        let mut img = one_frame_image_no_extensions();
+        // Add a trailing comment + a second image to make sure full
+        // decode gets more blocks but fast-path stops early.
+        img.blocks.push(Block::Comment(b"trailing".to_vec()));
+        img.blocks.push(Block::Image(GifFrame {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![3, 2, 1, 0],
+            graphic_control: None,
+        }));
+        let bytes = encode(&img).unwrap();
+        let full = decode(&bytes).unwrap();
+        let fast = decode_first_frame(&bytes).unwrap();
+        assert_eq!(fast.blocks.len(), 1);
+        assert!(full.blocks.len() > 1);
+        // Same first frame content.
+        assert_eq!(full.frames().next().unwrap().indices, vec![0, 1, 2, 3]);
+        assert_eq!(fast.frames().next().unwrap().indices, vec![0, 1, 2, 3]);
+        // Same screen-level metadata.
+        assert_eq!(fast.screen_width, full.screen_width);
+        assert_eq!(fast.screen_height, full.screen_height);
+        assert_eq!(fast.global_palette, full.global_palette);
     }
 }

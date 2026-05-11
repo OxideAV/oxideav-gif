@@ -36,6 +36,18 @@
 //!   profile — the caller gets the raw bytes and can hand them to an
 //!   ICC library.
 //!
+//! * **EXIF metadata** — identifier `b"Exif    "` (the literal `Exif`
+//!   token padded to 8 bytes with four trailing ASCII spaces). The
+//!   3-byte authentication code immediately following the identifier in
+//!   the §26 wire layout is treated as opaque: real-world producers
+//!   pin the first byte at `0xFF` and pad the remaining two with
+//!   anything they like, so this module preserves whatever was on the
+//!   wire and matches solely on the identifier. The Exif 2.3 §4.7.2
+//!   convention places a TIFF EXIF blob (header `b"II*\0"` /
+//!   `b"MM\0*"`) directly in the sub-block payload; we do not parse
+//!   the TIFF — the caller gets the raw bytes and can hand them to a
+//!   TIFF/EXIF library.
+//!
 //! ## Round-tripping
 //!
 //! Decoders preserve the raw [`crate::Application`] block in
@@ -67,6 +79,17 @@ pub const XMP_AUTH_CODE: &[u8; 3] = b"XMP";
 /// Identifier + auth code for the ICC colour profile extension.
 pub const ICC_IDENTIFIER: &[u8; 8] = b"ICCRGBG1";
 pub const ICC_AUTH_CODE: &[u8; 3] = b"012";
+
+/// 8-byte identifier for the EXIF Application Extension. The identifier
+/// is the literal `Exif` token padded to 8 bytes with four trailing
+/// ASCII spaces.
+pub const EXIF_IDENTIFIER: &[u8; 8] = b"Exif    ";
+/// Default authentication code used when [`ExifMetadata::to_application`]
+/// emits a fresh block. The first byte is fixed at `0xFF` per the
+/// observed real-world convention; the remaining two bytes are zero.
+/// Parsing accepts any 3-byte auth code so a round-trip preserves
+/// whatever the producer wrote.
+pub const EXIF_AUTH_CODE_DEFAULT: &[u8; 3] = b"\xFF\x00\x00";
 
 /// Sub-block ID (first byte of the 3-byte sub-block) for the
 /// NETSCAPE2.0 *Looping* sub-block.
@@ -244,6 +267,69 @@ impl IccProfile {
     }
 }
 
+/// Parsed EXIF blob from the `Exif    ` Application Extension.
+///
+/// The payload is the raw TIFF EXIF blob — typically beginning with
+/// either `b"II*\0"` (little-endian byte order) or `b"MM\0*"`
+/// (big-endian) per TIFF 6.0 §2 "Image File Header". We do not parse
+/// the TIFF tag tree here; consumers that need to honour individual
+/// tags should hand `bytes` to a TIFF/EXIF library.
+///
+/// The 3-byte authentication code that immediately follows the
+/// identifier in the §26 wire layout is preserved alongside the payload
+/// so a decode → re-encode round-trip is byte-stable: real producers
+/// pin the first byte at `0xFF` and pad the remaining two with values
+/// that vary by tool, and a strict-spec encoder must replay exactly
+/// what it received rather than substitute a default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExifMetadata {
+    /// The 3-byte authentication code as it appeared on the wire.
+    /// [`ExifMetadata::to_application`] echoes this back unchanged.
+    /// Use [`EXIF_AUTH_CODE_DEFAULT`] when constructing a brand-new
+    /// block from scratch.
+    pub auth_code: [u8; 3],
+    /// Raw TIFF EXIF blob. Typically begins with `b"II*\0"` or
+    /// `b"MM\0*"`.
+    pub bytes: Vec<u8>,
+}
+
+impl ExifMetadata {
+    /// Parse a [`crate::Application`] block as an EXIF blob. Returns
+    /// `None` when the identifier does not match — the auth code is
+    /// preserved as-is for round-tripping rather than checked.
+    pub fn from_application(app: &Application) -> Option<Self> {
+        if &app.identifier != EXIF_IDENTIFIER {
+            return None;
+        }
+        Some(ExifMetadata {
+            auth_code: app.auth_code,
+            bytes: app.data.clone(),
+        })
+    }
+
+    /// Build an EXIF [`Application`] block from a raw blob, replaying
+    /// the stored authentication code so a decode → re-encode round
+    /// trip is byte-stable.
+    pub fn to_application(&self) -> Application {
+        Application {
+            identifier: *EXIF_IDENTIFIER,
+            auth_code: self.auth_code,
+            data: self.bytes.clone(),
+        }
+    }
+
+    /// Build a fresh EXIF [`Application`] block from a raw blob using
+    /// the [`EXIF_AUTH_CODE_DEFAULT`] auth code. Use this constructor
+    /// when authoring a new GIF from scratch (no auth-code preservation
+    /// is required).
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            auth_code: *EXIF_AUTH_CODE_DEFAULT,
+            bytes,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +472,73 @@ mod tests {
             data: vec![],
         };
         assert!(IccProfile::from_application(&app).is_none());
+    }
+
+    #[test]
+    fn exif_identifier_is_padded_to_eight_bytes() {
+        // The identifier slot is exactly 8 bytes per §26.c.iv. The
+        // EXIF token is 4 ASCII letters; the canonical form pads with
+        // four trailing spaces.
+        assert_eq!(EXIF_IDENTIFIER.len(), 8);
+        assert_eq!(&EXIF_IDENTIFIER[..4], b"Exif");
+        assert_eq!(&EXIF_IDENTIFIER[4..], b"    ");
+    }
+
+    #[test]
+    fn exif_default_auth_code_pins_first_byte_to_ff() {
+        // Real-world producers consistently pin auth_code[0] = 0xFF.
+        // Defaulting elsewhere would produce blocks that other
+        // ecosystem tools refuse to recognise.
+        assert_eq!(EXIF_AUTH_CODE_DEFAULT[0], 0xFF);
+    }
+
+    #[test]
+    fn exif_roundtrip_with_default_auth_code() {
+        let original = ExifMetadata::new(b"II*\0\x08\x00\x00\x00\x00\x00".to_vec());
+        let app = original.to_application();
+        assert_eq!(&app.identifier, EXIF_IDENTIFIER);
+        assert_eq!(&app.auth_code, EXIF_AUTH_CODE_DEFAULT);
+        let parsed = ExifMetadata::from_application(&app).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn exif_roundtrip_preserves_unusual_auth_code() {
+        // A producer might write a non-default auth code; we must
+        // round-trip whatever was on the wire rather than substitute
+        // EXIF_AUTH_CODE_DEFAULT.
+        let app = Application {
+            identifier: *EXIF_IDENTIFIER,
+            auth_code: [0xFF, 0xAB, 0xCD],
+            data: b"MM\0*\x00\x00\x00\x08".to_vec(),
+        };
+        let parsed = ExifMetadata::from_application(&app).unwrap();
+        assert_eq!(parsed.auth_code, [0xFF, 0xAB, 0xCD]);
+        let rebuilt = parsed.to_application();
+        assert_eq!(rebuilt, app, "byte-stable round-trip");
+    }
+
+    #[test]
+    fn exif_wrong_identifier_returns_none() {
+        let app = Application {
+            identifier: *b"NETSCAPE",
+            auth_code: *b"2.0",
+            data: vec![],
+        };
+        assert!(ExifMetadata::from_application(&app).is_none());
+    }
+
+    #[test]
+    fn exif_empty_payload_still_parses() {
+        // A block with the right identifier but a zero-byte payload is
+        // structurally valid §26 — the typed accessor surfaces it as an
+        // empty blob rather than rejecting.
+        let app = Application {
+            identifier: *EXIF_IDENTIFIER,
+            auth_code: *EXIF_AUTH_CODE_DEFAULT,
+            data: vec![],
+        };
+        let parsed = ExifMetadata::from_application(&app).unwrap();
+        assert!(parsed.bytes.is_empty());
     }
 }

@@ -43,18 +43,24 @@
 //! instant it has assigned an index equal to (2^w − 1).
 //!
 //! Decoder side: the decoder is intrinsically one entry behind the
-//! encoder — the entry it adds after reading the K-th code is the one
-//! the encoder added when it emitted the (K−1)-th code. So the bump
-//! the encoder made after adding entry 2^w − 1 happens, on the
-//! decoder, after the decoder has added the entry one earlier:
-//! 2^w − 2. Equivalently the decoder bumps when its post-add
+//! encoder during in-loop emission — the decoder's first non-Clear
+//! code adds no entry (there is no prior `prev_code`), so after K
+//! received codes the decoder has assigned K − 1 entries while the
+//! encoder has assigned K. The encoder's bump after assigning entry
+//! 2^w − 1 therefore lines up with the decoder's bump after assigning
+//! entry 2^w − 2. Equivalently the decoder bumps when its post-add
 //! `next_code` reaches 2^w − 1, while the encoder bumps when its
 //! post-add `next_code` reaches 2^w.
 //!
-//! Concretely: by the time the decoder has built up to index 2^w − 2,
-//! the encoder has built up to 2^w − 1, has already bumped its width,
-//! and is about to emit the next code at the new width — so the
-//! decoder must read it at the new width.
+//! The encoder mirrors the decoder's "one extra entry" at end-of-input
+//! by performing one phantom dictionary extension during its final
+//! flush (see [`encode`] — the post-loop block adds a `(prev, prev's
+//! own first byte)` entry just like the decoder would on receipt of
+//! `prev`). Without that phantom add the two sides would desync at the
+//! exact moment the encoder's penultimate in-loop assignment lands on
+//! `2^w − 2` (decoder bumps; encoder doesn't), and the encoder's EOI
+//! would be written at the old width while the decoder reads at the
+//! new one.
 //!
 //! At `w == 12` no further widening occurs; behaviour from then on
 //! follows the deferred-clear rule on the cover sheet.
@@ -257,8 +263,21 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
-    // Final pending prefix.
+    // Final pending prefix. The decoder, on receiving this code, will
+    // add a dictionary entry (prev_code + first_byte_of_this) and may
+    // bump its width when that assignment lands on `2^W − 2`. Mirror
+    // that here so the encoder's `width` advances in lock-step;
+    // otherwise the EOI emission below would go out at the old width
+    // while the decoder reads at the new one. We do not actually need
+    // the dictionary entry's contents (no further compression
+    // happens), only the bump-trigger side-effect.
     writer.write(prev, width);
+    if next_code < MAX_TABLE_SIZE as u16
+        && next_code == (1u16 << width) - 1
+        && width < MAX_CODE_WIDTH
+    {
+        width += 1;
+    }
 
     // §F.2 — EOI must be the last code output for an image.
     writer.write(eoi_code, width);
@@ -413,7 +432,11 @@ pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<V
                 next_code += 1;
                 // Decoder bump rule: assigned == 2^W − 2 (one entry
                 // earlier than the encoder's own bump trigger). See the
-                // module-level `When the bit-width grows` derivation.
+                // module-level `When the bit-width grows` derivation —
+                // the decoder lags the encoder by one assignment in
+                // normal flow because the decoder's first non-Clear
+                // code adds no entry; so a decoder threshold of
+                // `2^W − 2` lines up with the encoder's `2^W − 1`.
                 let threshold = (1u16 << width).wrapping_sub(2);
                 if assigned == threshold && width < MAX_CODE_WIDTH {
                     width += 1;
@@ -542,6 +565,17 @@ mod tests {
         assert!(matches!(encode(9, &[0]), Err(Error::InvalidInput(_))));
         assert!(matches!(decode(1, &[], 0), Err(Error::InvalidData(_))));
         assert!(matches!(decode(9, &[], 0), Err(Error::InvalidData(_))));
+    }
+
+    #[test]
+    fn lzw_run_at_8color_endpoint_roundtrips() {
+        // Triggered by the encoder optimisation tests at min_code_size=3
+        // with a 16-pixel monochrome raster. Ensures the decoder bump
+        // rule does not over-shoot when the encoder finishes mid-width.
+        let pixels = vec![0u8; 16];
+        let encoded = encode(3, &pixels).unwrap();
+        let decoded = decode(3, &encoded, pixels.len()).unwrap();
+        assert_eq!(decoded, pixels);
     }
 
     #[test]

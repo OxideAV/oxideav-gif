@@ -29,18 +29,29 @@ Implements every block type defined by the CompuServe specifications:
   `docs/image/gif/netscape2.0-loop-extension.md`. Each yielded
   `PlaybackFrame` carries its delay as a `Duration` for ergonomic
   `thread::sleep` calls.
-- Structured views over the three ecosystem-defined Application
+- Structured views over the four ecosystem-defined Application
   Extensions (`app_ext` module) — NETSCAPE2.0 looping +
-  buffering sub-blocks, the Adobe XMP packet (`XMP Data`), and ICC
-  colour profile (`ICCRGBG1`). `GifImage::loop_count()` /
-  `xmp_packet()` / `icc_profile()` are convenience accessors over
-  the same raw `Block::Application` data, which stays in
-  `GifImage::blocks` for byte-stable round-trip.
+  buffering sub-blocks, the Adobe XMP packet (`XMP Data`), the ICC
+  colour profile (`ICCRGBG1`), and the EXIF metadata blob (`Exif    `,
+  Exif 2.3 §4.7.2). `GifImage::loop_count()` / `xmp_packet()` /
+  `icc_profile()` / `exif()` are convenience accessors over the same
+  raw `Block::Application` data, which stays in `GifImage::blocks`
+  for byte-stable round-trip.
+- Encoder Global vs Local Color Table optimisation
+  (`GifImage::optimize_color_tables`) — when every image frame
+  carries the same palette, hoists it into the §18 Global Color
+  Table and clears the now-redundant §21 Local Color Tables, saving
+  `3 × 2^(size_bits + 1)` bytes per frame. Pixels are unaffected
+  (§21 says a frame with the LCT flag clear uses the §18 GCT).
+- `decode_first_frame` cover-frame fast-path that short-circuits at
+  the first image-bearing block and skips the per-block dispatch
+  for everything that follows. Useful when you only need a static
+  thumbnail of an animated stream.
 
 ## Not implemented
 
-- Other vendor Application Extensions (EXIF, ANIMEXTS1.0, etc.) —
-  these stay surfaced as raw `Block::Application` data with the
+- Other vendor Application Extensions (ANIMEXTS1.0, etc.) — these
+  stay surfaced as raw `Block::Application` data with the
   identifier, authentication code, and concatenated payload bytes.
 - Plain Text Extension glyph rendering — the spec leaves font choice to
   the decoder, so `compose` treats Plain Text blocks as no-ops on the

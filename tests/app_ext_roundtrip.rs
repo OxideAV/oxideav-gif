@@ -7,7 +7,9 @@
 //! accessors ([`GifImage::loop_count`] etc.) and the raw
 //! [`Block::Application`] payload survive unchanged.
 
-use oxideav_gif::app_ext::{IccProfile, LoopControl, XmpPacket};
+use oxideav_gif::app_ext::{
+    ExifMetadata, IccProfile, LoopControl, XmpPacket, EXIF_AUTH_CODE_DEFAULT, EXIF_IDENTIFIER,
+};
 use oxideav_gif::{decode, encode, Block, Frame, GifImage, Rgb, Version};
 
 fn three_frame_gif(extra: Vec<Block>) -> GifImage {
@@ -137,6 +139,68 @@ fn icc_profile_roundtrip() {
 }
 
 #[test]
+fn exif_blob_roundtrip() {
+    // Tiny but well-formed TIFF EXIF blob — byte-order marker `II` +
+    // magic 0x002A + first-IFD offset 8 + zero IFD entries (count = 0).
+    let blob: Vec<u8> = vec![
+        b'I', b'I', // little-endian byte order
+        0x2A, 0x00, // magic 42
+        0x08, 0x00, 0x00, 0x00, // offset to first IFD
+        0x00, 0x00, // 0 entries
+        0x00, 0x00, 0x00, 0x00, // next-IFD offset = 0
+    ];
+    let exif = ExifMetadata::new(blob.clone());
+    let img = three_frame_gif(vec![Block::Application(exif.to_application())]);
+    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    assert_eq!(decoded.exif(), Some(blob.as_slice()));
+    assert_eq!(decoded, img);
+}
+
+#[test]
+fn exif_block_emitted_at_correct_byte_layout() {
+    // Spot-check the wire format: the encoded stream must contain the
+    // 14-byte EXIF block prefix immediately followed by the first
+    // §15 sub-block length byte.
+    let blob = vec![b'I', b'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00];
+    let exif = ExifMetadata::new(blob.clone());
+    let img = three_frame_gif(vec![Block::Application(exif.to_application())]);
+    let bytes = encode(&img).unwrap();
+    // 0x21 (Extension Introducer) | 0xFF (Application label) | 0x0B
+    // (block size, fixed 11) | "Exif    " (8-byte identifier) |
+    // EXIF_AUTH_CODE_DEFAULT (3 bytes).
+    let mut needle: Vec<u8> = vec![0x21, 0xFF, 0x0B];
+    needle.extend_from_slice(EXIF_IDENTIFIER);
+    needle.extend_from_slice(EXIF_AUTH_CODE_DEFAULT);
+    assert!(
+        bytes.windows(needle.len()).any(|w| w == needle),
+        "encoded EXIF block prefix must match the documented layout"
+    );
+}
+
+#[test]
+fn exif_with_nondefault_auth_code_roundtrips() {
+    // A producer may write a non-default auth code; round-trip must
+    // preserve every byte rather than substitute EXIF_AUTH_CODE_DEFAULT.
+    use oxideav_gif::Application;
+    let app = Application {
+        identifier: *EXIF_IDENTIFIER,
+        auth_code: [0xFF, 0x12, 0x34],
+        data: b"II*\0\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(),
+    };
+    let img = three_frame_gif(vec![Block::Application(app.clone())]);
+    let bytes = encode(&img).unwrap();
+    let decoded = decode(&bytes).unwrap();
+    let parsed = ExifMetadata::from_application(&app).unwrap();
+    let app2 = decoded
+        .application_extensions()
+        .find(|a| &a.identifier == EXIF_IDENTIFIER)
+        .unwrap();
+    assert_eq!(app2.auth_code, [0xFF, 0x12, 0x34]);
+    let parsed2 = ExifMetadata::from_application(app2).unwrap();
+    assert_eq!(parsed, parsed2);
+}
+
+#[test]
 fn netscape_xmp_icc_coexist() {
     // All three structured Application Extensions in one stream. The
     // accessors must each pick out the matching block independent of
@@ -182,6 +246,7 @@ fn unrelated_application_extension_is_invisible_to_typed_accessors() {
     assert_eq!(decoded.netscape_buffer_hint(), None);
     assert_eq!(decoded.xmp_packet(), None);
     assert_eq!(decoded.icc_profile(), None);
+    assert_eq!(decoded.exif(), None);
 }
 
 #[test]

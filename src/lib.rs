@@ -1,6 +1,9 @@
 //! Pure-Rust GIF87a / GIF89a codec.
 //!
 //! Decode a byte stream with [`decode`] and produce a [`GifImage`].
+//! Use [`decode_first_frame`] when you only need the cover frame —
+//! it short-circuits at the first image-bearing block and skips the
+//! per-block dispatch overhead for everything that follows.
 //! Construct or modify a [`GifImage`] and serialise it with [`encode`].
 //!
 //! ## Implemented (per CompuServe specifications)
@@ -25,7 +28,7 @@
 //!
 //! The CompuServe spec defines no concrete §26 Application
 //! Extensions. The [`app_ext`] module layers typed parsers on top of
-//! the raw [`Application`] block for the three ecosystem-defined
+//! the raw [`Application`] block for the four ecosystem-defined
 //! shapes that achieved cross-decoder de-facto interoperability:
 //!
 //! * NETSCAPE2.0 looping + buffering sub-blocks
@@ -35,6 +38,10 @@
 //!   [`GifImage::xmp_packet`].
 //! * ICC colour profile ([`app_ext::IccProfile`]) — see also
 //!   [`GifImage::icc_profile`].
+//! * EXIF metadata ([`app_ext::ExifMetadata`]) — see also
+//!   [`GifImage::exif`]. Carries a TIFF EXIF blob per Exif 2.3
+//!   §4.7.2; the spec defines this for JPEG/TIFF and the GIF binding
+//!   is an ecosystem convention.
 //!
 //! These accessors layer on top of the raw block list — the
 //! [`Application`] block stays in [`GifImage::blocks`] regardless,
@@ -72,7 +79,7 @@ pub mod playback;
 pub mod registry;
 
 pub use compose::{compose, ComposedFrame, RgbaCanvas};
-pub use decoder::decode;
+pub use decoder::{decode, decode_first_frame};
 pub use encoder::encode;
 pub use error::{Error, Result};
 pub use image::{

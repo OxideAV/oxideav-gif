@@ -3,6 +3,32 @@
 ## [Unreleased]
 
 ### Added
+- `app_ext::ExifMetadata` + `GifImage::exif()` — typed view over the
+  `Exif    ` Application Extension (Exif 2.3 §4.7.2). Mirrors the
+  XMP / ICC pass-through pattern: identifier match yields the raw
+  TIFF EXIF blob; the 3-byte authentication code is preserved on
+  the typed struct so a decode → re-encode round-trip is byte-stable
+  even when the producer used a non-default auth code.
+- `GifImage::optimize_color_tables()` — encoder helper that hoists a
+  shared per-frame Local Color Table into the §18 Global Color
+  Table when every image frame carries the same palette. Saves
+  `3 × 2^(size_bits + 1)` bytes per frame. Refuses to hoist when
+  palettes differ (no-op, stream byte-identical to baseline).
+- `decode_first_frame()` cover-frame fast-path that short-circuits
+  at the first image-bearing block and discards every trailing
+  block. Useful for thumbnail-style consumers that don't need the
+  full animation timeline.
+
+### Fixed
+- LZW codec width-bump symmetry at end-of-input. The encoder now
+  performs a phantom dictionary extension on its final-prefix
+  emission, mirroring the decoder's own entry add. Without this,
+  rasters whose penultimate in-loop assignment lands exactly on
+  `2^W − 2` (e.g., a 16-pixel monochrome image at
+  `min_code_size = 3`) wrote EOI at the old width while the decoder
+  read at the new one. The fix is internal — encoded byte streams
+  for the unaffected case are byte-identical to before.
+
 - `playback` module — lazy `Playback` / `FrameIter` /
   `LoopingFrameIter` iterators that walk the §23 disposal-method
   state machine one frame at a time. Yields `PlaybackFrame`
