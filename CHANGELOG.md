@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Added
+- §7 "Required Version" enforcement on encode. The encoder now
+  refuses to emit a `GIF87a`-labeled stream that contains any
+  89a-only block (§23 Graphic Control, §24 Comment, §25 Plain Text,
+  §26 Application Extension) with an `InvalidInput` naming the
+  offending block kind. Two new accessors on `GifImage`:
+  `required_version()` (the earliest version that covers every
+  contained block, per the per-block "Required Version" table) and
+  `upgrade_version_if_needed()` (bumps the declared version to the
+  required minimum in one call). The upgrade helper never
+  *down*grades — a caller's explicit choice of `Gif89a` for an
+  87a-compatible payload is preserved. Also exposes
+  `Block::required_version()` for callers that want per-block
+  granularity, plus `Ord` / `PartialOrd` impls on `Version` so
+  `version.max(required)` works in arithmetic contexts.
 - `font` module — clean-room minimal 8×8 stylised bitmap font for
   ASCII 0x20..=0x7E. `font::glyph` returns the 8-byte bitmap (MSB =
   leftmost pixel) for the given code point and falls back to the

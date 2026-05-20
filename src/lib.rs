@@ -52,6 +52,28 @@
 //! [`Application`] block stays in [`GifImage::blocks`] regardless,
 //! preserving byte-stable round-trip.
 //!
+//! ## §7 Required Version enforcement on encode
+//!
+//! The CompuServe spec's §7 ("Version Numbers") requires encoders to
+//! label a stream with the earliest version that covers every block in
+//! it. Per-block "Required Version" entries are 87a for §20 Image
+//! Descriptor / §21 Local Color Table / §22 Table-Based Image Data and
+//! 89a for §23 Graphic Control / §24 Comment / §25 Plain Text / §26
+//! Application Extensions.
+//!
+//! [`encode`] enforces this on the encoder side: a [`GifImage`] declared
+//! [`Version::Gif87a`] that contains any 89a-only block is rejected with
+//! [`Error::InvalidInput`] before any bytes go to the wire — the
+//! alternative ("a `GIF87a` header followed by 89a-only block payloads")
+//! would be structurally invalid.
+//!
+//! Two recovery helpers ride on top: [`GifImage::required_version`]
+//! returns the minimum version that covers the current block list, and
+//! [`GifImage::upgrade_version_if_needed`] bumps the declared version up
+//! to that minimum in one call. The upgrade helper never *down*grades:
+//! a caller's explicit choice of [`Version::Gif89a`] for an
+//! 87a-compatible payload is preserved.
+//!
 //! ## Plain Text rendering
 //!
 //! The §25 Plain Text Extension leaves font choice to the decoder

@@ -62,6 +62,28 @@ fn validate(image: &GifImage) -> Result<()> {
     if let Some(palette) = &image.global_palette {
         validate_palette(palette, "global")?;
     }
+    // §7 ("Version Numbers") — an encoder is required to label the
+    // stream with the earliest version that covers every block. If the
+    // caller declared `Version::Gif87a` but their block list contains an
+    // 89a-only block (any extension, or an image with an attached §23
+    // GCE), we cannot honour the request: the resulting stream would be
+    // structurally invalid (a `GIF87a` header followed by a 89a-only
+    // block payload). Refuse with `InvalidInput` so the caller fixes the
+    // mismatch — either by calling [`crate::GifImage::upgrade_version_if_needed`]
+    // first or by removing the offending block.
+    let required = image.required_version();
+    if required > image.version {
+        let offender = image
+            .blocks
+            .iter()
+            .find(|b| b.required_version() > image.version)
+            .map(block_label)
+            .unwrap_or("unknown");
+        return Err(Error::InvalidInput(format!(
+            "stream declared as GIF87a but contains a {offender} block (Required Version: GIF89a). \
+             Call GifImage::upgrade_version_if_needed() or remove the block."
+        )));
+    }
     for block in &image.blocks {
         if let Block::Image(frame) = block {
             if let Some(palette) = &frame.local_palette {
@@ -80,6 +102,17 @@ fn validate(image: &GifImage) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Short label for an offending block kind, used in the §7 version
+/// mismatch error message.
+fn block_label(block: &Block) -> &'static str {
+    match block {
+        Block::Image(_) => "Image (with Graphic Control Extension)",
+        Block::PlainText { .. } => "Plain Text Extension",
+        Block::Comment(_) => "Comment Extension",
+        Block::Application(_) => "Application Extension",
+    }
 }
 
 fn validate_palette(palette: &[Rgb], scope: &str) -> Result<()> {
@@ -331,6 +364,162 @@ fn bits_required_for(n: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::{Application, DisposalMethod, Frame as GifFrame, GraphicControl, PlainText};
+
+    fn one_pixel_image(version: Version, blocks: Vec<Block>) -> GifImage {
+        GifImage {
+            version,
+            screen_width: 1,
+            screen_height: 1,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(vec![Rgb::new(0, 0, 0), Rgb::new(0xFF, 0xFF, 0xFF)]),
+            blocks,
+        }
+    }
+
+    fn one_frame_no_gce() -> Block {
+        Block::Image(GifFrame {
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![0],
+            graphic_control: None,
+        })
+    }
+
+    fn one_frame_with_gce() -> Block {
+        Block::Image(GifFrame {
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![0],
+            graphic_control: Some(GraphicControl {
+                disposal: DisposalMethod::Keep,
+                user_input: false,
+                transparent_index: None,
+                delay_centis: 10,
+            }),
+        })
+    }
+
+    /// §7 — pure 87a-compatible content (image, no extensions) encodes
+    /// under `Gif87a` without complaint.
+    #[test]
+    fn encode_pure_image_under_gif87a_works() {
+        let img = one_pixel_image(Version::Gif87a, vec![one_frame_no_gce()]);
+        let out = encode(&img).unwrap();
+        // Header must be `GIF87a`.
+        assert_eq!(&out[..6], b"GIF87a");
+    }
+
+    /// §23 GCE requires 89a — encoding under `Gif87a` must be rejected
+    /// because the resulting stream would be malformed (a `GIF87a`
+    /// header preceding a 89a-only block).
+    #[test]
+    fn encode_gce_under_gif87a_rejected() {
+        let img = one_pixel_image(Version::Gif87a, vec![one_frame_with_gce()]);
+        let err = encode(&img).unwrap_err();
+        match err {
+            Error::InvalidInput(s) => {
+                assert!(s.contains("GIF87a"), "{s}");
+                assert!(s.contains("GIF89a"), "{s}");
+                assert!(s.contains("Image"), "{s}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// §24 Comment Extension requires 89a.
+    #[test]
+    fn encode_comment_under_gif87a_rejected() {
+        let img = one_pixel_image(
+            Version::Gif87a,
+            vec![Block::Comment(b"hi".to_vec()), one_frame_no_gce()],
+        );
+        let err = encode(&img).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(s) if s.contains("Comment")));
+    }
+
+    /// §25 Plain Text Extension requires 89a.
+    #[test]
+    fn encode_plain_text_under_gif87a_rejected() {
+        let pt = PlainText {
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            cell_width: 8,
+            cell_height: 8,
+            fg_color_index: 1,
+            bg_color_index: 0,
+            text: b"X".to_vec(),
+        };
+        let img = one_pixel_image(
+            Version::Gif87a,
+            vec![
+                Block::PlainText {
+                    params: pt,
+                    graphic_control: None,
+                },
+                one_frame_no_gce(),
+            ],
+        );
+        let err = encode(&img).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(s) if s.contains("Plain Text")));
+    }
+
+    /// §26 Application Extension requires 89a.
+    #[test]
+    fn encode_application_under_gif87a_rejected() {
+        let app = Application {
+            identifier: *b"NETSCAPE",
+            auth_code: *b"2.0",
+            data: vec![0x01, 0x00, 0x00],
+        };
+        let img = one_pixel_image(
+            Version::Gif87a,
+            vec![Block::Application(app), one_frame_no_gce()],
+        );
+        let err = encode(&img).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(s) if s.contains("Application")));
+    }
+
+    /// `upgrade_version_if_needed()` followed by `encode()` succeeds on
+    /// what would otherwise be a §7 mismatch — this is the documented
+    /// recovery path.
+    #[test]
+    fn upgrade_then_encode_passes_with_gif89a_header() {
+        let mut img = one_pixel_image(Version::Gif87a, vec![one_frame_with_gce()]);
+        assert!(img.upgrade_version_if_needed(), "expected a version bump");
+        let out = encode(&img).unwrap();
+        assert_eq!(&out[..6], b"GIF89a");
+    }
+
+    /// `Gif89a` is preserved when the blocks would only require 87a —
+    /// `upgrade_version_if_needed` must NOT *downgrade*. An explicit
+    /// `Gif89a` declaration is a caller choice we honour.
+    #[test]
+    fn upgrade_does_not_downgrade() {
+        let mut img = one_pixel_image(Version::Gif89a, vec![one_frame_no_gce()]);
+        assert!(
+            !img.upgrade_version_if_needed(),
+            "expected no version change"
+        );
+        assert_eq!(img.version, Version::Gif89a);
+        let out = encode(&img).unwrap();
+        assert_eq!(&out[..6], b"GIF89a");
+    }
 
     #[test]
     fn size_bits_table() {

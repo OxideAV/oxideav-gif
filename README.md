@@ -64,6 +64,15 @@ Implements every block type defined by the CompuServe specifications:
   viewers / thumbnailers / recovery tools that prefer "show what
   we can" over "all or nothing"; the strict `decode` entry point
   stays the default for round-trip-stable consumers.
+- §7 "Required Version" enforcement on encode. The encoder honours
+  the per-block "Required Version" table — §23 Graphic Control,
+  §24 Comment, §25 Plain Text, and §26 Application Extensions all
+  require 89a — and refuses to emit a `GIF87a`-labeled stream that
+  contains any of them. `GifImage::required_version()` returns the
+  minimum version that covers the block list, and
+  `upgrade_version_if_needed()` bumps the declared version to that
+  minimum in one call (it never *down*grades — a caller's explicit
+  choice of `Gif89a` for a 87a-compatible payload is preserved).
 
 ## Not implemented
 
