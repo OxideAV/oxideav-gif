@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- §24 Comment Extension accessors on `GifImage`. `comments()` is the
+  source-order iterator over every `Block::Comment` payload (mirrors
+  the existing `application_extensions()` accessor);
+  `concatenated_comment()` returns every payload joined with a single
+  LF as a single buffer, returning `None` when no Comment Extension is
+  present so callers can distinguish "no comments" from "one empty
+  comment". `comments_are_7bit_ascii()` and
+  `comments_in_recommended_position()` surface the §24.e.i / §24.e.ii
+  *recommendations* (ASCII-only payload; leading-or-trailing position
+  relative to graphic-rendering blocks) as boolean queries — the
+  encoder itself does not enforce a recommendation, so consumers that
+  want to refuse non-conforming streams gate on these checks
+  themselves.
 - §7 "Required Version" enforcement on encode. The encoder now
   refuses to emit a `GIF87a`-labeled stream that contains any
   89a-only block (§23 Graphic Control, §24 Comment, §25 Plain Text,

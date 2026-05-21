@@ -74,6 +74,20 @@
 //! a caller's explicit choice of [`Version::Gif89a`] for an
 //! 87a-compatible payload is preserved.
 //!
+//! ## §24 Comment Extension accessors
+//!
+//! The CompuServe spec (§24.a) allows any number of Comment
+//! Extensions in the Data Stream and recommends (§24.e.i) that they
+//! contain 7-bit ASCII text and (§24.e.ii) that they appear at the
+//! beginning or end of the stream. [`GifImage::comments`] iterates the
+//! payloads in source order; [`GifImage::concatenated_comment`]
+//! returns every payload joined with a single LF (or `None` when no
+//! Comment Extension is present). [`GifImage::comments_are_7bit_ascii`]
+//! and [`GifImage::comments_in_recommended_position`] surface the
+//! §24.e *recommendations* as boolean queries so a caller that wants
+//! to honour them strictly can gate on them; the encoder itself never
+//! enforces a recommendation.
+//!
 //! ## Plain Text rendering
 //!
 //! The §25 Plain Text Extension leaves font choice to the decoder

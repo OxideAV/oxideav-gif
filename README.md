@@ -13,7 +13,14 @@ Implements every block type defined by the CompuServe specifications:
 - Four-pass interlace transform (Appendix E)
 - Graphic Control Extension (§23) — disposal method, user-input flag,
   transparent index, delay time
-- Comment Extension (§24)
+- Comment Extension (§24), with `GifImage::comments()` iterator and
+  `concatenated_comment()` helper for the common "give me every comment
+  in one buffer" path. `comments_are_7bit_ascii()` and
+  `comments_in_recommended_position()` surface the §24.e.i / §24.e.ii
+  *recommendations* (ASCII-only payload; leading-or-trailing position)
+  as boolean queries — the encoder itself never enforces a
+  recommendation, but consumers can gate on these checks when
+  authoring stricter pipelines.
 - Plain Text Extension (§25), including glyph rendering against a
   crate-local clean-room 8×8 monospace bitmap font (`font` module).
   §25.e leaves the font choice to the decoder; this crate ships a

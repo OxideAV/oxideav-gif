@@ -304,6 +304,66 @@ fn multi_frame_stream_roundtrips() {
     assert_eq!(img2, img);
 }
 
+/// §24 Comment Extension accessors round-trip end-to-end: an image
+/// authored with two Comment Extensions in §24.e.ii-conforming
+/// positions (one leading, one trailing) encodes to a GIF89a byte
+/// stream, decodes back, and the accessors `comments()`,
+/// `concatenated_comment()`, `comments_are_7bit_ascii()`, and
+/// `comments_in_recommended_position()` report the same values on
+/// the decoded image as on the original.
+#[test]
+fn comment_accessors_roundtrip_through_encode_decode() {
+    use oxideav_gif::Frame;
+    let palette = vec![Rgb::new(0, 0, 0), Rgb::new(0xFF, 0xFF, 0xFF)];
+    let img = GifImage {
+        version: Version::Gif89a,
+        screen_width: 1,
+        screen_height: 1,
+        color_resolution: 0,
+        global_palette_sorted: false,
+        background_index: 0,
+        pixel_aspect_ratio: 0,
+        global_palette: Some(palette),
+        blocks: vec![
+            // §24.e.ii — leading position is recommended.
+            Block::Comment(b"authored by oxideav-gif".to_vec()),
+            Block::Image(Frame {
+                left: 0,
+                top: 0,
+                width: 1,
+                height: 1,
+                local_palette: None,
+                palette_sorted: false,
+                interlaced: false,
+                indices: vec![0],
+                graphic_control: None,
+            }),
+            // §24.e.ii — trailing position is also recommended.
+            Block::Comment(b"end of stream".to_vec()),
+        ],
+    };
+    let bytes = encode(&img).unwrap();
+    let img2 = decode(&bytes).unwrap();
+    let collected: Vec<&[u8]> = img2.comments().collect();
+    assert_eq!(
+        collected,
+        vec![
+            b"authored by oxideav-gif".as_slice(),
+            b"end of stream".as_slice()
+        ]
+    );
+    assert_eq!(
+        img2.concatenated_comment(),
+        Some(b"authored by oxideav-gif\nend of stream".to_vec())
+    );
+    // Pure ASCII payload → §24.e.i conforms.
+    assert!(img2.comments_are_7bit_ascii());
+    // Leading + trailing → §24.e.ii conforms.
+    assert!(img2.comments_in_recommended_position());
+    // Byte-identical round-trip is preserved.
+    assert_eq!(img2, img);
+}
+
 /// Empty-trailer-only Data Stream — Appendix B grammar permits zero
 /// `<Data>` elements when only a global palette load is intended.
 #[test]

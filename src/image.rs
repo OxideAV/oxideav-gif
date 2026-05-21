@@ -247,6 +247,107 @@ impl GifImage {
         })
     }
 
+    /// Iterate every §24 Comment Extension payload in source order.
+    ///
+    /// The CompuServe spec (§24.a) makes Comment Extensions OPTIONAL
+    /// and explicitly allows any number of them to appear in the Data
+    /// Stream, so the iterator surface is a sequence rather than a
+    /// single payload. Encoders that want every byte of textual
+    /// metadata in one buffer can call [`Self::concatenated_comment`].
+    pub fn comments(&self) -> impl Iterator<Item = &[u8]> {
+        self.blocks.iter().filter_map(|b| match b {
+            Block::Comment(data) => Some(data.as_slice()),
+            _ => None,
+        })
+    }
+
+    /// Concatenate every §24 Comment Extension payload into a single
+    /// buffer, separating consecutive comments with a single LF
+    /// (`b'\n'`). Returns `None` when the stream carries no Comment
+    /// Extension at all so callers can distinguish "no comments" from
+    /// "one empty comment".
+    ///
+    /// The newline separator is a convenience for the common
+    /// "show me every comment as one blob of text" use case; consumers
+    /// that need to preserve the original boundary structure (e.g.
+    /// re-emitting them as distinct blocks) should call
+    /// [`Self::comments`] and concatenate themselves.
+    pub fn concatenated_comment(&self) -> Option<Vec<u8>> {
+        let mut iter = self.comments();
+        let first = iter.next()?;
+        let mut out = first.to_vec();
+        for next in iter {
+            out.push(b'\n');
+            out.extend_from_slice(next);
+        }
+        Some(out)
+    }
+
+    /// Check every §24 Comment Extension payload against §24.e.i:
+    /// "It should contain text using the 7-bit ASCII character set."
+    ///
+    /// Returns `true` only when every byte of every Comment Extension
+    /// is in the 7-bit-ASCII range (`0x00..=0x7F`). Streams with no
+    /// Comment Extensions trivially conform.
+    ///
+    /// §24.e is a *recommendation*, not a hard requirement — a stream
+    /// with non-ASCII comment bytes is still a valid GIF89a per §24.a.
+    /// Consumers that want to honour the recommendation strictly can
+    /// gate emission on this check; the encoder itself does not enforce
+    /// it.
+    pub fn comments_are_7bit_ascii(&self) -> bool {
+        self.comments()
+            .all(|payload| payload.iter().all(|b| *b <= 0x7F))
+    }
+
+    /// Check every §24 Comment Extension against §24.e.ii:
+    /// "they should be located at the beginning or at the end of the
+    /// Data Stream to the extent possible."
+    ///
+    /// Returns `true` when every Comment Extension is either:
+    ///
+    /// * In the leading run — preceded by zero or more Comment /
+    ///   Application Extension blocks, with no graphic-rendering block
+    ///   (§20 Image or §25 Plain Text) before it. (Application
+    ///   Extensions are allowed in the leading run because the
+    ///   NETSCAPE2.0 / ANIMEXTS1.0 / XMP / ICC / Exif convention places
+    ///   them between the Global Color Table and the first frame.)
+    /// * In the trailing run — followed by zero or more Comment /
+    ///   Application Extension blocks, with no graphic-rendering block
+    ///   after it.
+    ///
+    /// Streams with no Comment Extensions trivially conform. The check
+    /// is informational; the encoder accepts comments anywhere in the
+    /// block list (since §12 / §15 / §24.d allow them there).
+    pub fn comments_in_recommended_position(&self) -> bool {
+        // Locate the bounding indices of the graphic-rendering blocks
+        // (§20 Image + §25 Plain Text). Any Comment outside that range
+        // is in the leading or trailing run; any Comment inside it
+        // (strictly between the first and last graphic block) violates
+        // §24.e.ii.
+        let first_graphic = self
+            .blocks
+            .iter()
+            .position(|b| matches!(b, Block::Image(_) | Block::PlainText { .. }));
+        let last_graphic = self
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::Image(_) | Block::PlainText { .. }));
+        let (Some(first), Some(last)) = (first_graphic, last_graphic) else {
+            // No graphic blocks at all → every Comment is trivially in
+            // a "leading or trailing" position.
+            return true;
+        };
+        // first ≤ last by construction. A Comment violates the
+        // recommendation only when its index lies strictly between
+        // first and last (i.e. interleaved with graphic blocks).
+        !self
+            .blocks
+            .iter()
+            .enumerate()
+            .any(|(i, b)| matches!(b, Block::Comment(_)) && i > first && i < last)
+    }
+
     /// Animation loop count expressed by the NETSCAPE2.0 *Looping*
     /// sub-block (sub-block ID `0x01`), falling back to the legacy
     /// ANIMEXTS1.0 Application Extension when NETSCAPE2.0 is absent.
@@ -733,5 +834,229 @@ mod tests {
         assert_eq!(img.required_version(), Version::Gif87a);
         assert!(!img.upgrade_version_if_needed());
         assert_eq!(img.version, Version::Gif89a, "must not downgrade");
+    }
+
+    // ---------------------------------------------------------------
+    // §24 Comment Extension accessors.
+    // ---------------------------------------------------------------
+
+    /// `comments()` yields every §24 Comment Extension payload in
+    /// source order and skips non-comment blocks.
+    #[test]
+    fn comments_iterator_yields_in_source_order_and_skips_non_comment_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"first".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Application(Application {
+                    identifier: *b"NETSCAPE",
+                    auth_code: *b"2.0",
+                    data: vec![],
+                }),
+                Block::Comment(b"second".to_vec()),
+            ],
+        );
+        let collected: Vec<&[u8]> = img.comments().collect();
+        assert_eq!(collected, vec![b"first".as_slice(), b"second".as_slice()]);
+    }
+
+    /// `concatenated_comment` returns `None` when the stream carries no
+    /// Comment Extension. This lets a caller distinguish "no comments"
+    /// from "one empty comment", which `concatenated_comment` returns
+    /// as `Some(vec![])`.
+    #[test]
+    fn concatenated_comment_returns_none_when_no_comments() {
+        let img = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(img.concatenated_comment().is_none());
+    }
+
+    /// One Comment Extension → `concatenated_comment` returns its raw
+    /// payload, no leading or trailing separator.
+    #[test]
+    fn concatenated_comment_single_comment_returned_verbatim() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"hello".to_vec()),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert_eq!(img.concatenated_comment(), Some(b"hello".to_vec()));
+    }
+
+    /// Multiple Comment Extensions are joined by a single LF.
+    #[test]
+    fn concatenated_comment_multiple_comments_joined_with_lf() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"line one".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Comment(b"line two".to_vec()),
+                Block::Comment(b"line three".to_vec()),
+            ],
+        );
+        assert_eq!(
+            img.concatenated_comment(),
+            Some(b"line one\nline two\nline three".to_vec())
+        );
+    }
+
+    /// An empty Comment Extension is still a valid §24 block (sub-block
+    /// terminator only) — `concatenated_comment` returns `Some(vec![])`
+    /// to distinguish it from `None`.
+    #[test]
+    fn concatenated_comment_one_empty_comment_returns_empty_vec() {
+        let img = base_image(
+            Some(pal3()),
+            vec![Block::Comment(Vec::new()), Block::Image(frame_with(None))],
+        );
+        assert_eq!(img.concatenated_comment(), Some(Vec::new()));
+    }
+
+    /// §24.e.i — pure 7-bit ASCII (incl. control chars and `0x7F`) is
+    /// reported as conforming.
+    #[test]
+    fn comments_are_7bit_ascii_pure_ascii_returns_true() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"hello world\n\t".to_vec()),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(img.comments_are_7bit_ascii());
+    }
+
+    /// §24.e.i — any byte ≥ `0x80` flips the recommendation to "not
+    /// conforming". The encoder still accepts the block (it's a
+    /// recommendation, not a hard requirement).
+    #[test]
+    fn comments_are_7bit_ascii_non_ascii_byte_flips_check() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(vec![b'h', b'i', 0xE9]),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(!img.comments_are_7bit_ascii());
+    }
+
+    /// §24.e.i — a stream with no Comment Extensions at all trivially
+    /// conforms (vacuous truth on an empty iterator).
+    #[test]
+    fn comments_are_7bit_ascii_no_comments_is_true() {
+        let img = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(img.comments_are_7bit_ascii());
+    }
+
+    /// §24.e.ii — every Comment in a leading run (before any graphic
+    /// block) is conforming.
+    #[test]
+    fn comments_in_recommended_position_leading_run_passes() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"a".to_vec()),
+                Block::Comment(b"b".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(img.comments_in_recommended_position());
+    }
+
+    /// §24.e.ii — every Comment in a trailing run (after the last
+    /// graphic block) is conforming.
+    #[test]
+    fn comments_in_recommended_position_trailing_run_passes() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+                Block::Comment(b"a".to_vec()),
+                Block::Comment(b"b".to_vec()),
+            ],
+        );
+        assert!(img.comments_in_recommended_position());
+    }
+
+    /// §24.e.ii — a Comment interleaved between two graphic blocks
+    /// violates the recommendation.
+    #[test]
+    fn comments_in_recommended_position_interleaved_fails() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Comment(b"a".to_vec()),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(!img.comments_in_recommended_position());
+    }
+
+    /// §24.e.ii — Application Extensions between the leading Comments
+    /// and the first graphic block (e.g. NETSCAPE2.0) do not break the
+    /// recommendation — they're not graphic blocks.
+    #[test]
+    fn comments_in_recommended_position_app_extensions_between_comments_and_image_allowed() {
+        let netscape = Application {
+            identifier: *b"NETSCAPE",
+            auth_code: *b"2.0",
+            data: vec![0x01, 0x00, 0x00],
+        };
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"leading".to_vec()),
+                Block::Application(netscape),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(img.comments_in_recommended_position());
+    }
+
+    /// §24.e.ii — a stream with no graphic blocks trivially conforms
+    /// (any position is "the end of the data stream").
+    #[test]
+    fn comments_in_recommended_position_no_graphic_blocks_is_true() {
+        let img = base_image(Some(pal3()), vec![Block::Comment(b"a".to_vec())]);
+        assert!(img.comments_in_recommended_position());
+    }
+
+    /// §25 Plain Text is also a graphic-rendering block per §25.a —
+    /// a Comment between two Plain Text blocks violates §24.e.ii.
+    #[test]
+    fn comments_in_recommended_position_plain_text_counts_as_graphic_block() {
+        let pt = PlainText {
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            cell_width: 8,
+            cell_height: 8,
+            fg_color_index: 1,
+            bg_color_index: 0,
+            text: b"X".to_vec(),
+        };
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::PlainText {
+                    params: pt.clone(),
+                    graphic_control: None,
+                },
+                Block::Comment(b"in the middle".to_vec()),
+                Block::PlainText {
+                    params: pt,
+                    graphic_control: None,
+                },
+            ],
+        );
+        assert!(!img.comments_in_recommended_position());
     }
 }
