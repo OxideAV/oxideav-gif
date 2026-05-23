@@ -568,6 +568,62 @@ impl GifImage {
             }
         })
     }
+
+    /// Decode the §18.c.viii Pixel Aspect Ratio field into the
+    /// width ÷ height ratio of a pixel in the original image.
+    ///
+    /// Per §18.c.viii, when the raw byte ([`Self::pixel_aspect_ratio`])
+    /// is non-zero the ratio is computed by:
+    ///
+    /// ```text
+    /// Aspect Ratio = (Pixel Aspect Ratio + 15) / 64
+    /// ```
+    ///
+    /// A raw value of `0` means "no aspect ratio information is given"
+    /// (§18.c.viii) and yields `None`. The value range `1..=255` maps to
+    /// the widest pixel of 4:1 (raw `255` → `270/64 ≈ 4.22`, the spec's
+    /// nominal "4:1") down to the tallest pixel of 1:4 (raw `1` →
+    /// `16/64 = 0.25`), in increments of `1/64`.
+    pub fn pixel_aspect_ratio_value(&self) -> Option<f32> {
+        if self.pixel_aspect_ratio == 0 {
+            None
+        } else {
+            Some((self.pixel_aspect_ratio as f32 + 15.0) / 64.0)
+        }
+    }
+
+    /// Encode a desired pixel width ÷ height `ratio` into the raw
+    /// §18.c.viii Pixel Aspect Ratio byte, inverting the §18 decode
+    /// formula:
+    ///
+    /// ```text
+    /// Pixel Aspect Ratio = round(ratio × 64) − 15
+    /// ```
+    ///
+    /// The §18.c.viii value range `1..=255` represents the widest pixel
+    /// of 4:1 down to the tallest pixel of 1:4. A `ratio` outside the
+    /// representable span (anything that would round to a raw byte
+    /// outside `1..=255`) returns `None` rather than silently clamping;
+    /// callers that prefer clamping can do so themselves. The smallest
+    /// representable ratio is `16/64 = 0.25` (raw `1`) and the largest is
+    /// `270/64 ≈ 4.21875` (raw `255`). Square pixels (`ratio == 1.0`)
+    /// map to raw `49`.
+    ///
+    /// Note that `0` ("no aspect ratio information") is *not*
+    /// representable through this helper — set
+    /// [`Self::pixel_aspect_ratio`] to `0` directly to clear the field.
+    pub fn raw_pixel_aspect_ratio_for(ratio: f32) -> Option<u8> {
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return None;
+        }
+        // Invert `(raw + 15) / 64`: raw = round(ratio * 64) - 15.
+        let raw = (ratio * 64.0).round() - 15.0;
+        if (1.0..=255.0).contains(&raw) {
+            Some(raw as u8)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1058,5 +1114,83 @@ mod tests {
             ],
         );
         assert!(!img.comments_in_recommended_position());
+    }
+
+    // -----------------------------------------------------------------
+    // §18.c.viii Pixel Aspect Ratio.
+    // -----------------------------------------------------------------
+
+    /// §18.c.viii — a raw value of 0 means "no aspect ratio information
+    /// is given", so the decoded value is `None`.
+    #[test]
+    fn pixel_aspect_ratio_zero_means_none() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        img.pixel_aspect_ratio = 0;
+        assert_eq!(img.pixel_aspect_ratio_value(), None);
+    }
+
+    /// §18.c.viii — `Aspect Ratio = (Pixel Aspect Ratio + 15) / 64`.
+    /// Raw 49 → (49+15)/64 = 1.0 (square pixels), the spec's nominal
+    /// midpoint.
+    #[test]
+    fn pixel_aspect_ratio_square_pixels() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        img.pixel_aspect_ratio = 49;
+        assert_eq!(img.pixel_aspect_ratio_value(), Some(1.0));
+    }
+
+    /// §18.c.viii endpoints: raw 1 → 16/64 = 0.25 (tallest, 1:4);
+    /// raw 255 → 270/64 ≈ 4.21875 (widest, ~4:1).
+    #[test]
+    fn pixel_aspect_ratio_endpoints() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        img.pixel_aspect_ratio = 1;
+        assert_eq!(img.pixel_aspect_ratio_value(), Some(0.25));
+        img.pixel_aspect_ratio = 255;
+        let widest = img.pixel_aspect_ratio_value().unwrap();
+        assert!((widest - 270.0 / 64.0).abs() < 1e-6, "{widest}");
+    }
+
+    /// The inverse helper inverts the §18 decode formula:
+    /// raw = round(ratio × 64) − 15. Square pixels (1.0) → 49.
+    #[test]
+    fn raw_pixel_aspect_ratio_inverts_decode() {
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(1.0), Some(49));
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(0.25), Some(1));
+        assert_eq!(
+            GifImage::raw_pixel_aspect_ratio_for(270.0 / 64.0),
+            Some(255)
+        );
+    }
+
+    /// Encode → decode round-trips for every representable raw byte
+    /// (1..=255): decoding raw R then re-encoding must recover R.
+    #[test]
+    fn pixel_aspect_ratio_roundtrips_all_raw_values() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        for raw in 1u8..=255 {
+            img.pixel_aspect_ratio = raw;
+            let ratio = img.pixel_aspect_ratio_value().unwrap();
+            assert_eq!(
+                GifImage::raw_pixel_aspect_ratio_for(ratio),
+                Some(raw),
+                "raw {raw} -> ratio {ratio} did not round-trip"
+            );
+        }
+    }
+
+    /// §18.c.viii value range only spans 1:4 .. ~4:1. Ratios outside
+    /// that span (and non-positive / non-finite inputs) are not
+    /// representable and return `None` rather than clamping.
+    #[test]
+    fn raw_pixel_aspect_ratio_out_of_range_is_none() {
+        // 0.25 is the smallest; anything meaningfully smaller is gone.
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(0.2), None);
+        // ~4.22 is the largest; 5:1 is out of range.
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(5.0), None);
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(0.0), None);
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(-1.0), None);
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(f32::NAN), None);
+        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(f32::INFINITY), None);
     }
 }

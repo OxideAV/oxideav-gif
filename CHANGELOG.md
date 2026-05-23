@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- §18.c.viii Pixel Aspect Ratio accessors on `GifImage`. The decoder
+  already stored the raw byte (`pixel_aspect_ratio`); these helpers
+  apply the §18.c.viii formula. `pixel_aspect_ratio_value()` decodes
+  the raw byte into the pixel width ÷ height ratio via
+  `Aspect Ratio = (Pixel Aspect Ratio + 15) / 64`, returning `None`
+  for the raw value `0` ("no aspect ratio information is given").
+  `raw_pixel_aspect_ratio_for(ratio)` is the inverse, mapping a
+  desired ratio back to the raw byte (`round(ratio × 64) − 15`) and
+  returning `None` for ratios outside the spec's representable span
+  (the widest pixel ~4:1 at raw 255 down to the tallest 1:4 at raw 1;
+  square pixels are raw 49). The two are exact inverses across the
+  whole `1..=255` raw range.
 - §24 Comment Extension accessors on `GifImage`. `comments()` is the
   source-order iterator over every `Block::Comment` payload (mirrors
   the existing `application_extensions()` accessor);

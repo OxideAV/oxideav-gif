@@ -6,7 +6,13 @@ Pure-Rust decoder and encoder for the GIF87a and GIF89a image formats.
 
 Implements every block type defined by the CompuServe specifications:
 
-- Header (§17), Logical Screen Descriptor (§18), Trailer (§27)
+- Header (§17), Logical Screen Descriptor (§18), Trailer (§27).
+  `GifImage::pixel_aspect_ratio_value()` decodes the §18.c.viii Pixel
+  Aspect Ratio byte into the pixel width÷height ratio via
+  `(raw + 15) / 64` (raw 0 → `None`, "no aspect ratio information"),
+  and `GifImage::raw_pixel_aspect_ratio_for(ratio)` is its exact
+  inverse (`None` outside the spec's 1:4 .. ~4:1 representable span;
+  square pixels = raw 49).
 - Global / Local Color Tables (§19, §21)
 - Image Descriptor + Table-Based Image Data (§20, §22)
 - Variable-Length-Code LZW compression (Appendix F)
