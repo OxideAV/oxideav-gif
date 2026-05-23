@@ -49,6 +49,15 @@ Implements every block type defined by the CompuServe specifications:
   `docs/image/gif/netscape2.0-loop-extension.md`. Each yielded
   `PlaybackFrame` carries its delay as a `Duration` for ergonomic
   `thread::sleep` calls.
+- Animation-timing accessors on `GifImage`. `frame_delays()` iterates
+  every graphic-rendering block's §23.c.vii Delay Time as a `Duration`
+  (§20 Images and §25 Plain Text both count; no GCE or a 0 delay →
+  `Duration::ZERO`), `is_animated()` is true only for multi-frame
+  streams, `single_pass_duration()` totals one pass, and
+  `total_play_duration()` multiplies that by the NETSCAPE2.0 /
+  ANIMEXTS1.0 pass count (`None` for the infinite-loop case). The
+  timeline view matches `Playback`'s per-frame delays exactly without
+  compositing any pixels.
 - Structured views over the five ecosystem-defined Application
   Extensions (`app_ext` module) — NETSCAPE2.0 looping +
   buffering sub-blocks, the older ANIMEXTS1.0 looping variant (same

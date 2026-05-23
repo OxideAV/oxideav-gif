@@ -3,6 +3,8 @@
 //! Mirrors the GIF89a Grammar in Appendix B:
 //! `<GIF Data Stream> ::= Header <Logical Screen> <Data>* Trailer`.
 
+use core::time::Duration;
+
 /// One RGB triplet from a colour table (§19, §21).
 ///
 /// The spec lays palette entries out as Red-Green-Blue order
@@ -624,6 +626,94 @@ impl GifImage {
             None
         }
     }
+
+    /// Per-graphic-rendering-block §23.c.vii Delay Time, expressed as a
+    /// [`Duration`], in source order.
+    ///
+    /// A GIF's animation timeline is the sequence of *graphic-rendering
+    /// blocks* — §20 Image Descriptors **and** §25 Plain Text Extensions
+    /// (both are "graphic-rendering blocks" whose scope a §23 Graphic
+    /// Control Extension can modify per §23.d). Each yielded `Duration`
+    /// is that block's §23.c.vii Delay Time ("the number of hundredths
+    /// (1/100) of a second to wait before continuing with the processing
+    /// of the Data Stream"), so 1 centi-second = 10 ms exactly. A block
+    /// with no attached Graphic Control Extension — or one whose Delay
+    /// Time is `0` ("not 0, this field specifies …", so `0` is "do not
+    /// wait") — contributes [`Duration::ZERO`].
+    ///
+    /// This mirrors exactly the per-frame delay surfaced by
+    /// [`crate::playback::PlaybackFrame::delay`]; the iterator here is the
+    /// timing-only view for callers that want to total or inspect delays
+    /// without compositing pixels.
+    pub fn frame_delays(&self) -> impl Iterator<Item = Duration> + '_ {
+        self.blocks.iter().filter_map(|b| {
+            let gce = match b {
+                Block::Image(f) => f.graphic_control,
+                Block::PlainText {
+                    graphic_control, ..
+                } => *graphic_control,
+                // §24 Comment / §26 Application have no rendered output
+                // and so never carry a Delay Time.
+                Block::Comment(_) | Block::Application(_) => return None,
+            };
+            let centis = gce.map(|g| g.delay_centis).unwrap_or(0);
+            Some(Duration::from_millis(centis as u64 * 10))
+        })
+    }
+
+    /// `true` when the stream carries more than one graphic-rendering
+    /// block (§20 Image or §25 Plain Text) — i.e. the stream is a
+    /// multi-frame animation rather than a single still.
+    ///
+    /// A single-frame GIF (the overwhelmingly common still-image case)
+    /// returns `false` even if it carries a NETSCAPE2.0 *Looping*
+    /// sub-block, because there is nothing to animate. A zero-frame
+    /// stream (only metadata blocks) also returns `false`.
+    pub fn is_animated(&self) -> bool {
+        self.frame_delays().take(2).count() >= 2
+    }
+
+    /// Total wall-clock time of **one pass** through the animation: the
+    /// sum of every graphic-rendering block's §23.c.vii Delay Time
+    /// ([`Self::frame_delays`]).
+    ///
+    /// For a still image this is the single frame's delay (usually
+    /// [`Duration::ZERO`]). The result never overflows: the per-block
+    /// maximum is `65535 × 10 ms ≈ 655 s` and the block count is bounded
+    /// by the parsed stream length, so the sum stays well inside
+    /// [`Duration`]'s range.
+    pub fn single_pass_duration(&self) -> Duration {
+        self.frame_delays().sum()
+    }
+
+    /// Total wall-clock time to play the whole animation honouring the
+    /// NETSCAPE2.0 / ANIMEXTS1.0 *Looping* sub-block, or `None` when the
+    /// animation loops forever.
+    ///
+    /// The loop count comes from [`Self::loop_count`]; its de-facto
+    /// "first pass plus *N* repeats" semantics (documented in
+    /// `docs/image/gif/netscape2.0-loop-extension.md`) mean the number of
+    /// passes is:
+    ///
+    /// * no *Looping* sub-block (`loop_count` is `None`) → 1 pass.
+    /// * `Some(0)` → loop forever → returns `None`.
+    /// * `Some(n)` → `n + 1` passes.
+    ///
+    /// The returned value is [`Self::single_pass_duration`] multiplied by
+    /// the pass count. Returns `None` for the infinite-loop case so a
+    /// caller can distinguish "plays for a finite time" from "never
+    /// terminates"; saturating arithmetic guards the (practically
+    /// unreachable) `Duration` overflow at `Some(65535)` passes of a
+    /// maximal per-pass delay.
+    pub fn total_play_duration(&self) -> Option<Duration> {
+        let passes = match self.loop_count() {
+            None => 1u64,
+            Some(0) => return None,
+            Some(n) => n as u64 + 1,
+        };
+        let per_pass = self.single_pass_duration();
+        Some(per_pass.saturating_mul(passes.try_into().unwrap_or(u32::MAX)))
+    }
 }
 
 #[cfg(test)]
@@ -1192,5 +1282,175 @@ mod tests {
         assert_eq!(GifImage::raw_pixel_aspect_ratio_for(-1.0), None);
         assert_eq!(GifImage::raw_pixel_aspect_ratio_for(f32::NAN), None);
         assert_eq!(GifImage::raw_pixel_aspect_ratio_for(f32::INFINITY), None);
+    }
+
+    fn frame_with_delay(delay_centis: u16) -> Frame {
+        Frame {
+            graphic_control: Some(GraphicControl {
+                delay_centis,
+                ..GraphicControl::default()
+            }),
+            ..frame_with(None)
+        }
+    }
+
+    fn netscape_loop(loop_count: u16) -> Block {
+        Block::Application(
+            crate::app_ext::LoopControl {
+                loop_count: Some(loop_count),
+                buffer_size: None,
+            }
+            .to_application(),
+        )
+    }
+
+    /// §23.c.vii: a block with no Graphic Control Extension, or one
+    /// whose Delay Time is 0, contributes a zero delay. A block with a
+    /// non-zero Delay Time contributes `centis × 10 ms`.
+    #[test]
+    fn frame_delays_reads_gce_delay_time() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(50)), // 0.50 s
+                Block::Image(frame_with(None)),     // no GCE -> 0
+                Block::Image(frame_with_delay(0)),  // GCE but delay 0 -> 0
+                Block::Comment(b"x".to_vec()),      // not a rendering block
+                Block::Image(frame_with_delay(25)), // 0.25 s
+            ],
+        );
+        let delays: Vec<Duration> = img.frame_delays().collect();
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_millis(500),
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::from_millis(250),
+            ]
+        );
+    }
+
+    /// §25 Plain Text is a graphic-rendering block too, so its attached
+    /// GCE Delay Time participates in the timeline alongside §20 Images.
+    #[test]
+    fn frame_delays_includes_plain_text_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(10)),
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 1,
+                        height: 1,
+                        cell_width: 1,
+                        cell_height: 1,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"A".to_vec(),
+                    },
+                    graphic_control: Some(GraphicControl {
+                        delay_centis: 30,
+                        ..GraphicControl::default()
+                    }),
+                },
+            ],
+        );
+        assert_eq!(
+            img.frame_delays().collect::<Vec<_>>(),
+            vec![Duration::from_millis(100), Duration::from_millis(300)]
+        );
+    }
+
+    /// `is_animated` keys off the count of graphic-rendering blocks, not
+    /// the presence of a NETSCAPE loop block.
+    #[test]
+    fn is_animated_counts_rendering_blocks() {
+        // Zero frames (metadata only) -> not animated.
+        let meta_only = base_image(Some(pal3()), vec![Block::Comment(b"c".to_vec())]);
+        assert!(!meta_only.is_animated());
+
+        // One frame, even with a loop block, is a still.
+        let still = base_image(
+            Some(pal3()),
+            vec![netscape_loop(0), Block::Image(frame_with(None))],
+        );
+        assert!(!still.is_animated());
+
+        // Two frames -> animated.
+        let anim = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(anim.is_animated());
+    }
+
+    /// `single_pass_duration` sums every frame's §23.c.vii delay once.
+    #[test]
+    fn single_pass_duration_sums_frame_delays() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(10)),
+                Block::Image(frame_with_delay(20)),
+                Block::Image(frame_with_delay(70)),
+            ],
+        );
+        assert_eq!(img.single_pass_duration(), Duration::from_millis(1000));
+    }
+
+    /// `total_play_duration` honours NETSCAPE2.0 *Looping* semantics:
+    /// no block -> 1 pass; `Some(n)` -> `n + 1` passes; `Some(0)` ->
+    /// infinite -> `None`.
+    #[test]
+    fn total_play_duration_honours_loop_count() {
+        let frames = || {
+            vec![
+                Block::Image(frame_with_delay(10)),
+                Block::Image(frame_with_delay(10)),
+            ]
+        };
+        let per_pass = Duration::from_millis(200);
+
+        // No loop block: a single pass.
+        let no_loop = base_image(Some(pal3()), frames());
+        assert_eq!(no_loop.total_play_duration(), Some(per_pass));
+
+        // Some(2): first pass plus two repeats = three passes.
+        let mut three = frames();
+        three.insert(0, netscape_loop(2));
+        let img = base_image(Some(pal3()), three);
+        assert_eq!(img.total_play_duration(), Some(per_pass * 3));
+
+        // Some(0): loop forever -> None.
+        let mut forever = frames();
+        forever.insert(0, netscape_loop(0));
+        let inf = base_image(Some(pal3()), forever);
+        assert_eq!(inf.total_play_duration(), None);
+    }
+
+    /// The timeline view matches the playback iterator's per-frame
+    /// delays exactly (same blocks, same §23.c.vii reading).
+    #[test]
+    fn frame_delays_matches_playback_iterator() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(7)),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_delay(42)),
+            ],
+        );
+        let from_timeline: Vec<Duration> = img.frame_delays().collect();
+        let from_playback: Vec<Duration> = crate::playback::Playback::new(&img)
+            .frames()
+            .map(|r| r.unwrap().delay)
+            .collect();
+        assert_eq!(from_timeline, from_playback);
     }
 }

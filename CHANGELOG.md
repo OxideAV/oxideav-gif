@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Added
+- Animation-timing accessors on `GifImage`. `frame_delays()` is the
+  source-order iterator over each graphic-rendering block's §23.c.vii
+  Delay Time as a `core::time::Duration` (1 centi-second = 10 ms; a
+  block with no Graphic Control Extension, or a Delay Time of 0,
+  contributes `Duration::ZERO`); it covers both §20 Images and §25
+  Plain Text blocks, matching the playback iterator's per-frame delay
+  exactly. `is_animated()` returns `true` only when the stream carries
+  more than one graphic-rendering block (a single-frame still is not
+  "animated" even with a NETSCAPE loop block). `single_pass_duration()`
+  sums one pass through the timeline; `total_play_duration()` multiplies
+  that by the NETSCAPE2.0 / ANIMEXTS1.0 pass count (no loop block →
+  1 pass, `Some(n)` → `n + 1` passes per the documented de-facto
+  convention, `Some(0)` → loops forever → returns `None`), with
+  saturating arithmetic guarding the unreachable `Duration` overflow.
 - §18.c.viii Pixel Aspect Ratio accessors on `GifImage`. The decoder
   already stored the raw byte (`pixel_aspect_ratio`); these helpers
   apply the §18.c.viii formula. `pixel_aspect_ratio_value()` decodes
