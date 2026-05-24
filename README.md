@@ -58,6 +58,19 @@ Implements every block type defined by the CompuServe specifications:
   ANIMEXTS1.0 pass count (`None` for the infinite-loop case). The
   timeline view matches `Playback`'s per-frame delays exactly without
   compositing any pixels.
+- Fluent animation assembly (`builder::AnimationBuilder`) — the
+  encode-side counterpart to the timing accessors.
+  `new(width, height, palette)` shares one §18 Global Color Table;
+  `add_full_frame` / `add_placed_frame` append frames, each attaching
+  a §23 Graphic Control Extension that carries the Delay Time and
+  Disposal Method; `loop_forever()` / `loop_count(n)` / `play_once()`
+  pick the looping behaviour, emitting a NETSCAPE2.0 *Looping*
+  Application Extension ahead of the frames for the looping cases.
+  `build()` validates placement (rectangles must fit the Logical
+  Screen), index counts, palette-index range, and the §19 1..=256
+  palette-size limit, returning a `Gif89a` `GifImage` ready for
+  `encode`; the result's timeline accessors read back exactly what was
+  set and a build → encode → decode round-trip is value-stable.
 - Structured views over the five ecosystem-defined Application
   Extensions (`app_ext` module) — NETSCAPE2.0 looping +
   buffering sub-blocks, the older ANIMEXTS1.0 looping variant (same

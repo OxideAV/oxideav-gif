@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ### Added
+- `builder::AnimationBuilder` — fluent encode-side assembler for an
+  animated `GifImage`. `AnimationBuilder::new(width, height, palette)`
+  targets a §18 Logical Screen sharing one Global Color Table;
+  `add_full_frame(indices, delay_centis, disposal)` appends a
+  full-screen frame and `add_placed_frame(left, top, w, h, …)` a
+  sub-rectangle, each attaching a §23 Graphic Control Extension that
+  carries the §23.c.vii Delay Time and §23.c.iv Disposal Method.
+  `loop_forever()` / `loop_count(n)` / `play_once()` select the
+  looping behaviour, emitting a NETSCAPE2.0 *Looping* Application
+  Extension (§26) ahead of the first frame for the non-"play once"
+  cases per the de-facto convention in
+  `docs/image/gif/netscape2.0-loop-extension.md`; `play_once` emits no
+  block. `background_index(i)` threads the §18.c.vii Background Color
+  Index. `build()` validates placement (frame rectangles must fit the
+  Logical Screen, matching the compositor's bounds check), index counts
+  (`len == width × height`), palette-index range, the §19 1..=256
+  palette-size limit, and a non-empty frame list, then returns a
+  `Version::Gif89a` `GifImage` ready for `encode`. The result's
+  `frame_delays()` / `single_pass_duration()` / `total_play_duration()`
+  / `loop_count()` report back exactly what was set — the builder is
+  the encode-side counterpart to the timeline accessors — and a build →
+  `encode` → `decode` round-trip is value-stable.
 - Animation-timing accessors on `GifImage`. `frame_delays()` is the
   source-order iterator over each graphic-rendering block's §23.c.vii
   Delay Time as a `core::time::Duration` (1 centi-second = 10 ms; a

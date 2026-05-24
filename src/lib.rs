@@ -111,6 +111,7 @@
 //! `default-features = false`.
 
 pub mod app_ext;
+pub mod builder;
 pub mod compose;
 pub mod decoder;
 pub mod encoder;
@@ -123,6 +124,7 @@ pub mod playback;
 #[cfg(feature = "registry")]
 pub mod registry;
 
+pub use builder::AnimationBuilder;
 pub use compose::{compose, ComposedFrame, RgbaCanvas};
 pub use decoder::{decode, decode_first_frame, decode_lenient};
 pub use encoder::encode;
