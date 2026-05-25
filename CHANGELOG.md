@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Added
+- `benches/decode.rs`, `benches/encode.rs`, `benches/roundtrip.rs` —
+  Criterion bench harnesses for the decode / encode / build → encode →
+  decode hot paths. Mirrors the per-crate shape that `oxideav-cinepak`,
+  `oxideav-tta`, `oxideav-magicyuv`, `oxideav-h264`, `oxideav-pixfmt`
+  already track so future LZW / sub-block / disposal-state-machine
+  optimisation rounds can A/B against the round-129 baseline. 14 bench
+  scenarios across the three files; each synthesises its inputs on the
+  fly via `AnimationBuilder` + `encode`, no committed fixture files.
+  Run with `cargo bench -p oxideav-gif --bench <name>`.
+- `fuzz/fuzz_targets/encode.rs` — encode-side end-to-end cargo-fuzz
+  harness, sibling to the decode-side `fuzz/fuzz_targets/decode.rs`
+  from r126. Builds a `GifImage` out of arbitrary fuzz bytes via
+  `AnimationBuilder` (rect placement, palette size, frame count, loop
+  behaviour all derived from the input), then runs
+  `encode` → `decode` → `decode_lenient` → `decode_first_frame` →
+  `compose` → `Playback::frames` / `looping_frames` on the result.
+  Reaches builder-only encoder configurations (mismatched-palette-size
+  frames, sub-screen frames at non-zero origins, ANIMEXTS / NETSCAPE
+  loop blocks, multi-frame disposal sequences) that the
+  decoder-output-only fuzzer can't construct. Bounds canvas at
+  `screen_w × screen_h ≤ 1 Mpx` (256 × 256 cap) and frame count at
+  `MAX_FUZZ_FRAMES = 16` to keep fuzzer RSS bounded.
+
 ### Fixed
 - LZW decoder no longer pre-allocates `width × height` bytes from the
   §20.c Image Descriptor before reading any compressed bytes. A hostile

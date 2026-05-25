@@ -111,7 +111,7 @@ Implements every block type defined by the CompuServe specifications:
 
 ## Fuzzing
 
-`fuzz/fuzz_targets/` ships four `cargo-fuzz` harnesses, all asserting
+`fuzz/fuzz_targets/` ships five `cargo-fuzz` harnesses, all asserting
 panic-freedom on arbitrary bytes:
 
 - `decode_panic_free` — strict `decode` entry point.
@@ -127,9 +127,39 @@ panic-freedom on arbitrary bytes:
   encode-then-re-decode through every fuzz-derived `GifImage`. Caps the
   composited canvas at 1 Mpx and the looping iterator at 64 frames so a
   `loop_count = Some(0)` (forever) stream doesn't pin the fuzzer.
+- `encode` — end-to-end encode-side harness: derives a `GifImage` from
+  fuzz bytes via `AnimationBuilder` (rect placement, palette size,
+  per-frame disposal, NETSCAPE2.0 / loop-forever behaviour), then
+  drives `encode` → `decode` → `decode_lenient` → `decode_first_frame`
+  → `compose` → `Playback::frames` / `looping_frames` on the result.
+  Reaches encoder configurations the decoder-output-only harness
+  can't construct (sub-screen placements, mismatched palette sizes,
+  multi-frame disposal sequences). Caps screen at 256×256 and frame
+  count at 16.
 
 Each harness keeps a local corpus under `fuzz/corpus/` (gitignored —
 the corpus is a per-machine flywheel, not a checked-in artifact).
+
+## Benchmarking
+
+`benches/` ships three [Criterion](https://github.com/bheisler/criterion.rs)
+harnesses driving the decoder, encoder, and end-to-end roundtrip hot
+paths. Each scenario synthesises its inputs on the fly via
+`AnimationBuilder` + `encode` — no committed fixture files. Run with:
+
+```
+cargo bench -p oxideav-gif --bench decode
+cargo bench -p oxideav-gif --bench encode
+cargo bench -p oxideav-gif --bench roundtrip
+```
+
+The three harnesses together cover 14 scenarios spanning single-frame
+stills (320×240 / 64×64), multi-frame animations (320×240 4f /
+64×64 8f), the `decode_lenient` resync path, the `decode_first_frame`
+cover-frame fast path, the lazy `Playback::frames` iterator vs eager
+`compose`, and the `AnimationBuilder::build` validation pass in
+isolation. Future LZW / sub-block-sizing / disposal-state-machine
+optimisation rounds use these baselines for A/B comparisons.
 
 ## Not implemented
 
