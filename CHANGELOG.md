@@ -27,6 +27,15 @@
   `MAX_FUZZ_FRAMES = 16` to keep fuzzer RSS bounded.
 
 ### Fixed
+- `fuzz/fuzz_targets/encode.rs` background-index reduction no longer
+  divides by zero. The cap `palette_size.min(256) as u8` wrapped the
+  maximum legal palette size (256) to `0u8`, so `data[5] % 0` panicked
+  whenever the fuzzer picked `palette_size == 256` — a harness bug, not
+  a `src/` bug, surfaced by the daily scheduled `Fuzz` run. The modulus
+  is now computed in `u16` (`palette_size.min(256)`, always `1..=256`)
+  before the index is narrowed back to `u8`, keeping the result a valid
+  `< palette_size` background index. 60 s re-run of all five targets is
+  crash-free.
 - LZW decoder no longer pre-allocates `width × height` bytes from the
   §20.c Image Descriptor before reading any compressed bytes. A hostile
   65535 × 65535 declaration used to trick `Vec::with_capacity` into

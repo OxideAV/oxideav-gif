@@ -142,8 +142,11 @@ the corpus is a per-machine flywheel, not a checked-in artifact).
 `fuzz/Cargo.lock` *is* committed so the harness builds reproducibly.
 
 Latest local baseline: the end-to-end `decode` target cleared 345 k
-executions in 60 s and `decode_lenient_panic_free` cleared 16 M, both
-crash-free.
+executions in 60 s, `decode_lenient_panic_free` cleared 16 M, and
+`encode` cleared 256 k — all crash-free. (The `encode` run followed a
+fix to a divide-by-zero in the harness's background-index reduction that
+the daily scheduled run had flagged; the bug was in the fuzz target, not
+the codec.)
 
 ## Benchmarking
 

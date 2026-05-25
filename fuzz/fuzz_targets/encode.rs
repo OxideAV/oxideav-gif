@@ -115,8 +115,17 @@ fuzz_target!(|data: &[u8]| {
 
     // Loop behaviour from the low 2 bits of data[4]. The remaining
     // bits steer the background index.
+    //
+    // `background_index` must be `< palette_size`. `palette_size` is in
+    // `1..=256`, but a u8 index can only address `0..=255`, so the
+    // largest legal index is `min(palette_size, 256) - 1`, which is in
+    // `0..=255`. Reducing `data[5]` modulo `(legal_max + 1)` keeps the
+    // index in range; the `+ 1` is what makes the divisor non-zero (a
+    // bare `palette_size.min(256) as u8` wraps 256 -> 0 and divides by
+    // zero, which is the harness bug the encode fuzzer surfaced).
     let mut builder = AnimationBuilder::new(screen_w, screen_h, palette.clone());
-    builder = builder.background_index(data[5] % palette_size.min(256) as u8);
+    let index_modulus = palette_size.min(256); // u16 in 1..=256, never 0
+    builder = builder.background_index((data[5] as u16 % index_modulus) as u8);
     match data[4] & 0x03 {
         0 => builder = builder.play_once(),
         1 => builder = builder.loop_forever(),
