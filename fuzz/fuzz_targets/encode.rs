@@ -121,8 +121,7 @@ fuzz_target!(|data: &[u8]| {
         0 => builder = builder.play_once(),
         1 => builder = builder.loop_forever(),
         2 => {
-            builder =
-                builder.loop_count(u16::from_le_bytes([data[6], data[7]]) % 8 + 1);
+            builder = builder.loop_count(u16::from_le_bytes([data[6], data[7]]) % 8 + 1);
         }
         _ => {
             // Default already.
@@ -136,8 +135,7 @@ fuzz_target!(|data: &[u8]| {
     while cursor + 4 <= data.len() && frame_count < MAX_FUZZ_FRAMES {
         let rect_bits = u16::from_le_bytes([data[cursor], data[cursor + 1]]);
         let (left, top, w, h) = pick_rect(
-            rect_bits
-                ^ ((data[cursor + 2] as u16) << 8 | data[cursor + 3] as u16),
+            rect_bits ^ ((data[cursor + 2] as u16) << 8 | data[cursor + 3] as u16),
             screen_w,
             screen_h,
         );
