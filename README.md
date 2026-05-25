@@ -109,6 +109,28 @@ Implements every block type defined by the CompuServe specifications:
   minimum in one call (it never *down*grades — a caller's explicit
   choice of `Gif89a` for a 87a-compatible payload is preserved).
 
+## Fuzzing
+
+`fuzz/fuzz_targets/` ships four `cargo-fuzz` harnesses, all asserting
+panic-freedom on arbitrary bytes:
+
+- `decode_panic_free` — strict `decode` entry point.
+- `decode_lenient_panic_free` — error-recovery `decode_lenient` entry
+  point (different resync state machine).
+- `roundtrip` — decoder output round-trips through encoder + decoder
+  with `assert_eq!` on the resulting `GifImage`.
+- `decode` — end-to-end decode-side harness: chains `decode_lenient` +
+  `decode_first_frame` + `decode` + `compose` + `Playback::frames` +
+  `Playback::looping_frames` + the §26 Application Extension typed
+  parsers + the §24 Comment Extension accessors + the §18.c.viii Pixel
+  Aspect Ratio decoder + the §7 Required Version inference + an
+  encode-then-re-decode through every fuzz-derived `GifImage`. Caps the
+  composited canvas at 1 Mpx and the looping iterator at 64 frames so a
+  `loop_count = Some(0)` (forever) stream doesn't pin the fuzzer.
+
+Each harness keeps a local corpus under `fuzz/corpus/` (gitignored —
+the corpus is a per-machine flywheel, not a checked-in artifact).
+
 ## Not implemented
 
 - Other vendor Application Extensions beyond the five surfaced via

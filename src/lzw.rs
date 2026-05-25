@@ -296,6 +296,14 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
 /// `expected_pixels` caps the output buffer; decoding stops at the
 /// first EOI even if fewer pixels were produced (the spec leaves
 /// truncation handling to the application).
+///
+/// The capacity hint passed to the output `Vec` is clamped against a
+/// conservative upper bound derived from the compressed input length
+/// (every input byte can plausibly yield at most `MAX_TABLE_SIZE`
+/// output bytes in pathological cases). Without the clamp a hostile
+/// `width × height` field can trick the decoder into pre-reserving
+/// gigabytes of memory before any code is read — a trivial DoS
+/// regardless of how much actual LZW payload is present.
 pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<Vec<u8>> {
     if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
         return Err(Error::InvalidData(format!(
@@ -323,7 +331,13 @@ pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<V
     let mut width: u8 = initial_width;
     let mut reader = BitReader::new(src);
 
-    let mut output: Vec<u8> = Vec::with_capacity(expected_pixels);
+    // Cap the up-front reservation: see the function-level doc for the
+    // DoS rationale. `MAX_TABLE_SIZE` (4096) is the largest substring an
+    // LZW dictionary entry can hold, so `src.len() * MAX_TABLE_SIZE` is
+    // a generous-but-bounded ceiling on legitimate output.
+    let cap_ceiling = src.len().saturating_mul(MAX_TABLE_SIZE);
+    let initial_cap = expected_pixels.min(cap_ceiling);
+    let mut output: Vec<u8> = Vec::with_capacity(initial_cap);
     // Scratch buffer used to materialise an entry into bytes (entries
     // are stored as a parent-pointer chain that we walk in reverse).
     let mut scratch: Vec<u8> = Vec::with_capacity(MAX_TABLE_SIZE);
@@ -587,5 +601,22 @@ mod tests {
         // Either we ran out of bits before EOI, or the stream
         // mis-decoded. Both are recoverable errors, never panics.
         assert!(matches!(result, Err(Error::InvalidData(_))) || result.is_ok());
+    }
+
+    #[test]
+    fn decode_caps_upfront_allocation_by_input_length() {
+        // Regression: a hostile §20.c `width × height` (e.g. 65535×65535
+        // ≈ 4 GiB) used to be passed straight to `Vec::with_capacity`,
+        // OOM-aborting the process before any LZW byte was read. The
+        // decoder now clamps the up-front reservation against
+        // `src.len() * MAX_TABLE_SIZE` so an empty-or-short compressed
+        // payload cannot trick the allocator into reserving gigabytes.
+        let huge_expected: usize = (u32::MAX as usize).saturating_mul(4);
+        // Empty input + huge expected_pixels: must error, not OOM.
+        let r = decode(2, &[], huge_expected);
+        assert!(matches!(r, Err(Error::InvalidData(_))));
+        // Same with a single byte of compressed data.
+        let r = decode(2, &[0xFF], huge_expected);
+        assert!(matches!(r, Err(Error::InvalidData(_))) || r.is_ok());
     }
 }

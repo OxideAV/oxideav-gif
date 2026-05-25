@@ -2,7 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+- LZW decoder no longer pre-allocates `width × height` bytes from the
+  §20.c Image Descriptor before reading any compressed bytes. A hostile
+  65535 × 65535 declaration used to trick `Vec::with_capacity` into
+  reserving ~4 GiB and aborting the process — a trivial decode-side DoS
+  reachable from any GIF parser. The up-front reservation is now
+  clamped to `compressed_bytes_len * MAX_TABLE_SIZE` (a generous-but-
+  bounded ceiling on legitimate LZW expansion), regression-tested in
+  `lzw::tests::decode_caps_upfront_allocation_by_input_length`.
+
 ### Added
+- `fuzz/fuzz_targets/decode.rs` — end-to-end decode-side cargo-fuzz
+  harness that exercises every spec-classic problem area (LZW code
+  table growth, §23 Graphic Control / §26 Application Extension
+  nesting, §15 sub-block chains, §23.c.iv frame-disposal arithmetic,
+  §19/§21/§23.c.viii palette + transparency handling, NETSCAPE2.0
+  loop-count) through one input. Caps downstream work at
+  `screen_width × screen_height ≤ 1 Mpx` and `MAX_PLAYBACK_FRAMES = 64`
+  to keep fuzzer RSS bounded; surfaced the LZW decode-side OOM above
+  on its first multi-minute run.
 - `builder::AnimationBuilder` — fluent encode-side assembler for an
   animated `GifImage`. `AnimationBuilder::new(width, height, palette)`
   targets a §18 Logical Screen sharing one Global Color Table;

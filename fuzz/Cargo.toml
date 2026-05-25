@@ -37,3 +37,9 @@ name = "decode_lenient_panic_free"
 path = "fuzz_targets/decode_lenient_panic_free.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
