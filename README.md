@@ -141,6 +141,18 @@ Each harness keeps a local corpus under `fuzz/corpus/` (gitignored —
 the corpus is a per-machine flywheel, not a checked-in artifact).
 `fuzz/Cargo.lock` *is* committed so the harness builds reproducibly.
 
+A small set of spec-derived seed inputs lives under
+`fuzz/seed_corpus/<target>/` (tracked). Each target gets five seeds:
+the two well-formed fixtures from `tests/spec_fixtures.rs` (1×1
+GIF87a minimal, 2×2 GIF89a + GCE) plus three malformed inputs hitting
+classic problem areas — truncated §27 trailer, §22.c.i LZW
+min-code-size = 12 (illegal per Appendix F's 12-bit clamp), and a
+§26 Application Extension whose sub-block length over-claims by
+0x42 − 0x03 = 63 bytes. Bootstrap a fresh corpus with
+`cp -n fuzz/seed_corpus/<target>/* fuzz/corpus/<target>/`. Seeds are
+content-addressed by SHA-1 and regenerable via `tools/seedgen.py`
+(pure-Python, no GIF library invoked).
+
 Latest local baseline: the end-to-end `decode` target cleared 345 k
 executions in 60 s, `decode_lenient_panic_free` cleared 16 M, and
 `encode` cleared 256 k — all crash-free. (The `encode` run followed a

@@ -3,6 +3,29 @@
 ## [Unreleased]
 
 ### Added
+- `fuzz/seed_corpus/{decode,decode_panic_free,decode_lenient_panic_free}/` —
+  tracked, audit-grade seed inputs for the daily cargo-fuzz harnesses
+  (round 153). Five payloads per target: the 1×1 GIF87a minimal and
+  2×2 GIF89a + GCE fixtures (byte-for-byte copies of the spec walks
+  in `tests/spec_fixtures.rs`), plus three malformed inputs that
+  hit the spec's classic problem areas — truncated §27 trailer
+  (EOF on trailer state machine), §22.c.i LZW min-code-size = 12
+  (illegal per Appendix F's 12-bit code-width clamp), and a §26
+  Application Extension whose sub-block length byte claims 0x42
+  follow-on bytes when only 3 exist before the §16 terminator. The
+  `fuzz/corpus/` flywheel stays gitignored; the seed corpus is a
+  separate tracked tree under `fuzz/seed_corpus/<target>/` so a fresh
+  clone can `cp -n fuzz/seed_corpus/<target>/* fuzz/corpus/<target>/`
+  before invoking `cargo fuzz run`. Verified locally: each well-formed
+  seed decodes via both `decode()` and `decode_lenient()`; each
+  malformed seed surfaces `Err(_)` on `decode()` (no panic) and a
+  recovered `Ok(_)` on `decode_lenient()` (no panic). See
+  `fuzz/seed_corpus/README.md` for the seed inventory.
+- `tools/seedgen.py` — reproducible Python generator for the
+  `fuzz/seed_corpus/` payloads. Pure-Python (no external deps), no
+  GIF library invoked; each seed is a literal walk of the GIF89a
+  spec sections it exercises. Idempotent — re-running on a populated
+  tree only writes files whose SHA-1 isn't already on disk.
 - `benches/decode.rs`, `benches/encode.rs`, `benches/roundtrip.rs` —
   Criterion bench harnesses for the decode / encode / build → encode →
   decode hot paths. Mirrors the per-crate shape that `oxideav-cinepak`,
