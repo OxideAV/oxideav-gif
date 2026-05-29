@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-gif/compare/v0.0.10...v0.0.11) - 2026-05-29
+
+### Other
+
+- GifImage::has_transparency / requires_user_input §23 flag queries
+- GifImage::frames_with_palette §21 active-table iterator
+- GifImage::background_color accessor for §18.c.vii resolution
+- tracked spec-derived seed corpus for the daily cargo-fuzz harnesses
+- fix divide-by-zero in encode harness background-index reduction
+- pin reproducible builds + verified zero-crash baseline (round 134)
+- criterion harnesses + encoder fuzz target (round 129)
+- fuzz/decode end-to-end harness + LZW pre-alloc DoS fix
+- AnimationBuilder fluent encode-side animation assembler
+- animation-timing accessors on GifImage
+- Add §18.c.viii Pixel Aspect Ratio accessors on GifImage
+- Round 89: §24 Comment Extension accessors on GifImage
+- Enforce §7 Required Version on encode + add version-upgrade helper
+- Add Plain Text rendering, ANIMEXTS1.0 view, and lenient decoder
+- Add EXIF, GCT/LCT optimisation, cover-frame fast-path, LZW end-of-input fix
+- Add lazy playback iterator with NETSCAPE2.0 loop-count semantics
+- Add structured parsing for ecosystem GIF Application Extensions
+- restore oxideav_core::register! macro (workspace registry contract)
+- Add multi-frame compositor implementing GIF89a §23 disposal-method semantics
+- Initial implementation of GIF87a / GIF89a codec
+- Initial commit (clean-room rebuild — round 2)
+
 ### Added
 - `GifImage::has_transparency()` / `GifImage::requires_user_input()` —
   stream-level boolean queries over the §23 Graphic Control Extension
