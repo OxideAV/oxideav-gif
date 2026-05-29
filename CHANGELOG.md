@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- `GifImage::background_color` / `GifImage::background_color_rgba` —
+  public accessors that resolve the §18.c.vii Background Color Index
+  against the §18.c.ii Global Color Table. `background_color` returns
+  `Option<Rgb>` (`None` when no Global Color Table is attached or when
+  `background_index` falls past the end of the GCT — the conservative
+  reading of §18.c.vii's "should be ignored" clause); the `_rgba`
+  variant is the alpha-extended `[u8; 4]` form (`[r, g, b, 0xFF]` or
+  fully-transparent black) used by the §23 dispose-to-background
+  canvas clear. Consolidates the two existing private resolvers
+  (`compose::compose`'s inline `match` and `playback::compute_background_rgba`)
+  into one §18.c.vii implementation that the eager `compose` path and
+  the lazy `Playback` iterator both call through. Round 175.
 - `fuzz/seed_corpus/{decode,decode_panic_free,decode_lenient_panic_free}/` —
   tracked, audit-grade seed inputs for the daily cargo-fuzz harnesses
   (round 153). Five payloads per target: the 1×1 GIF87a minimal and

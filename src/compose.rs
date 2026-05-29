@@ -115,25 +115,13 @@ pub struct ComposedFrame {
 pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
     let mut canvas = RgbaCanvas::new(image.screen_width, image.screen_height);
 
-    // §18.c.iii — background colour is meaningful only if a Global
-    // Color Table is present. Otherwise dispose-to-background clears
-    // to fully-transparent black.
-    let background_rgba: [u8; 4] = match &image.global_palette {
-        Some(palette) => {
-            let idx = image.background_index as usize;
-            if idx >= palette.len() {
-                // Spec is silent on out-of-range; clamp to transparent
-                // black, matching the no-palette case, so the composer
-                // never returns an error from a stream the decoder
-                // accepted.
-                [0, 0, 0, 0]
-            } else {
-                let Rgb { r, g, b } = palette[idx];
-                [r, g, b, 0xFF]
-            }
-        }
-        None => [0, 0, 0, 0],
-    };
+    // §18.c.iii / §18.c.vii — background colour is meaningful only if
+    // a Global Color Table is present and the background index falls
+    // inside it. Otherwise dispose-to-background clears to
+    // fully-transparent black. The two-step resolution lives on
+    // `GifImage` so the composer and the lazy `Playback` iterator
+    // share one implementation.
+    let background_rgba: [u8; 4] = image.background_color_rgba();
 
     let mut out = Vec::new();
 

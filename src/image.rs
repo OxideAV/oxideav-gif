@@ -571,6 +571,54 @@ impl GifImage {
         })
     }
 
+    /// Resolve the §18.c.vii Background Color Index against the
+    /// §18.c.ii Global Color Table.
+    ///
+    /// Per §18.c.vii the Background Color Index "represents the index
+    /// of the Global Color Table … used for the Background Color. The
+    /// Background Color is the color used for those pixels on the
+    /// screen that are not covered by an image. If the Global Color
+    /// Table Flag is set to (zero), this field should be zero and
+    /// should be ignored."
+    ///
+    /// This accessor encodes both halves of the §18.c.vii contract:
+    ///
+    /// * Returns `None` when [`Self::global_palette`] is `None` (the
+    ///   §18.c.iii Global Color Table Flag was zero on decode, or the
+    ///   caller never attached one before encode) — the background
+    ///   index has no meaning without a palette.
+    /// * Returns `None` when [`Self::background_index`] points past
+    ///   the end of [`Self::global_palette`]. The spec is silent on
+    ///   out-of-range — `None` is the conservative reading and lets
+    ///   downstream renderers fall back to their canvas-default colour
+    ///   (transparent or black) without a spurious palette lookup.
+    /// * Returns `Some(rgb)` otherwise, copying the indexed entry out
+    ///   of the Global Color Table.
+    ///
+    /// [`Self::background_color_rgba`] is the alpha-extended form
+    /// used by the §23 disposal-method canvas clear in
+    /// [`crate::compose`] / [`crate::playback`].
+    pub fn background_color(&self) -> Option<Rgb> {
+        let palette = self.global_palette.as_ref()?;
+        palette.get(self.background_index as usize).copied()
+    }
+
+    /// `[r, g, b, a]` form of [`Self::background_color`] suitable for
+    /// the §23 dispose-to-background canvas clear.
+    ///
+    /// * `Some(rgb)` → `[r, g, b, 0xFF]` — fully-opaque colour pulled
+    ///   from the §18 Global Color Table.
+    /// * `None` (either no Global Color Table or an out-of-range
+    ///   [`Self::background_index`]) → `[0, 0, 0, 0]` — fully
+    ///   transparent black, the conservative fallback documented at
+    ///   [`Self::background_color`].
+    pub fn background_color_rgba(&self) -> [u8; 4] {
+        match self.background_color() {
+            Some(Rgb { r, g, b }) => [r, g, b, 0xFF],
+            None => [0, 0, 0, 0],
+        }
+    }
+
     /// Decode the §18.c.viii Pixel Aspect Ratio field into the
     /// width ÷ height ratio of a pixel in the original image.
     ///
@@ -1452,5 +1500,54 @@ mod tests {
             .map(|r| r.unwrap().delay)
             .collect();
         assert_eq!(from_timeline, from_playback);
+    }
+
+    /// §18.c.vii — with a Global Color Table present and an in-range
+    /// `background_index`, `background_color` resolves to that GCT
+    /// entry and `background_color_rgba` is the same triplet with a
+    /// fully-opaque alpha byte.
+    #[test]
+    fn background_color_resolves_via_global_palette() {
+        let mut img = base_image(Some(pal3()), Vec::new());
+        img.background_index = 2;
+        assert_eq!(img.background_color(), Some(Rgb::new(3, 3, 3)));
+        assert_eq!(img.background_color_rgba(), [3, 3, 3, 0xFF]);
+
+        img.background_index = 0;
+        assert_eq!(img.background_color(), Some(Rgb::new(1, 1, 1)));
+        assert_eq!(img.background_color_rgba(), [1, 1, 1, 0xFF]);
+    }
+
+    /// §18.c.iii — when the Global Color Table Flag is zero (no
+    /// `global_palette`), `background_index` is "meaningless"; the
+    /// accessor surfaces that as `None` / fully-transparent black.
+    #[test]
+    fn background_color_none_without_global_palette() {
+        let mut img = base_image(None, Vec::new());
+        img.background_index = 0;
+        assert_eq!(img.background_color(), None);
+        assert_eq!(img.background_color_rgba(), [0, 0, 0, 0]);
+
+        img.background_index = 200;
+        assert_eq!(img.background_color(), None);
+        assert_eq!(img.background_color_rgba(), [0, 0, 0, 0]);
+    }
+
+    /// §18.c.vii is silent on what to do when the index falls past
+    /// the end of the GCT. The accessor takes the conservative
+    /// reading — `None` / transparent black — rather than panicking
+    /// or wrapping.
+    #[test]
+    fn background_color_none_for_out_of_range_index() {
+        let mut img = base_image(Some(pal3()), Vec::new());
+        // pal3() has 3 entries (indices 0..=2); 3 is the first
+        // out-of-range index.
+        img.background_index = 3;
+        assert_eq!(img.background_color(), None);
+        assert_eq!(img.background_color_rgba(), [0, 0, 0, 0]);
+
+        img.background_index = u8::MAX;
+        assert_eq!(img.background_color(), None);
+        assert_eq!(img.background_color_rgba(), [0, 0, 0, 0]);
     }
 }

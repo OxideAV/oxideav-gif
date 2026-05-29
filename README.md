@@ -12,7 +12,14 @@ Implements every block type defined by the CompuServe specifications:
   `(raw + 15) / 64` (raw 0 → `None`, "no aspect ratio information"),
   and `GifImage::raw_pixel_aspect_ratio_for(ratio)` is its exact
   inverse (`None` outside the spec's 1:4 .. ~4:1 representable span;
-  square pixels = raw 49).
+  square pixels = raw 49). `GifImage::background_color()` resolves
+  the §18.c.vii Background Color Index against the §18.c.ii Global
+  Color Table (`None` when the GCT flag was zero, when no palette is
+  attached, or when the index is past the end of the GCT — the
+  conservative reading of §18.c.vii's "should be ignored" clause);
+  `GifImage::background_color_rgba()` is the alpha-extended form used
+  by the §23 dispose-to-background canvas clear in `compose` /
+  `Playback`.
 - Global / Local Color Tables (§19, §21)
 - Image Descriptor + Table-Based Image Data (§20, §22)
 - Variable-Length-Code LZW compression (Appendix F)

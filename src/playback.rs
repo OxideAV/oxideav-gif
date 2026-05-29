@@ -334,21 +334,11 @@ impl<'a> Iterator for LoopingFrameIter<'a> {
 // ---------------------------------------------------------------------
 
 fn compute_background_rgba(image: &GifImage) -> [u8; 4] {
-    // §18.c.iii — background colour index is meaningful only with a
-    // Global Color Table. Without one, dispose-to-background clears
-    // to fully-transparent black.
-    match &image.global_palette {
-        Some(palette) => {
-            let idx = image.background_index as usize;
-            if idx >= palette.len() {
-                [0, 0, 0, 0]
-            } else {
-                let Rgb { r, g, b } = palette[idx];
-                [r, g, b, 0xFF]
-            }
-        }
-        None => [0, 0, 0, 0],
-    }
+    // §18.c.iii / §18.c.vii — background colour index is meaningful
+    // only with a Global Color Table and an in-range index. Both
+    // checks live on `GifImage` so the lazy iterator here and the
+    // eager `compose` path share one resolver.
+    image.background_color_rgba()
 }
 
 fn check_rect_in_screen(image: &GifImage, rect: &Rect) -> Result<()> {
