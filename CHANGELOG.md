@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### Added
+- `GifImage::has_transparency()` / `GifImage::requires_user_input()` —
+  stream-level boolean queries over the §23 Graphic Control Extension
+  rendering flags. `has_transparency()` is true iff some
+  graphic-rendering block (§20 Image **or** §25 Plain Text) carries a
+  GCE with the §23.c.vi Transparency Flag set (a §23.c.viii Transparent
+  Index given) — a renderer deciding whether to allocate an alpha
+  channel can gate on this rather than walking every frame's
+  `transparent_index`. `requires_user_input()` is true iff some GCE sets
+  the §23.c.v User Input Flag, telling an interactive viewer whether it
+  needs an input-aware playback loop at all. Both return `false` for a
+  GCE-less still (every GIF87a) and for streams whose GCEs leave the
+  flag clear. The two accessors plus `frame_delays()` now share a
+  private `graphic_rendering_controls()` iterator (the §23.d
+  "graphic-rendering block" spine, skipping §24 Comment / §26
+  Application blocks that carry no GCE). Two new unit tests pin the
+  no-GCE / flag-clear / flag-set / Plain-Text-block cases; total unit
+  tests 150 → 152. Round 188.
 - `GifImage::frames_with_palette()` — iterator that yields each
   image-bearing block paired with the colour table the decoder
   should render it against, applying the §21.a precedence rule

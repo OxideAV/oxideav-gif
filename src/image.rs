@@ -717,19 +717,70 @@ impl GifImage {
     /// timing-only view for callers that want to total or inspect delays
     /// without compositing pixels.
     pub fn frame_delays(&self) -> impl Iterator<Item = Duration> + '_ {
-        self.blocks.iter().filter_map(|b| {
-            let gce = match b {
-                Block::Image(f) => f.graphic_control,
-                Block::PlainText {
-                    graphic_control, ..
-                } => *graphic_control,
-                // §24 Comment / §26 Application have no rendered output
-                // and so never carry a Delay Time.
-                Block::Comment(_) | Block::Application(_) => return None,
-            };
+        self.graphic_rendering_controls().map(|gce| {
             let centis = gce.map(|g| g.delay_centis).unwrap_or(0);
-            Some(Duration::from_millis(centis as u64 * 10))
+            Duration::from_millis(centis as u64 * 10)
         })
+    }
+
+    /// One item per *graphic-rendering block* (§20 Image **and** §25
+    /// Plain Text — both are graphic-rendering blocks whose scope a §23
+    /// Graphic Control Extension can modify per §23.d), in source order;
+    /// the item is that block's attached [`GraphicControl`] (`None` when
+    /// the block had no preceding §23 GCE).
+    ///
+    /// §24 Comment and §26 Application Extensions produce no rendered
+    /// output, so they never carry a Graphic Control Extension and are
+    /// skipped. This is the shared spine of the timing
+    /// ([`Self::frame_delays`]) and rendering-flag
+    /// ([`Self::has_transparency`] / [`Self::requires_user_input`])
+    /// accessors.
+    fn graphic_rendering_controls(&self) -> impl Iterator<Item = Option<GraphicControl>> + '_ {
+        self.blocks.iter().filter_map(|b| match b {
+            Block::Image(f) => Some(f.graphic_control),
+            Block::PlainText {
+                graphic_control, ..
+            } => Some(*graphic_control),
+            Block::Comment(_) | Block::Application(_) => None,
+        })
+    }
+
+    /// `true` when any graphic-rendering block in the stream carries a
+    /// §23 Graphic Control Extension with the §23.c.vi Transparency Flag
+    /// set (i.e. a §23.c.viii Transparent Index is given).
+    ///
+    /// Per §23.c.viii a transparent pixel is one the decoder "does not
+    /// modify", so a renderer that wants to know up front whether it must
+    /// allocate an alpha channel (or preserve whatever is already on the
+    /// canvas underneath each frame) can gate on this single query rather
+    /// than walking every frame's [`GraphicControl::transparent_index`].
+    ///
+    /// Returns `false` for a stream with no Graphic Control Extensions at
+    /// all (every still-image GIF87a) and for one whose GCEs all leave the
+    /// Transparency Flag clear.
+    pub fn has_transparency(&self) -> bool {
+        self.graphic_rendering_controls()
+            .flatten()
+            .any(|gce| gce.transparent_index.is_some())
+    }
+
+    /// `true` when any graphic-rendering block in the stream carries a
+    /// §23 Graphic Control Extension with the §23.c.v User Input Flag set.
+    ///
+    /// Per §23.c.v "the decoder should wait for user input … before
+    /// continuing", and §23.c.vii adds that when both a Delay Time and the
+    /// User Input Flag are present, processing resumes "when user input is
+    /// received or when the delay time expires, whichever occurs first".
+    /// An interactive viewer can use this query to decide whether the
+    /// stream needs an input-aware playback loop at all, instead of the
+    /// purely time-driven loop sufficient for the common case.
+    ///
+    /// Returns `false` for a stream with no Graphic Control Extensions and
+    /// for one whose GCEs all leave the User Input Flag clear.
+    pub fn requires_user_input(&self) -> bool {
+        self.graphic_rendering_controls()
+            .flatten()
+            .any(|gce| gce.user_input)
     }
 
     /// `true` when the stream carries more than one graphic-rendering
@@ -1433,6 +1484,98 @@ mod tests {
             img.frame_delays().collect::<Vec<_>>(),
             vec![Duration::from_millis(100), Duration::from_millis(300)]
         );
+    }
+
+    fn frame_with_gce(gce: GraphicControl) -> Frame {
+        Frame {
+            graphic_control: Some(gce),
+            ..frame_with(None)
+        }
+    }
+
+    /// §23.c.vi / §23.c.viii — `has_transparency` is true iff some
+    /// graphic-rendering block's GCE sets a Transparent Index.
+    #[test]
+    fn has_transparency_keys_off_transparent_index() {
+        // No GCE anywhere -> no transparency.
+        let none = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(!none.has_transparency());
+
+        // A GCE present but with the Transparency Flag clear.
+        let opaque = base_image(
+            Some(pal3()),
+            vec![Block::Image(frame_with_gce(GraphicControl {
+                transparent_index: None,
+                ..GraphicControl::default()
+            }))],
+        );
+        assert!(!opaque.has_transparency());
+
+        // A later frame turns transparency on -> whole stream reports true.
+        let transparent = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Comment(b"x".to_vec()),
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(0),
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(transparent.has_transparency());
+
+        // §25 Plain Text is a graphic-rendering block too — its GCE counts.
+        let pt = base_image(
+            Some(pal3()),
+            vec![Block::PlainText {
+                params: PlainText {
+                    left: 0,
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    cell_width: 1,
+                    cell_height: 1,
+                    fg_color_index: 1,
+                    bg_color_index: 0,
+                    text: b"A".to_vec(),
+                },
+                graphic_control: Some(GraphicControl {
+                    transparent_index: Some(2),
+                    ..GraphicControl::default()
+                }),
+            }],
+        );
+        assert!(pt.has_transparency());
+    }
+
+    /// §23.c.v — `requires_user_input` is true iff some graphic-rendering
+    /// block's GCE sets the User Input Flag.
+    #[test]
+    fn requires_user_input_keys_off_user_input_flag() {
+        let none = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(!none.requires_user_input());
+
+        let no_wait = base_image(
+            Some(pal3()),
+            vec![Block::Image(frame_with_gce(GraphicControl {
+                user_input: false,
+                ..GraphicControl::default()
+            }))],
+        );
+        assert!(!no_wait.requires_user_input());
+
+        let waits = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_gce(GraphicControl {
+                    user_input: true,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(waits.requires_user_input());
     }
 
     /// `is_animated` keys off the count of graphic-rendering blocks, not

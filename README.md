@@ -74,6 +74,15 @@ Implements every block type defined by the CompuServe specifications:
   ANIMEXTS1.0 pass count (`None` for the infinite-loop case). The
   timeline view matches `Playback`'s per-frame delays exactly without
   compositing any pixels.
+- Stream-level §23 rendering-flag queries. `has_transparency()` is
+  true when any graphic-rendering block's §23 Graphic Control
+  Extension sets the §23.c.vi Transparency Flag (a §23.c.viii
+  Transparent Index is given), so a renderer can decide whether to
+  allocate an alpha channel without walking every frame's
+  `transparent_index`; `requires_user_input()` is true when any GCE
+  sets the §23.c.v User Input Flag, telling an interactive viewer
+  whether it needs an input-aware playback loop. Both share the
+  §23.d graphic-rendering-block spine with `frame_delays()`.
 - Fluent animation assembly (`builder::AnimationBuilder`) — the
   encode-side counterpart to the timing accessors.
   `new(width, height, palette)` shares one §18 Global Color Table;
