@@ -241,6 +241,29 @@ impl GifImage {
         })
     }
 
+    /// Iterate every image-bearing block paired with the colour table the
+    /// decoder should render it against, in source order.
+    ///
+    /// Per §21.a "If present, this color table temporarily becomes the
+    /// active color table and the following image should be processed
+    /// using it", a Local Color Table on the §20 Image Descriptor takes
+    /// precedence over the §18 Global Color Table; when the LCT flag is
+    /// clear the GCT applies; when neither is present the second item of
+    /// the yielded tuple is `None` (the §13 / §21 fallback "a Data Stream
+    /// which does not contain either a Global Color Table or a Local
+    /// Color Table" case).
+    ///
+    /// The yielded slice borrows from `self`, so callers iterating
+    /// frames + palette together do not need to clone the palette or
+    /// resolve precedence themselves.
+    pub fn frames_with_palette(&self) -> impl Iterator<Item = (&Frame, Option<&[Rgb]>)> {
+        let global = self.global_palette.as_deref();
+        self.frames().map(move |f| {
+            let palette = f.local_palette.as_deref().or(global);
+            (f, palette)
+        })
+    }
+
     /// Iterate every Application Extension carried by this stream.
     pub fn application_extensions(&self) -> impl Iterator<Item = &Application> {
         self.blocks.iter().filter_map(|b| match b {
@@ -1549,5 +1572,99 @@ mod tests {
         img.background_index = u8::MAX;
         assert_eq!(img.background_color(), None);
         assert_eq!(img.background_color_rgba(), [0, 0, 0, 0]);
+    }
+
+    /// `frames_with_palette` returns the §18 Global Color Table for a
+    /// frame whose Local Color Table flag is clear (§21.a).
+    #[test]
+    fn frames_with_palette_falls_back_to_gct() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        let collected: Vec<_> = img
+            .frames_with_palette()
+            .map(|(_, p)| p.map(<[Rgb]>::to_vec))
+            .collect();
+        assert_eq!(collected, vec![Some(pal3()), Some(pal3())]);
+    }
+
+    /// §21.a — "this color table temporarily becomes the active color
+    /// table". When a Local Color Table is present it supersedes the
+    /// Global Color Table for the frame that follows.
+    #[test]
+    fn frames_with_palette_prefers_lct_over_gct() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(Some(pal3_alt()))),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        let collected: Vec<_> = img
+            .frames_with_palette()
+            .map(|(_, p)| p.map(<[Rgb]>::to_vec))
+            .collect();
+        assert_eq!(collected, vec![Some(pal3_alt()), Some(pal3())]);
+    }
+
+    /// §13 / §21 — "a Data Stream which does not contain either a
+    /// Global Color Table or a Local Color Table" — neither table is
+    /// available, so the yielded palette is `None`.
+    #[test]
+    fn frames_with_palette_none_when_no_tables_at_all() {
+        let img = base_image(None, vec![Block::Image(frame_with(None))]);
+        let collected: Vec<_> = img.frames_with_palette().map(|(_, p)| p).collect();
+        assert_eq!(collected.len(), 1);
+        assert!(collected[0].is_none());
+    }
+
+    /// Non-Image blocks (§24 Comment, §25 Plain Text, §26 Application)
+    /// are skipped — only §20 Image Descriptors are paired with a
+    /// palette, matching `frames()`.
+    #[test]
+    fn frames_with_palette_skips_non_image_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"first".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Application(Application {
+                    identifier: *b"OXIDE001",
+                    auth_code: *b"r81",
+                    data: Vec::new(),
+                }),
+                Block::Image(frame_with(Some(pal3_alt()))),
+                Block::Comment(b"last".to_vec()),
+            ],
+        );
+        let collected: Vec<_> = img
+            .frames_with_palette()
+            .map(|(_, p)| p.map(<[Rgb]>::to_vec))
+            .collect();
+        assert_eq!(collected, vec![Some(pal3()), Some(pal3_alt())]);
+    }
+
+    /// The yielded `&Frame` reference points at the same frame
+    /// `frames()` would yield — the new iterator is a strict extension
+    /// of the existing one.
+    #[test]
+    fn frames_with_palette_frame_handle_matches_frames() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(Some(pal3_alt()))),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        let lhs: Vec<*const Frame> = img.frames().map(|f| f as *const _).collect();
+        let rhs: Vec<*const Frame> = img
+            .frames_with_palette()
+            .map(|(f, _)| f as *const _)
+            .collect();
+        assert_eq!(lhs, rhs);
     }
 }

@@ -20,7 +20,16 @@ Implements every block type defined by the CompuServe specifications:
   `GifImage::background_color_rgba()` is the alpha-extended form used
   by the §23 dispose-to-background canvas clear in `compose` /
   `Playback`.
-- Global / Local Color Tables (§19, §21)
+- Global / Local Color Tables (§19, §21).
+  `GifImage::frames_with_palette()` yields each §20 image-bearing
+  block paired with the colour table the decoder should render it
+  against — Local Color Table when present (§21.a: "this color
+  table temporarily becomes the active color table"), Global
+  Color Table when the LCT flag is clear, `None` when neither
+  table is attached (§13 / §21 fallback). The yielded palette
+  slice borrows from the `GifImage` so frame-walking consumers do
+  not need to clone the palette or hand-roll the precedence
+  lookup.
 - Image Descriptor + Table-Based Image Data (§20, §22)
 - Variable-Length-Code LZW compression (Appendix F)
 - Four-pass interlace transform (Appendix E)

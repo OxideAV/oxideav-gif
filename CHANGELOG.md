@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### Added
+- `GifImage::frames_with_palette()` — iterator that yields each
+  image-bearing block paired with the colour table the decoder
+  should render it against, applying the §21.a precedence rule
+  ("If present, this color table temporarily becomes the active
+  color table and the following image should be processed using
+  it"): a frame's Local Color Table supersedes the §18 Global
+  Color Table; when the LCT flag is clear the GCT applies; when
+  neither is present the second tuple element is `None` (the §13
+  / §21 fallback "a Data Stream which does not contain either a
+  Global Color Table or a Local Color Table"). The yielded slice
+  borrows from `self` so callers walking frames + palette together
+  do not need to clone the palette or hand-roll the precedence
+  lookup. Five new unit tests pin GCT-fallback / LCT-precedence /
+  no-table / non-Image-block-skipping / `*const Frame`-handle-
+  matches-`frames()` semantics; total unit tests 145 → 150. Round
+  181.
 - `GifImage::background_color` / `GifImage::background_color_rgba` —
   public accessors that resolve the §18.c.vii Background Color Index
   against the §18.c.ii Global Color Table. `background_color` returns
