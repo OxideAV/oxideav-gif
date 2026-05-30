@@ -187,24 +187,29 @@ the codec.)
 
 ## Benchmarking
 
-`benches/` ships three [Criterion](https://github.com/bheisler/criterion.rs)
-harnesses driving the decoder, encoder, and end-to-end roundtrip hot
-paths. Each scenario synthesises its inputs on the fly via
-`AnimationBuilder` + `encode` — no committed fixture files. Run with:
+`benches/` ships four [Criterion](https://github.com/bheisler/criterion.rs)
+harnesses driving the decoder, encoder, end-to-end roundtrip, and
+direct Appendix F LZW codec-pair hot paths. Each scenario synthesises
+its inputs on the fly — no committed fixture files. Run with:
 
 ```
 cargo bench -p oxideav-gif --bench decode
 cargo bench -p oxideav-gif --bench encode
 cargo bench -p oxideav-gif --bench roundtrip
+cargo bench -p oxideav-gif --bench lzw
 ```
 
-The three harnesses together cover 14 scenarios spanning single-frame
-stills (320×240 / 64×64), multi-frame animations (320×240 4f /
-64×64 8f), the `decode_lenient` resync path, the `decode_first_frame`
-cover-frame fast path, the lazy `Playback::frames` iterator vs eager
-`compose`, and the `AnimationBuilder::build` validation pass in
-isolation. Future LZW / sub-block-sizing / disposal-state-machine
-optimisation rounds use these baselines for A/B comparisons.
+The first three harnesses together cover 14 scenarios spanning
+single-frame stills (320×240 / 64×64), multi-frame animations
+(320×240 4f / 64×64 8f), the `decode_lenient` resync path, the
+`decode_first_frame` cover-frame fast path, the lazy `Playback::frames`
+iterator vs eager `compose`, and the `AnimationBuilder::build`
+validation pass in isolation. The fourth (`lzw`, round 194) measures
+the `lzw::encode` / `lzw::decode` pair in isolation across four
+sizes — see [`BENCHMARKS.md`](BENCHMARKS.md) for the scenario matrix
+and the round-194 baseline numbers. Future LZW /
+sub-block-sizing / disposal-state-machine optimisation rounds use
+these baselines for A/B comparisons.
 
 ## Not implemented
 

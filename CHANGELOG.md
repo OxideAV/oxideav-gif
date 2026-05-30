@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `benches/lzw.rs` Criterion harness exercising the Appendix F LZW
+  codec pair in isolation across four sizes (16×16 / 256×256 /
+  1024×1024 / 100×(64×64)); baseline numbers + matrix recorded in
+  `BENCHMARKS.md` (round 194).
+
 ## [0.0.11](https://github.com/OxideAV/oxideav-gif/compare/v0.0.10...v0.0.11) - 2026-05-29
 
 ### Other

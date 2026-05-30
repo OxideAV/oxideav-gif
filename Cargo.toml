@@ -51,3 +51,12 @@ harness = false
 [[bench]]
 name = "roundtrip"
 harness = false
+
+# Round 194 (depth-mode benchmarks): direct Appendix F LZW codec-pair
+# harness — pairs `lzw::encode` / `lzw::decode` per size so future
+# optimisation rounds can attribute their delta to the codec in
+# isolation rather than the surrounding GIF container path. See
+# `BENCHMARKS.md` for the matrix + baseline numbers.
+[[bench]]
+name = "lzw"
+harness = false
