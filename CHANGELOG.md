@@ -4,6 +4,17 @@
 
 ### Added
 
+- `fuzz/fuzz_targets/plain_text.rs` dedicated §25 Plain Text Extension
+  `cargo-fuzz` harness — synthesises `Block::PlainText` blocks (with
+  optional §23 GCE attachment) directly via the in-process API,
+  drives `encode` → `decode` (strict + lenient + cover-frame) →
+  `compose` → `Playback` on the result, and asserts panic-freedom
+  across §25.c.viii/ix `cell_width = 0`, §25.c.x/xi out-of-palette
+  fg/bg-index clamping, multi-sub-block §15 text payload splitting,
+  §25.e font fallback on non-ASCII bytes, and the §23.f.i snapshot/
+  revert path when a `RestorePrevious` GCE is attached to a Plain
+  Text block. Verified clean over 200 000 iterations seeded from
+  three §25-walking seed inputs (round 200).
 - `benches/lzw.rs` Criterion harness exercising the Appendix F LZW
   codec pair in isolation across four sizes (16×16 / 256×256 /
   1024×1024 / 100×(64×64)); baseline numbers + matrix recorded in

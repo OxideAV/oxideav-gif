@@ -20,6 +20,7 @@ One subdirectory per fuzz target. Each subdirectory mirrors the
 fuzz/seed_corpus/decode/...
 fuzz/seed_corpus/decode_panic_free/...
 fuzz/seed_corpus/decode_lenient_panic_free/...
+fuzz/seed_corpus/plain_text/...
 ```
 
 ## Bootstrapping `fuzz/corpus/<target>/`
@@ -43,6 +44,8 @@ human. The labels below correspond to the bytes-for-bytes payloads
 emitted by `tools/seedgen.py` (run from the crate root); see that
 script for the spec section each blob walks.
 
+### `decode` / `decode_panic_free` / `decode_lenient_panic_free`
+
 | Label                                | Bytes | Spec sections walked                        |
 |--------------------------------------|-------|---------------------------------------------|
 | `spec_1x1_gif87a_minimal`            | 35    | §17 / §18 / §19 / §20 / §22 / §15 / §27     |
@@ -57,6 +60,20 @@ syntax diagram in the GIF89a specification (no external decoder
 consulted). The three malformed fixtures perturb a single field of
 the 1×1 GIF87a or wrap a §26 Application Extension around it.
 
+### `plain_text` (round 200)
+
+Unlike the other targets, `plain_text` consumes a *fuzz-encoded*
+parameter stream — not GIF on-disk bytes — and synthesises
+§25 Plain Text Extension blocks directly via the in-process API.
+The seeds below walk specific render paths so a fresh fuzz session
+reaches them on iteration 1..3 rather than after coverage warm-up.
+
+| Label                       | Bytes | Render path exercised                       |
+|-----------------------------|-------|---------------------------------------------|
+| `pt_basic_no_gce`           | 14    | One in-bounds §25 block, no §23 GCE attached; standard glyph render through `compose` |
+| `pt_gce_restore_previous`   | 41    | §23.f.i pre-render snapshot + §23.c.iv `RestorePrevious` revert on a non-image block; back-to-back blocks share the canvas |
+| `pt_degenerate_cell_size`   | 12    | §25.c.viii/ix `cell_width = cell_height = 0` — `render_plain_text` short-circuits to a no-op |
+
 ## Verification (round 153)
 
 Each well-formed seed decodes via both `decode()` and
@@ -64,6 +81,14 @@ Each well-formed seed decodes via both `decode()` and
 `decode()` (no panic) and a recovered `Ok(_)` on `decode_lenient()`
 (no panic) — exactly the contract the `decode_panic_free` and
 `decode_lenient_panic_free` fuzz targets assert.
+
+## Verification (round 200, `plain_text` seeds)
+
+All 3 `plain_text` seeds run to completion through the fuzz harness
+(`-runs=0` against the seed corpus prints `DONE` with zero finds).
+A follow-up `-runs=200000` random walk seeded from these inputs
+likewise reports zero crashes — the harness contract holds on every
+spec-classic path the seeds anchor.
 
 ## Regenerating
 

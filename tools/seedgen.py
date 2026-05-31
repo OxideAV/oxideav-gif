@@ -27,6 +27,7 @@ import os
 OUT_DECODE        = "fuzz/seed_corpus/decode_panic_free"
 OUT_LENIENT       = "fuzz/seed_corpus/decode_lenient_panic_free"
 OUT_DECODE_E2E    = "fuzz/seed_corpus/decode"
+OUT_PLAIN_TEXT    = "fuzz/seed_corpus/plain_text"
 
 # ---- Fixture 1: 1x1 GIF87a minimal (from tests/spec_fixtures.rs:28..) -------
 fix_87a = bytes([
@@ -123,6 +124,83 @@ seeds = {
     "malformed_app_ext_subblock_overrun": malformed_app_ext_overrun,
 }
 
+# =============================================================================
+# Plain Text fuzz target seeds (fuzz/fuzz_targets/plain_text.rs).
+# =============================================================================
+#
+# The `plain_text` harness consumes raw fuzz bytes (NOT GIF on-disk
+# format) and synthesises a `GifImage` whose `blocks` are §25 Plain
+# Text Extensions. The byte layout the harness reads:
+#
+#     data[0]   screen_width  (`% 256 + 1`, then `+ 1`)
+#     data[1]   screen_height (same)
+#     data[2]   palette seed
+#     data[3]   background_index
+#     data[4..] one or more 8-byte block headers + payload chunks:
+#               b0..b3  rect bits (left/top/width/height via pick_rect)
+#               b4      cell_width  (also payload-len scaler / delay_centis)
+#               b5      cell_height (also disposal high bits)
+#               b6      fg_color_index (bit 0x10 = attach GCE)
+#               b7      bg_color_index (bit 0x01 = user_input, 0x02 = transparent)
+#               then    `(cell_w as usize) << 2` bytes of text payload
+#                       (clamped to MAX_PT_TEXT_LEN=1024 and to remaining input).
+#
+# Each seed walks one specific path through the harness so a fresh
+# fuzz session reaches the relevant `render_plain_text` branch within
+# the first few iterations rather than after coverage-guided warm-up.
+
+# Seed 1 — small in-bounds PT block, no GCE.
+# screen 64×64, palette seed 0x55, bg_idx=0.
+# One block: rect bits 0x10100808 → left=8, top=16, width=17, height=17.
+# cell_w=8, cell_h=8, fg=0 (bit 0x10 unset → no GCE), bg=1.
+# Payload: "AB" (2 bytes — well under (8<<2)=32 cap).
+pt_seed_basic = bytes([
+    0x40, 0x40, 0x55, 0x00,
+    # Block 0 header (8 B)
+    0x08, 0x10, 0x10, 0x10,   # rect bits → (8, 16, 17, 17)
+    0x08, 0x08, 0x00, 0x01,   # cell_w=8 cell_h=8 fg=0 bg=1
+    # Payload (cell_w=8, so harness wants (8<<2)=32 bytes; provide 2 → clipped)
+    0x41, 0x42,               # "AB"
+])
+
+# Seed 2 — PT block with attached GCE running RestorePrevious disposal.
+# Exercises the §23.f.i snapshot-on-render + revert-on-disposal path
+# on a non-image block (the snapshot/restore code path is the trickiest
+# disposal value and is rarely reached on Plain Text blocks via the
+# decode-side fuzzer).
+# screen 32×32, palette seed 0xA5, bg_idx=3.
+# Two blocks back-to-back so the second sees the post-revert canvas.
+pt_seed_gce_restore_previous = bytes([
+    0x20, 0x20, 0xA5, 0x03,
+    # Block 0: PT with GCE+RestorePrevious. cell_h>>6 = 0b11 = RestorePrevious.
+    0x00, 0x00, 0x08, 0x08,   # rect bits → small placement near origin
+    0x04, 0xC0, 0x10, 0x00,   # cell_w=4 cell_h=0xC0 fg=0x10 (GCE on) bg=0
+    # Payload (cell_w=4 → wants (4<<2)=16 bytes; provide 16)
+    0x21, 0x40, 0x7F, 0x80, 0xFF, 0x00, 0x20, 0x7E,
+    0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    # Block 1: PT with no GCE.
+    0x10, 0x10, 0x10, 0x10,
+    0x08, 0x08, 0x02, 0x05,
+    # Payload
+    0x48, 0x65, 0x6C, 0x6C, 0x6F,   # "Hello"
+])
+
+# Seed 3 — degenerate cell sizes (cell_w=0, cell_h=0). Hits the early
+# no-op branch in `render_plain_text` (`if cell_width == 0 …`).
+# screen 8×8, palette seed 0, bg_idx=0.
+pt_seed_degenerate_cell = bytes([
+    0x08, 0x08, 0x00, 0x00,
+    0x00, 0x00, 0x04, 0x04,   # rect → (0, 0, 5, 5)
+    0x00, 0x00, 0x00, 0x00,   # cell_w=0 cell_h=0 → no-op render
+    # No payload bytes — cell_w=0 means harness wants 0 bytes of text.
+])
+
+plain_text_seeds = {
+    "pt_basic_no_gce":            pt_seed_basic,
+    "pt_gce_restore_previous":    pt_seed_gce_restore_previous,
+    "pt_degenerate_cell_size":    pt_seed_degenerate_cell,
+}
+
 def sha1hex(b): return hashlib.sha1(b).hexdigest()
 
 written = []
@@ -139,7 +217,19 @@ for label, blob in seeds.items():
         written.append((label, out, name, len(blob)))
         print(f"[write] {label} -> {out}/{name} ({len(blob)} B)")
 
+for label, blob in plain_text_seeds.items():
+    name = sha1hex(blob)
+    path = os.path.join(OUT_PLAIN_TEXT, name)
+    if os.path.exists(path):
+        print(f"[skip] {label}: {OUT_PLAIN_TEXT}/{name} already present")
+        continue
+    os.makedirs(OUT_PLAIN_TEXT, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(blob)
+    written.append((label, OUT_PLAIN_TEXT, name, len(blob)))
+    print(f"[write] {label} -> {OUT_PLAIN_TEXT}/{name} ({len(blob)} B)")
+
 print(
     f"\n{len(written)} seed file(s) written across "
-    f"{OUT_DECODE}, {OUT_LENIENT}, and {OUT_DECODE_E2E}."
+    f"{OUT_DECODE}, {OUT_LENIENT}, {OUT_DECODE_E2E}, and {OUT_PLAIN_TEXT}."
 )

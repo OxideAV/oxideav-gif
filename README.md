@@ -136,7 +136,7 @@ Implements every block type defined by the CompuServe specifications:
 
 ## Fuzzing
 
-`fuzz/fuzz_targets/` ships five `cargo-fuzz` harnesses, all asserting
+`fuzz/fuzz_targets/` ships six `cargo-fuzz` harnesses, all asserting
 panic-freedom on arbitrary bytes:
 
 - `decode_panic_free` — strict `decode` entry point.
@@ -161,19 +161,37 @@ panic-freedom on arbitrary bytes:
   can't construct (sub-screen placements, mismatched palette sizes,
   multi-frame disposal sequences). Caps screen at 256×256 and frame
   count at 16.
+- `plain_text` (round 200) — dedicated §25 Plain Text Extension
+  harness. `AnimationBuilder` exposes image frames only, and the
+  decoder-side harnesses can only emit a `Block::PlainText` when the
+  fuzzer stumbles onto the `0x21 0x01 0x0C` extension-introducer
+  prefix — so the §25 grammar is effectively unreached on truly
+  arbitrary input. This harness builds a `GifImage` whose `blocks`
+  are exclusively Plain Text Extensions (each optionally carrying a
+  §23 GCE), then drives `encode` → `decode` (strict + lenient +
+  cover-frame) → `compose` → `Playback`. Covers the §25.c.viii/ix
+  `cell_width = 0` no-op short-circuit, the §25.c.x/xi out-of-palette
+  fg/bg-index clamp in `render_plain_text`, multi-sub-block §15
+  payload splitting on text > 255 B, the §25.e font-fallback to
+  space for non-ASCII bytes, and the §23.f.i snapshot-and-revert
+  path when a `RestorePrevious` GCE is attached to a Plain Text
+  block (a path the decoder-side fuzzer reaches only by chance).
 
 Each harness keeps a local corpus under `fuzz/corpus/` (gitignored —
 the corpus is a per-machine flywheel, not a checked-in artifact).
 `fuzz/Cargo.lock` *is* committed so the harness builds reproducibly.
 
 A small set of spec-derived seed inputs lives under
-`fuzz/seed_corpus/<target>/` (tracked). Each target gets five seeds:
-the two well-formed fixtures from `tests/spec_fixtures.rs` (1×1
-GIF87a minimal, 2×2 GIF89a + GCE) plus three malformed inputs hitting
-classic problem areas — truncated §27 trailer, §22.c.i LZW
-min-code-size = 12 (illegal per Appendix F's 12-bit clamp), and a
-§26 Application Extension whose sub-block length over-claims by
-0x42 − 0x03 = 63 bytes. Bootstrap a fresh corpus with
+`fuzz/seed_corpus/<target>/` (tracked). The three decoder-facing
+targets each get five seeds: the two well-formed fixtures from
+`tests/spec_fixtures.rs` (1×1 GIF87a minimal, 2×2 GIF89a + GCE) plus
+three malformed inputs hitting classic problem areas — truncated §27
+trailer, §22.c.i LZW min-code-size = 12 (illegal per Appendix F's
+12-bit clamp), and a §26 Application Extension whose sub-block length
+over-claims by 0x42 − 0x03 = 63 bytes. The `plain_text` target gets
+three §25-specific seeds — one bare in-bounds block, one with a §23
+`RestorePrevious` GCE attached, and one with `cell_width = 0` for the
+no-op render short-circuit. Bootstrap a fresh corpus with
 `cp -n fuzz/seed_corpus/<target>/* fuzz/corpus/<target>/`. Seeds are
 content-addressed by SHA-1 and regenerable via `tools/seedgen.py`
 (pure-Python, no GIF library invoked).
