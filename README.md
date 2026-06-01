@@ -19,7 +19,15 @@ Implements every block type defined by the CompuServe specifications:
   conservative reading of §18.c.vii's "should be ignored" clause);
   `GifImage::background_color_rgba()` is the alpha-extended form used
   by the §23 dispose-to-background canvas clear in `compose` /
-  `Playback`.
+  `Playback`. `GifImage::color_resolution_bits()` decodes the §18.c.iv
+  Color Resolution byte into the bits-per-primary-colour of the *source*
+  palette (raw + 1, range `1..=8`); `original_palette_color_count()` is
+  the derived `2^(3 × bits)` colour count (`8..=16_777_216`), letting a
+  renderer pick a display mode against the source's richness rather
+  than the per-frame palette truncation. `GifImage::frame_count()`
+  counts §20 Image blocks (no Plain Text, no Comment, no Application)
+  for callers that need a single-number "how many images" without
+  walking the iterator themselves.
 - Global / Local Color Tables (§19, §21).
   `GifImage::frames_with_palette()` yields each §20 image-bearing
   block paired with the colour table the decoder should render it

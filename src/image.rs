@@ -642,6 +642,77 @@ impl GifImage {
         }
     }
 
+    /// Decode the §18.c.iv Color Resolution field into the *bits per
+    /// primary colour available to the original image*.
+    ///
+    /// §18.c.iv defines the raw byte ([`Self::color_resolution`]) as
+    /// "Number of bits per primary color available to the original
+    /// image, minus 1." A raw value of `3` therefore means the source
+    /// palette had `4` bits per primary colour (i.e. `2^4 = 16` levels
+    /// each on R, G and B for a `16 × 16 × 16 = 4096`-colour source
+    /// palette). The spec scopes this to the *richness of the original
+    /// palette*, not the number of colours actually used in the graphic
+    /// — a quantiser that knocks the palette down to 256 entries should
+    /// still report the original's resolution here so a renderer can
+    /// pick the best display mode.
+    ///
+    /// The returned value is always in the range `1..=8`. The
+    /// CompuServe spec carves out only `0..=7` for the raw 3-bit field,
+    /// so `color_resolution_bits()` adds 1 and never overflows.
+    pub fn color_resolution_bits(&self) -> u8 {
+        // §18.c.iv stores raw value = bits per primary - 1.
+        // Decoder masks to 3 bits so this max is 7 → bits returns 8.
+        (self.color_resolution & 0b0000_0111) + 1
+    }
+
+    /// Number of distinct colours the *original* source palette could
+    /// represent, derived from §18.c.iv Color Resolution.
+    ///
+    /// The §18.c.iv field reports the size of the source palette as
+    /// bits-per-primary minus one (see [`Self::color_resolution_bits`]
+    /// for the bit count); the total colour count is `2^(3 × bits)`
+    /// (R, G and B each get `bits` bits). Raw values `0..=7` therefore
+    /// map to:
+    ///
+    /// | raw | bits | colours       |
+    /// |-----|------|---------------|
+    /// | 0   | 1    | `8`           |
+    /// | 1   | 2    | `64`          |
+    /// | 2   | 3    | `512`         |
+    /// | 3   | 4    | `4 096`       |
+    /// | 4   | 5    | `32 768`      |
+    /// | 5   | 6    | `262 144`     |
+    /// | 6   | 7    | `2 097 152`   |
+    /// | 7   | 8    | `16 777 216`  |
+    ///
+    /// Returned as a `u32` so the maximum (`16_777_216` for a 24-bit
+    /// source palette) fits without loss; this is the richness of the
+    /// *source*, not the count of palette entries in
+    /// [`Self::global_palette`].
+    pub fn original_palette_color_count(&self) -> u32 {
+        let bits = self.color_resolution_bits() as u32;
+        1u32 << (3 * bits)
+    }
+
+    /// Count of §20 Image Descriptor blocks in this stream.
+    ///
+    /// Mirrors `self.frames().count()` but reads as the intent at the
+    /// call site. A still-image GIF returns `1`; a multi-frame
+    /// animation returns the number of §20 Image blocks (§25 Plain
+    /// Text blocks are *graphic-rendering* blocks but not §20 Images,
+    /// so they do not count here — see [`Self::frame_delays`] for the
+    /// timeline view that includes them).
+    ///
+    /// A metadata-only stream (only §24 Comment / §26 Application
+    /// Extensions before the §27 Trailer) returns `0`. The strict
+    /// [`crate::decode`] entry point rejects that shape per §12 ("a
+    /// Data Stream shall contain at least one image"); the lenient
+    /// [`crate::decode_lenient`] entry point can produce it after
+    /// scanning past corrupted image data.
+    pub fn frame_count(&self) -> usize {
+        self.frames().count()
+    }
+
     /// Decode the §18.c.viii Pixel Aspect Ratio field into the
     /// width ÷ height ratio of a pixel in the original image.
     ///
@@ -1809,5 +1880,79 @@ mod tests {
             .map(|(f, _)| f as *const _)
             .collect();
         assert_eq!(lhs, rhs);
+    }
+
+    /// `color_resolution_bits()` adds 1 to the raw §18.c.iv field and
+    /// covers the full `0..=7` raw range without overflow.
+    #[test]
+    fn color_resolution_bits_covers_full_field_range() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        for raw in 0u8..=7 {
+            img.color_resolution = raw;
+            assert_eq!(img.color_resolution_bits(), raw + 1);
+        }
+    }
+
+    /// `color_resolution_bits()` masks the raw field to its low 3
+    /// bits, so a defensively-set high-bit value still yields a sane
+    /// `1..=8` result. (The decoder already masks, but the accessor
+    /// is reachable from caller-built `GifImage`s too.)
+    #[test]
+    fn color_resolution_bits_masks_high_bits() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        img.color_resolution = 0b1111_0011;
+        // Low 3 bits = 3, plus one → 4 bits per primary.
+        assert_eq!(img.color_resolution_bits(), 4);
+    }
+
+    /// `original_palette_color_count()` follows the §18.c.iv table:
+    /// raw `0..=7` maps to `2^(3 * (raw + 1))` distinct colours.
+    #[test]
+    fn original_palette_color_count_table() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        let expected = [8u32, 64, 512, 4096, 32_768, 262_144, 2_097_152, 16_777_216];
+        for (raw, want) in expected.iter().enumerate() {
+            img.color_resolution = raw as u8;
+            assert_eq!(img.original_palette_color_count(), *want, "raw={raw}");
+        }
+    }
+
+    /// `frame_count()` counts §20 Image blocks specifically; §24
+    /// Comment, §25 Plain Text, and §26 Application blocks do not
+    /// contribute.
+    #[test]
+    fn frame_count_counts_image_blocks_only() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"hi".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(Some(pal3_alt()))),
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 8,
+                        height: 8,
+                        cell_width: 8,
+                        cell_height: 8,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"hi".to_vec(),
+                    },
+                    graphic_control: None,
+                },
+            ],
+        );
+        assert_eq!(img.frame_count(), 2);
+    }
+
+    /// `frame_count() == 0` is reachable for a metadata-only stream
+    /// (lenient mode can yield this after scanning past corrupt image
+    /// data).
+    #[test]
+    fn frame_count_zero_for_metadata_only_stream() {
+        let img = base_image(Some(pal3()), vec![Block::Comment(b"hi".to_vec())]);
+        assert_eq!(img.frame_count(), 0);
     }
 }

@@ -4,6 +4,21 @@
 
 ### Added
 
+- `GifImage::color_resolution_bits()` / `GifImage::original_palette_color_count()`
+  / `GifImage::frame_count()` — three direct accessors over Logical Screen
+  Descriptor §18 fields. `color_resolution_bits()` adds 1 to the §18.c.iv raw
+  3-bit field (per §18.c.iv's "Number of bits per primary color available to
+  the original image, minus 1") returning `1..=8`;
+  `original_palette_color_count()` is the derived `2^(3 × bits)` source-palette
+  colour count (`8..=16_777_216`), letting a renderer pick a display mode
+  against the source palette's *richness*, not the per-frame palette
+  truncation. `frame_count()` returns the number of §20 Image blocks (§24
+  Comment / §25 Plain Text / §26 Application Extensions excluded) for the
+  common "how many images" call site without forcing the caller to count the
+  `frames()` iterator. Five new unit tests pin the bits-per-primary range,
+  high-bit masking, the eight-row §18.c.iv colour-count table, image-block-only
+  counting against a mixed block list, and the metadata-only zero case. Total
+  unit tests 152 → 157. Round 207.
 - `fuzz/fuzz_targets/plain_text.rs` dedicated §25 Plain Text Extension
   `cargo-fuzz` harness — synthesises `Block::PlainText` blocks (with
   optional §23 GCE attachment) directly via the in-process API,
