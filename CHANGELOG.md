@@ -4,6 +4,35 @@
 
 ### Added
 
+- `GifImage::has_sorted_global_palette()` /
+  `GifImage::frames_with_sorted_palette()` /
+  `GifImage::all_frames_palettes_sorted()` — three accessors over the
+  §18.c.v Global Color Table Sort Flag and the §20.c.viii Local Color
+  Table Sort Flag. Both spec sections define the Sort Flag identically
+  ("Ordered by decreasing importance, most important color first") so
+  that a palette-display-constrained decoder "may use an initial
+  segment of the table to render the graphic." The decoder already
+  parsed the flag into [`GifImage::global_palette_sorted`] /
+  [`Frame::palette_sorted`]; these accessors surface it at the
+  semantic level a renderer cares about — *is this active palette
+  truncatable in place?* `has_sorted_global_palette()` is the
+  GCT-level query, conservative on §18.c.iii (returns `false` when no
+  GCT is attached, since §18.c.v is undefined in that case).
+  `frames_with_sorted_palette()` is the per-frame iterator: yields
+  `(&Frame, Option<&[Rgb]>, bool)` following the same §21.a precedence
+  as `frames_with_palette()` (LCT supersedes GCT for both the palette
+  *and* its Sort Flag), and reports `(_, None, false)` for the §13 /
+  §21 no-active-table fallback. `all_frames_palettes_sorted()`
+  short-circuits the stream-level question in a single query (vacuous
+  `true` for a zero-frame stream; `false` the moment any active palette
+  is missing or has its Sort Flag clear). Thirteen new unit tests pin
+  the GCT-present-and-sorted, no-GCT-with-flag-set, GCT-absent,
+  LCT-supersedes-GCT-sort, GCT-fallback, no-active-table,
+  LCT-clear-overrides-sorted-GCT, non-Image-block skip, mixed-LCT-GCT
+  all-sorted, single-unsorted-flip, zero-frame-vacuous,
+  no-active-palette-flips-false, and frame-handle-extends-
+  `frames_with_palette` semantics. Total unit tests 163 → 176. Round
+  224.
 - `GifImage::frames_with_graphic_control()` — §23-side companion to
   the existing `frames_with_palette()` accessor. Yields each §20 Image
   Descriptor block paired with its attached §23 Graphic Control

@@ -44,7 +44,20 @@ Implements every block type defined by the CompuServe specifications:
   may precede a graphic rendering block"), preserving source
   order so callers walking "every image plus the GCE that
   controls it" don't have to re-derive the §23 → §20 attachment
-  from the raw block list.
+  from the raw block list. §18.c.v / §20.c.viii Sort Flag
+  queries surface the spec's "ordered by decreasing importance"
+  guarantee that palette-display-constrained renderers can use
+  for initial-segment truncation:
+  `GifImage::has_sorted_global_palette()` is the GCT-level query
+  (`true` only when a §18 GCT is present *and* its §18.c.v Sort
+  Flag is set); `GifImage::frames_with_sorted_palette()` extends
+  `frames_with_palette` with the active-table Sort Flag bit (LCT
+  Sort Flag when an LCT applies per §21.a, GCT Sort Flag
+  otherwise, `false` when neither table is attached);
+  `GifImage::all_frames_palettes_sorted()` reports whether the
+  whole stream's active palettes are sorted in one query so a
+  pipeline can gate initial-segment truncation without walking
+  per-frame.
 - Image Descriptor + Table-Based Image Data (§20, §22)
 - Variable-Length-Code LZW compression (Appendix F)
 - Four-pass interlace transform (Appendix E)

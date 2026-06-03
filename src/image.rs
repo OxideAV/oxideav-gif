@@ -299,6 +299,91 @@ impl GifImage {
         self.frames().map(|f| (f, f.graphic_control))
     }
 
+    /// `true` when the stream carries a §18 Global Color Table whose
+    /// §18.c.v Sort Flag is set ("Ordered by decreasing importance,
+    /// most important color first").
+    ///
+    /// Per §18.c.v the sort flag exists "to assist a decoder, with
+    /// fewer available colors, in choosing the best subset of colors;
+    /// the decoder may use an initial segment of the table to render
+    /// the graphic." A display constrained to fewer than
+    /// [`Self::global_palette`]`.len()` entries can therefore truncate
+    /// the table to its leading N entries when this query is `true`,
+    /// confident the higher-importance colours are preserved.
+    ///
+    /// Returns `false` for a stream with no Global Color Table (the
+    /// §18.c.v Sort Flag is undefined when §18.c.iii Global Color
+    /// Table Flag is clear) and for one that carries a Global Color
+    /// Table whose Sort Flag is clear.
+    pub fn has_sorted_global_palette(&self) -> bool {
+        self.global_palette.is_some() && self.global_palette_sorted
+    }
+
+    /// Iterate every §20 Image Descriptor block paired with the
+    /// colour table that would render it ([`Self::frames_with_palette`]'s
+    /// precedence — Local Color Table when present per §21.a, Global
+    /// Color Table when the LCT flag is clear, `None` when neither
+    /// table is attached) plus a `bool` flag reporting whether that
+    /// active table is *sorted* per §18.c.v (for the Global Color
+    /// Table) or §20.c.viii (for the Local Color Table).
+    ///
+    /// Both spec sections define the Sort Flag identically: "Ordered
+    /// by decreasing importance, most important color first." A
+    /// palette-display-constrained renderer that walks frame-by-frame
+    /// can use this iterator's `bool` to decide, per frame, whether
+    /// truncating the active palette to a leading initial segment is
+    /// safe (Sort Flag set) or whether a full-table quantiser pass is
+    /// needed (Sort Flag clear).
+    ///
+    /// The `bool` is `false` when there is no active table at all
+    /// (the §13 / §21 fallback "a Data Stream which does not contain
+    /// either a Global Color Table or a Local Color Table" case) —
+    /// no table means no sorted-order guarantee is available.
+    ///
+    /// The yielded slice borrows from `self`, so callers iterating
+    /// frames + palette + sort flag together do not need to clone the
+    /// palette or hand-roll the precedence + Sort Flag lookup.
+    pub fn frames_with_sorted_palette(
+        &self,
+    ) -> impl Iterator<Item = (&Frame, Option<&[Rgb]>, bool)> {
+        let global = self.global_palette.as_deref();
+        let global_sorted = self.global_palette_sorted;
+        self.frames().map(move |f| {
+            if let Some(local) = f.local_palette.as_deref() {
+                // §21.a "this color table temporarily becomes the
+                // active color table" — the §20.c.viii LCT Sort Flag
+                // takes precedence over the §18.c.v GCT Sort Flag
+                // exactly the way the LCT itself does over the GCT.
+                (f, Some(local), f.palette_sorted)
+            } else if let Some(g) = global {
+                (f, Some(g), global_sorted)
+            } else {
+                // §13 / §21 fallback — no active table, so no sort
+                // guarantee.
+                (f, None, false)
+            }
+        })
+    }
+
+    /// `true` when every §20 Image Descriptor block in the stream
+    /// would render against a colour table whose Sort Flag is set
+    /// (LCT-sorted per §20.c.viii when an LCT is attached, otherwise
+    /// GCT-sorted per §18.c.v).
+    ///
+    /// Equivalent to "every frame's active palette is sorted, by the
+    /// same precedence [`Self::frames_with_sorted_palette`] applies."
+    /// Returns `true` for a zero-frame stream (vacuously) and `false`
+    /// for any frame whose active palette is missing (no LCT and no
+    /// GCT) — that frame has no sort guarantee available to honour.
+    ///
+    /// A palette-display-constrained pipeline can gate
+    /// initial-segment-truncation on this single query rather than
+    /// inspecting [`Self::frames_with_sorted_palette`] per frame.
+    pub fn all_frames_palettes_sorted(&self) -> bool {
+        self.frames_with_sorted_palette()
+            .all(|(_, palette, sorted)| palette.is_some() && sorted)
+    }
+
     /// Iterate every Application Extension carried by this stream.
     pub fn application_extensions(&self) -> impl Iterator<Item = &Application> {
         self.blocks.iter().filter_map(|b| match b {
@@ -2148,5 +2233,210 @@ mod tests {
     fn frame_count_zero_for_metadata_only_stream() {
         let img = base_image(Some(pal3()), vec![Block::Comment(b"hi".to_vec())]);
         assert_eq!(img.frame_count(), 0);
+    }
+
+    /// Build a §20 Frame whose §20.c.viii Sort Flag (`palette_sorted`)
+    /// is set, with the supplied (optional) Local Color Table. Used by
+    /// the §18.c.v / §20.c.viii Sort Flag accessor tests.
+    fn frame_with_sorted(local: Option<Vec<Rgb>>) -> Frame {
+        let mut f = frame_with(local);
+        f.palette_sorted = true;
+        f
+    }
+
+    /// §18.c.v — a Global Color Table whose Sort Flag is set returns
+    /// `true` from `has_sorted_global_palette()`.
+    #[test]
+    fn has_sorted_global_palette_true_when_gct_sort_flag_set() {
+        let mut img = base_image(Some(pal3()), vec![]);
+        img.global_palette_sorted = true;
+        assert!(img.has_sorted_global_palette());
+    }
+
+    /// §18.c.iii — when the Global Color Table is absent the §18.c.v
+    /// Sort Flag is meaningless. The accessor must short-circuit on
+    /// the no-GCT case rather than report a sort guarantee no
+    /// palette can honour.
+    #[test]
+    fn has_sorted_global_palette_false_when_no_gct_even_if_flag_set() {
+        let mut img = base_image(None, vec![]);
+        img.global_palette_sorted = true;
+        assert!(!img.has_sorted_global_palette());
+    }
+
+    /// Default no-Sort-Flag GCT reports `false` so a renderer never
+    /// truncates a palette whose order has not been declared important.
+    #[test]
+    fn has_sorted_global_palette_false_when_flag_clear() {
+        let img = base_image(Some(pal3()), vec![]);
+        assert!(!img.has_sorted_global_palette());
+    }
+
+    /// `frames_with_sorted_palette` follows the §21.a precedence: a
+    /// frame with a Local Color Table whose §20.c.viii Sort Flag is
+    /// set reports the LCT's sorted state, not the GCT's.
+    #[test]
+    fn frames_with_sorted_palette_prefers_lct_sort_flag() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![Block::Image(frame_with_sorted(Some(pal3_alt())))],
+        );
+        // GCT Sort Flag clear; the frame's LCT Sort Flag is set.
+        img.global_palette_sorted = false;
+        let collected: Vec<_> = img
+            .frames_with_sorted_palette()
+            .map(|(_, p, sorted)| (p.map(<[Rgb]>::to_vec), sorted))
+            .collect();
+        assert_eq!(collected, vec![(Some(pal3_alt()), true)]);
+    }
+
+    /// When the LCT flag is clear the §18 GCT applies and its §18.c.v
+    /// Sort Flag is what `frames_with_sorted_palette` reports.
+    #[test]
+    fn frames_with_sorted_palette_falls_back_to_gct_sort_flag() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        img.global_palette_sorted = true;
+        let collected: Vec<_> = img
+            .frames_with_sorted_palette()
+            .map(|(_, p, sorted)| (p.map(<[Rgb]>::to_vec), sorted))
+            .collect();
+        assert_eq!(collected, vec![(Some(pal3()), true), (Some(pal3()), true)]);
+    }
+
+    /// §13 / §21 — no active table → no sort guarantee. The yielded
+    /// palette is `None` and the bool is `false`.
+    #[test]
+    fn frames_with_sorted_palette_no_table_is_unsorted() {
+        let img = base_image(None, vec![Block::Image(frame_with(None))]);
+        let collected: Vec<_> = img
+            .frames_with_sorted_palette()
+            .map(|(_, p, sorted)| (p.map(<[Rgb]>::to_vec), sorted))
+            .collect();
+        assert_eq!(collected, vec![(None, false)]);
+    }
+
+    /// A frame whose LCT Sort Flag is clear must report unsorted even
+    /// when the §18 GCT happens to be sorted — the LCT is the active
+    /// table per §21.a, so its Sort Flag is the only one in scope.
+    #[test]
+    fn frames_with_sorted_palette_lct_clear_overrides_sorted_gct() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![Block::Image(frame_with(Some(pal3_alt())))],
+        );
+        img.global_palette_sorted = true;
+        // Frame has an LCT but its palette_sorted field is `false` by
+        // default — the active LCT is *not* sorted.
+        let collected: Vec<_> = img
+            .frames_with_sorted_palette()
+            .map(|(_, _, sorted)| sorted)
+            .collect();
+        assert_eq!(collected, vec![false]);
+    }
+
+    /// Non-Image blocks (§24 Comment, §25 Plain Text, §26 Application)
+    /// are skipped by `frames_with_sorted_palette` — only §20 Image
+    /// Descriptors are paired with a palette + sort flag, matching
+    /// `frames()` and `frames_with_palette()`.
+    #[test]
+    fn frames_with_sorted_palette_skips_non_image_blocks() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"first".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_sorted(Some(pal3_alt()))),
+                Block::Comment(b"last".to_vec()),
+            ],
+        );
+        img.global_palette_sorted = true;
+        let collected: Vec<_> = img
+            .frames_with_sorted_palette()
+            .map(|(_, p, sorted)| (p.map(<[Rgb]>::to_vec), sorted))
+            .collect();
+        assert_eq!(
+            collected,
+            vec![(Some(pal3()), true), (Some(pal3_alt()), true)]
+        );
+    }
+
+    /// `all_frames_palettes_sorted()` short-circuits to `true` when
+    /// every frame's active palette is sorted — by LCT or by GCT
+    /// fallback under §21.a.
+    #[test]
+    fn all_frames_palettes_sorted_true_for_mixed_lct_gct() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),                    // GCT-rendered
+                Block::Image(frame_with_sorted(Some(pal3_alt()))), // LCT-rendered
+            ],
+        );
+        img.global_palette_sorted = true;
+        assert!(img.all_frames_palettes_sorted());
+    }
+
+    /// A single unsorted active palette is enough to flip
+    /// `all_frames_palettes_sorted()` to `false`.
+    #[test]
+    fn all_frames_palettes_sorted_false_when_any_frame_unsorted() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)), // GCT-rendered, sort flag clear
+                Block::Image(frame_with_sorted(Some(pal3_alt()))),
+            ],
+        );
+        // GCT Sort Flag stays clear → the first frame renders against
+        // an unsorted table.
+        assert!(!img.all_frames_palettes_sorted());
+    }
+
+    /// Vacuous-truth: a zero-frame stream reports
+    /// `all_frames_palettes_sorted() == true` per `Iterator::all`'s
+    /// empty-input contract.
+    #[test]
+    fn all_frames_palettes_sorted_true_for_zero_frame_stream() {
+        let img = base_image(Some(pal3()), vec![Block::Comment(b"hi".to_vec())]);
+        assert!(img.all_frames_palettes_sorted());
+    }
+
+    /// A frame with no active palette at all (§13 / §21 fallback) must
+    /// flip `all_frames_palettes_sorted()` to `false`: no table means
+    /// no sort guarantee is available to honour.
+    #[test]
+    fn all_frames_palettes_sorted_false_when_no_active_palette() {
+        let img = base_image(None, vec![Block::Image(frame_with(None))]);
+        assert!(!img.all_frames_palettes_sorted());
+    }
+
+    /// `frames_with_sorted_palette` mirrors `frames_with_palette` on
+    /// the (frame, palette) pair — the new iterator is a strict
+    /// extension, adding only the §18.c.v / §20.c.viii Sort Flag bit.
+    #[test]
+    fn frames_with_sorted_palette_extends_frames_with_palette() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_sorted(Some(pal3_alt()))),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        img.global_palette_sorted = true;
+        let with_palette: Vec<_> = img
+            .frames_with_palette()
+            .map(|(f, p)| (f as *const _, p.map(<[Rgb]>::to_vec)))
+            .collect();
+        let with_sorted: Vec<_> = img
+            .frames_with_sorted_palette()
+            .map(|(f, p, _)| (f as *const _, p.map(<[Rgb]>::to_vec)))
+            .collect();
+        assert_eq!(with_palette, with_sorted);
     }
 }
