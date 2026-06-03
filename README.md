@@ -65,7 +65,15 @@ Implements every block type defined by the CompuServe specifications:
   values (None / Keep / RestoreBackground / RestorePrevious), the
   §23.c.viii transparent-index handling, and Plain Text rendering
   via the same disposal state machine (Plain Text is a §25
-  graphic-rendering block too).
+  graphic-rendering block too). `tests/compose_disposal.rs` pins
+  the spec-implicit corners as well — transparent-index show-through
+  over a prior canvas, no-GCT RestoreBackground (falls back to fully
+  transparent black per §18.c.iii), RestoreBackground only clearing
+  the disposing frame's *own* placement rect (not the entire prior-
+  frame footprint), nested RestorePrevious chains where each frame's
+  pre-render snapshot is independent, full-screen RestoreBackground
+  wiping the entire logical screen, and the `ComposedFrame::
+  delay_centis` = disposing-frame's-own-§23.c.vii contract.
 - Animation playback iterator `Playback::looping_frames()` that
   honours the NETSCAPE2.0 *Looping* sub-block: no extension plays one
   pass, `loop_count = 0` loops forever, `loop_count = N` plays

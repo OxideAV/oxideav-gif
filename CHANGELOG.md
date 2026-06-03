@@ -4,6 +4,22 @@
 
 ### Added
 
+- `tests/compose_disposal.rs` per-frame compositor edge-case sweep —
+  the prior file covered each §23.c.iv disposal value (0–3) with one
+  canonical non-overlapping fixture (4 tests). This sweep adds 7
+  targeted scenarios for behaviour §23 leaves implicit:
+  transparent-index (§23.c.viii) show-through, restore-to-background
+  with no §18 Global Color Table (falls back to fully transparent
+  black per §18.c.iii), restore-to-background only clearing the
+  disposing frame's own rect rather than the entire prior-frame
+  footprint, restore-to-previous capturing show-through state in its
+  snapshot (not a pristine pre-everything canvas), nested
+  RestorePrevious chains where each frame's pre-render snapshot is
+  independent, restore-to-background on a full-screen frame wiping
+  the whole canvas, and the implicit
+  `ComposedFrame::delay_centis`-reports-the-disposing-frame's-own-delay
+  contract (defaulting to 0 when no §23 GCE is attached). Compositor
+  test count 4 → 11. Round 213.
 - `GifImage::color_resolution_bits()` / `GifImage::original_palette_color_count()`
   / `GifImage::frame_count()` — three direct accessors over Logical Screen
   Descriptor §18 fields. `color_resolution_bits()` adds 1 to the §18.c.iv raw
