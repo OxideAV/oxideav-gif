@@ -4,6 +4,22 @@
 
 ### Added
 
+- `GifImage::frames_with_graphic_control()` — §23-side companion to
+  the existing `frames_with_palette()` accessor. Yields each §20 Image
+  Descriptor block paired with its attached §23 Graphic Control
+  Extension (`Option<GraphicControl>`; `None` when no GCE preceded the
+  image per §23.a "at most one Graphic Control Extension may precede
+  a graphic rendering block"), in source order. Lets callers walk
+  "every image and the GCE that controls it" without re-deriving the
+  §23 → §20 attachment from `GifImage::blocks` themselves. Mirrors the
+  §20-only shape of `frames_with_palette()` so the two accessors
+  compose naturally; §25 Plain Text blocks remain reachable via the
+  shared timing / rendering-flag spine (`frame_delays()` /
+  `has_transparency()` / `requires_user_input()`). Six new unit tests
+  pin the no-GCE / attached-GCE / per-frame-independence / non-image-
+  block-skipping / `*const Frame`-handle-matches-`frames()` /
+  delay-matches-`frame_delays()` semantics. Total unit tests 157 →
+  163. Round 218.
 - `tests/compose_disposal.rs` per-frame compositor edge-case sweep —
   the prior file covered each §23.c.iv disposal value (0–3) with one
   canonical non-overlapping fixture (4 tests). This sweep adds 7

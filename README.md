@@ -37,7 +37,14 @@ Implements every block type defined by the CompuServe specifications:
   table is attached (§13 / §21 fallback). The yielded palette
   slice borrows from the `GifImage` so frame-walking consumers do
   not need to clone the palette or hand-roll the precedence
-  lookup.
+  lookup. `GifImage::frames_with_graphic_control()` is the
+  §23-side companion: each §20 Image block paired with its
+  attached §23 Graphic Control Extension (`None` when no GCE
+  preceded it per §23.a "at most one Graphic Control Extension
+  may precede a graphic rendering block"), preserving source
+  order so callers walking "every image plus the GCE that
+  controls it" don't have to re-derive the §23 → §20 attachment
+  from the raw block list.
 - Image Descriptor + Table-Based Image Data (§20, §22)
 - Variable-Length-Code LZW compression (Appendix F)
 - Four-pass interlace transform (Appendix E)

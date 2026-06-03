@@ -264,6 +264,41 @@ impl GifImage {
         })
     }
 
+    /// Iterate every §20 Image Descriptor block paired with its
+    /// attached §23 Graphic Control Extension, in source order.
+    ///
+    /// Per §23.a "The scope of this extension is the first graphic
+    /// rendering block to follow" and §23.d "This block can modify
+    /// the Image Descriptor Block and the Plain Text Extension", a
+    /// §23 GCE attaches to the immediately-following graphic-rendering
+    /// block. On decode that attachment is stored on
+    /// [`Frame::graphic_control`] (and likewise on
+    /// [`Block::PlainText::graphic_control`] for §25 Plain Text); this
+    /// accessor surfaces the §20 half of that pairing — `(&Frame,
+    /// Option<GraphicControl>)` — in source order so a caller walking
+    /// "every image and the GCE that controls it" can do so without
+    /// re-deriving the relationship from [`Self::blocks`].
+    ///
+    /// The second tuple element is `None` for an image with no
+    /// attached GCE (every still GIF87a, and 89a streams whose §20
+    /// Image was not preceded by a §23 GCE per §23's "at most one
+    /// Graphic Control Extension may precede a graphic rendering
+    /// block").
+    ///
+    /// §25 Plain Text Extensions are not included — they are
+    /// graphic-rendering blocks under §23.d but not §20 Images.
+    /// Callers walking the timing or rendering-flag spine across
+    /// both kinds use [`Self::frame_delays`] /
+    /// [`Self::has_transparency`] / [`Self::requires_user_input`],
+    /// which already cover both. The pairing here mirrors
+    /// [`Self::frames_with_palette`]'s §20-only shape so the two
+    /// accessors compose naturally.
+    pub fn frames_with_graphic_control(
+        &self,
+    ) -> impl Iterator<Item = (&Frame, Option<GraphicControl>)> {
+        self.frames().map(|f| (f, f.graphic_control))
+    }
+
     /// Iterate every Application Extension carried by this stream.
     pub fn application_extensions(&self) -> impl Iterator<Item = &Application> {
         self.blocks.iter().filter_map(|b| match b {
@@ -1880,6 +1915,165 @@ mod tests {
             .map(|(f, _)| f as *const _)
             .collect();
         assert_eq!(lhs, rhs);
+    }
+
+    /// `frames_with_graphic_control` returns `None` for every image in
+    /// a stream that carries no §23 Graphic Control Extensions (the
+    /// still-image / GIF87a case).
+    #[test]
+    fn frames_with_graphic_control_none_when_no_gce() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        let collected: Vec<_> = img
+            .frames_with_graphic_control()
+            .map(|(_, gce)| gce)
+            .collect();
+        assert_eq!(collected, vec![None, None]);
+    }
+
+    /// §23.a "The scope of this extension is the first graphic
+    /// rendering block to follow" — a GCE attached to the §20 Image
+    /// surfaces verbatim on the paired iterator item.
+    #[test]
+    fn frames_with_graphic_control_returns_attached_gce() {
+        let gce = GraphicControl {
+            disposal: DisposalMethod::RestoreBackground,
+            user_input: true,
+            transparent_index: Some(2),
+            delay_centis: 50,
+        };
+        let mut f = frame_with(Some(pal3()));
+        f.graphic_control = Some(gce);
+        let img = base_image(Some(pal3()), vec![Block::Image(f)]);
+        let collected: Vec<_> = img.frames_with_graphic_control().map(|(_, g)| g).collect();
+        assert_eq!(collected, vec![Some(gce)]);
+    }
+
+    /// A mixed stream where only some §20 Images carry a §23 GCE — the
+    /// pairing must report each frame's actual attachment in source
+    /// order, not aggregate or fill in.
+    #[test]
+    fn frames_with_graphic_control_per_frame_independence() {
+        let gce_a = GraphicControl {
+            disposal: DisposalMethod::Keep,
+            user_input: false,
+            transparent_index: None,
+            delay_centis: 10,
+        };
+        let gce_b = GraphicControl {
+            disposal: DisposalMethod::RestorePrevious,
+            user_input: false,
+            transparent_index: Some(0),
+            delay_centis: 20,
+        };
+        let mut f_a = frame_with(None);
+        f_a.graphic_control = Some(gce_a);
+        let f_bare = frame_with(None);
+        let mut f_b = frame_with(None);
+        f_b.graphic_control = Some(gce_b);
+        let img = base_image(
+            Some(pal3()),
+            vec![Block::Image(f_a), Block::Image(f_bare), Block::Image(f_b)],
+        );
+        let collected: Vec<_> = img.frames_with_graphic_control().map(|(_, g)| g).collect();
+        assert_eq!(collected, vec![Some(gce_a), None, Some(gce_b)]);
+    }
+
+    /// Non-Image blocks (§24 Comment, §26 Application, §25 Plain Text)
+    /// must be skipped — the iterator's shape mirrors `frames()` and
+    /// `frames_with_palette()`.
+    #[test]
+    fn frames_with_graphic_control_skips_non_image_blocks() {
+        let mut f = frame_with(None);
+        f.graphic_control = Some(GraphicControl {
+            disposal: DisposalMethod::None,
+            user_input: false,
+            transparent_index: None,
+            delay_centis: 7,
+        });
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"leading".to_vec()),
+                Block::Application(Application {
+                    identifier: *b"NETSCAPE",
+                    auth_code: *b"2.0",
+                    data: vec![0x01, 0x00, 0x00],
+                }),
+                Block::Image(f),
+                Block::Comment(b"trailing".to_vec()),
+            ],
+        );
+        // Only one §20 Image block, so exactly one item.
+        let collected: Vec<_> = img.frames_with_graphic_control().collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].1.map(|g| g.delay_centis), Some(7));
+    }
+
+    /// The yielded `&Frame` reference points at the same frame
+    /// `frames()` would yield — the new iterator is a strict extension
+    /// of the existing one, matching the `frames_with_palette`
+    /// invariant.
+    #[test]
+    fn frames_with_graphic_control_frame_handle_matches_frames() {
+        let mut f1 = frame_with(None);
+        f1.graphic_control = Some(GraphicControl {
+            disposal: DisposalMethod::Keep,
+            user_input: false,
+            transparent_index: None,
+            delay_centis: 1,
+        });
+        let f2 = frame_with(Some(pal3_alt()));
+        let img = base_image(Some(pal3()), vec![Block::Image(f1), Block::Image(f2)]);
+        let lhs: Vec<*const Frame> = img.frames().map(|f| f as *const _).collect();
+        let rhs: Vec<*const Frame> = img
+            .frames_with_graphic_control()
+            .map(|(f, _)| f as *const _)
+            .collect();
+        assert_eq!(lhs, rhs);
+    }
+
+    /// The §23 GCE pairing must agree with the per-frame timing
+    /// surfaced by [`GifImage::frame_delays`] for §20 Image blocks. The
+    /// pairing carries the full GCE (not just the delay), but the
+    /// `delay_centis` field is the source of truth for both accessors.
+    #[test]
+    fn frames_with_graphic_control_delay_matches_frame_delays() {
+        let mut f1 = frame_with(None);
+        f1.graphic_control = Some(GraphicControl {
+            disposal: DisposalMethod::None,
+            user_input: false,
+            transparent_index: None,
+            delay_centis: 25,
+        });
+        let f2_no_gce = frame_with(None);
+        let mut f3 = frame_with(None);
+        f3.graphic_control = Some(GraphicControl {
+            disposal: DisposalMethod::Keep,
+            user_input: false,
+            transparent_index: None,
+            delay_centis: 100,
+        });
+        let img = base_image(
+            Some(pal3()),
+            vec![Block::Image(f1), Block::Image(f2_no_gce), Block::Image(f3)],
+        );
+        // No Plain Text blocks, so frame_delays and
+        // frames_with_graphic_control align element-for-element.
+        let pairs: Vec<Duration> = img
+            .frames_with_graphic_control()
+            .map(|(_, g)| {
+                let centis = g.map(|gc| gc.delay_centis).unwrap_or(0);
+                Duration::from_millis(centis as u64 * 10)
+            })
+            .collect();
+        let delays: Vec<Duration> = img.frame_delays().collect();
+        assert_eq!(pairs, delays);
     }
 
     /// `color_resolution_bits()` adds 1 to the raw §18.c.iv field and
