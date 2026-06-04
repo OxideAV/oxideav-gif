@@ -172,6 +172,25 @@ impl<'a> BitReader<'a> {
 
 // ---------------------------------------------------------------------
 // Encoder.
+//
+// Two surfaces:
+//
+//   * [`encode`] — stateless free function. Allocates a fresh
+//     dictionary (~2 MiB), encodes one raster, drops everything. The
+//     historical entry point; behaviour byte-stable.
+//   * [`LzwEncoder`] — reusable state. Holds the dictionary across
+//     many [`LzwEncoder::encode_frame`] calls so the per-call zero-init
+//     cost lands once at construction instead of once per frame. The
+//     same dictionary bytes that `encode` rebuilds every call. A
+//     post-frame reset walks an explicit list of touched slots
+//     (`O(dictionary_entries)`) rather than memsetting the whole 2 MiB
+//     table (`O(2 MiB)`), so re-encoding *N* frames pays the
+//     full-table cost once and the touched-slots cost `N` times.
+//
+// Both produce byte-identical output. `LzwEncoder` is the right pick
+// for an animated GIF encoder making `N` frame calls; the free
+// function is the right pick for a one-shot encode where the
+// dictionary will be thrown away anyway.
 // ---------------------------------------------------------------------
 
 /// Encode `pixels` (palette indices) under the variable-length-code
@@ -179,6 +198,11 @@ impl<'a> BitReader<'a> {
 /// excluding the leading LZW Minimum Code Size byte and excluding the
 /// surrounding sub-block framing (§22.c.i and §15 are applied by the
 /// caller).
+///
+/// One-shot path: allocates a fresh dictionary, encodes one raster,
+/// drops everything. Callers encoding many frames in sequence (e.g.
+/// an animated GIF) should reuse a single [`LzwEncoder`] so the
+/// dictionary's 2 MiB zero-init lands once instead of per-frame.
 pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
     if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
         return Err(Error::InvalidInput(format!(
@@ -203,7 +227,9 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
     // A flat Vec indexed by `(prefix as usize) * 256 + (byte as usize)`
     // keeps the inner loop branch-free and cache-friendly. 0 means
     // "absent"; entry codes are stored as `code + 1` so we can
-    // distinguish absent from entry-zero.
+    // distinguish absent from entry-zero. The one-shot path doesn't
+    // log touched keys — the table is about to be dropped, so the
+    // reset cost the [`LzwEncoder`] path pays would be pure waste here.
     let mut table: Vec<u16> = vec![0u16; MAX_TABLE_SIZE * 256];
     let mut next_code: u16 = first_entry;
     let mut width: u8 = initial_width;
@@ -283,6 +309,188 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
     writer.write(eoi_code, width);
 
     Ok(writer.finish())
+}
+
+/// Reusable LZW encoder state.
+///
+/// Holds the `(prefix_code, next_byte) → code` lookup table — a flat
+/// `Vec<u16>` of `MAX_TABLE_SIZE * 256 = 4096 × 256 = 1 048 576` slots
+/// (~2 MiB) — across multiple [`Self::encode_frame`] calls. The table
+/// is keyed by `(prefix as usize) * 256 + (byte as usize)` so the
+/// inner loop is one branch-free indexed load. A `0` slot means
+/// "absent"; entry codes are stored as `code + 1` so the slot can
+/// distinguish absent from entry-zero.
+///
+/// After a frame finishes, [`Self::reset_dictionary`] walks an
+/// explicit `touched_keys` log and clears just those slots — cost
+/// proportional to actual dictionary entries used (≤ 4094 per frame),
+/// not to the full 2 MiB table. This is the cost the per-frame `encode`
+/// free-function pays every call; reusing an `LzwEncoder` amortises
+/// the table allocation across the whole animation.
+///
+/// Construction zero-initialises the table once. Cheap to keep around
+/// for the lifetime of an encoder pipeline.
+pub struct LzwEncoder {
+    /// Flat `(prefix, byte) → code+1` dictionary; see the struct doc
+    /// for the layout. `0` is "absent"; live codes are stored biased
+    /// by 1.
+    table: Vec<u16>,
+    /// Packed `(prefix * 256 + byte)` keys of every slot written
+    /// during the in-progress (or just-finished) frame. Used by
+    /// [`Self::reset_dictionary`] to clear only those slots on
+    /// reset — cost proportional to actual entries used rather than
+    /// the full 2 MiB table.
+    touched_keys: Vec<u32>,
+}
+
+impl LzwEncoder {
+    /// Allocate a fresh encoder with a zero-initialised dictionary.
+    /// One ~2 MiB zero-init at construction time; subsequent
+    /// [`Self::encode_frame`] calls reuse the same buffer.
+    pub fn new() -> Self {
+        Self {
+            table: vec![0u16; MAX_TABLE_SIZE * 256],
+            // `MAX_TABLE_SIZE - 2` is the upper bound on entries the
+            // encoder ever inserts (entries 0..clear_code are the
+            // identity strings and never stored).
+            touched_keys: Vec::with_capacity(MAX_TABLE_SIZE),
+        }
+    }
+
+    /// Encode one raster against the reusable dictionary.
+    ///
+    /// Output is byte-identical to the free-function [`encode`]: same
+    /// Clear emission, same width-bump rule, same EOI emission.
+    /// On return the dictionary is reset, ready for the next frame —
+    /// callers do not need to invoke [`Self::reset_dictionary`]
+    /// themselves.
+    pub fn encode_frame(&mut self, min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
+        let payload = self.encode_frame_inner(min_code_size, pixels);
+        // Reset the dictionary regardless of success / failure so the
+        // next call starts from a clean state. The reset cost is
+        // proportional to the entries the touched_keys log records.
+        self.reset_dictionary();
+        payload
+    }
+
+    /// Inner state-machine for [`Self::encode_frame`]. Records every
+    /// dictionary slot it writes in `self.touched_keys` so the caller's
+    /// post-call [`Self::reset_dictionary`] can clear just those slots
+    /// rather than memsetting the whole 2 MiB table. Pulled into its
+    /// own function so the encoder's `?` error early-return doesn't
+    /// skip the reset bookkeeping the outer [`Self::encode_frame`]
+    /// handles.
+    fn encode_frame_inner(&mut self, min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
+        if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
+            return Err(Error::InvalidInput(format!(
+                "LZW minimum code size {min_code_size} outside [2, 8]"
+            )));
+        }
+
+        let clear_code: u16 = 1 << min_code_size;
+        let eoi_code: u16 = clear_code + 1;
+        let first_entry: u16 = clear_code + 2;
+        let initial_width: u8 = min_code_size + 1;
+
+        let mut writer = BitWriter::new();
+
+        // §F.1 recommendation — output Clear as the first code.
+        writer.write(clear_code, initial_width);
+
+        let mut next_code: u16 = first_entry;
+        let mut width: u8 = initial_width;
+
+        let mut iter = pixels.iter().copied();
+        let mut prev: u16 = match iter.next() {
+            Some(b) => {
+                if (b as u16) >= clear_code {
+                    return Err(Error::InvalidInput(format!(
+                        "pixel index {b} >= 2^min_code_size ({clear_code})"
+                    )));
+                }
+                b as u16
+            }
+            None => {
+                // Empty raster: emit only EOI after the Clear we already wrote.
+                writer.write(eoi_code, width);
+                return Ok(writer.finish());
+            }
+        };
+
+        for byte in iter {
+            if (byte as u16) >= clear_code {
+                return Err(Error::InvalidInput(format!(
+                    "pixel index {byte} >= 2^min_code_size ({clear_code})"
+                )));
+            }
+            let key = (prev as usize) * 256 + (byte as usize);
+            let slot = self.table[key];
+            if slot != 0 {
+                // The string `prev + byte` already has a code — extend.
+                prev = slot - 1;
+            } else {
+                // Emit the code for `prev` and learn the new pattern.
+                writer.write(prev, width);
+
+                if next_code < MAX_TABLE_SIZE as u16 {
+                    self.table[key] = next_code + 1;
+                    self.touched_keys.push(key as u32);
+                    // Width-bump rule (Appendix F.4) — see the
+                    // module-level doc-comment for the derivation.
+                    let assigned = next_code;
+                    next_code += 1;
+                    if assigned == (1u16 << width) - 1 && width < MAX_CODE_WIDTH {
+                        width += 1;
+                    }
+                    // Cover-sheet "deferred clear": at next_code ==
+                    // MAX_TABLE_SIZE we stop assigning new codes but
+                    // keep emitting at MAX_CODE_WIDTH against the
+                    // existing table. The encoder is free to send a
+                    // Clear at any time; this implementation simply
+                    // keeps using the table.
+                }
+
+                prev = byte as u16;
+            }
+        }
+
+        // Final pending prefix. The decoder, on receiving this code,
+        // will add a dictionary entry (prev_code + first_byte_of_this)
+        // and may bump its width when that assignment lands on `2^W − 2`.
+        // Mirror that here so the encoder's `width` advances in
+        // lock-step; otherwise the EOI emission below would go out at
+        // the old width while the decoder reads at the new one. We do
+        // not actually need the dictionary entry's contents (no further
+        // compression happens), only the bump-trigger side-effect.
+        writer.write(prev, width);
+        if next_code < MAX_TABLE_SIZE as u16
+            && next_code == (1u16 << width) - 1
+            && width < MAX_CODE_WIDTH
+        {
+            width += 1;
+        }
+
+        // §F.2 — EOI must be the last code output for an image.
+        writer.write(eoi_code, width);
+        Ok(writer.finish())
+    }
+
+    /// Clear every slot the in-progress (or just-finished) frame
+    /// touched. Cost is `O(touched_keys.len())`, bounded by
+    /// `MAX_TABLE_SIZE`; the full 2 MiB table is never memset.
+    fn reset_dictionary(&mut self) {
+        // Drain instead of iter+clear so the keys go through one pass
+        // and we leave `touched_keys` empty in the same step.
+        for k in self.touched_keys.drain(..) {
+            self.table[k as usize] = 0;
+        }
+    }
+}
+
+impl Default for LzwEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -618,5 +826,164 @@ mod tests {
         // Same with a single byte of compressed data.
         let r = decode(2, &[0xFF], huge_expected);
         assert!(matches!(r, Err(Error::InvalidData(_))) || r.is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // `LzwEncoder` reusable state.
+    //
+    // The reusable encoder must produce byte-identical output to the
+    // free `encode` function — same Clear, same per-prefix entries,
+    // same width-bump points, same EOI. The dictionary reset between
+    // frames must walk only the touched-keys log and leave a clean
+    // table for the next frame.
+    // -----------------------------------------------------------------
+
+    /// Re-encoding the same raster on a fresh `LzwEncoder` and on
+    /// the free `encode` must produce the exact same bytes —
+    /// `encode_frame` is the same state machine, just hoisting the
+    /// dictionary's allocation out of the call.
+    #[test]
+    fn lzw_encoder_matches_free_function_byte_for_byte() {
+        // Cover the spec corners: empty raster, the hand-derived 4-color
+        // fixture, the 8-bit table-overflow stress, a long monotone
+        // KwKwK run, and a 16-colour width-bump stairstep.
+        let cases: Vec<(u8, Vec<u8>)> = vec![
+            (2, Vec::new()),
+            (2, vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]),
+            (2, vec![3u8; 3000]),
+            (3, vec![0u8; 16]),
+            (4, {
+                let mut p = Vec::with_capacity(20_000);
+                let mut s: u32 = 0x1234_5678;
+                for _ in 0..20_000 {
+                    s ^= s << 13;
+                    s ^= s >> 17;
+                    s ^= s << 5;
+                    p.push((s & 0x0F) as u8);
+                }
+                p
+            }),
+            (8, {
+                let mut p = Vec::with_capacity(5_000);
+                for i in 0..5_000u32 {
+                    p.push((i.wrapping_mul(31) & 0xFF) as u8);
+                }
+                p
+            }),
+        ];
+        let mut encoder = LzwEncoder::new();
+        for (mcs, pixels) in &cases {
+            let via_free = encode(*mcs, pixels).expect("free encode");
+            let via_reuse = encoder.encode_frame(*mcs, pixels).expect("reusable encode");
+            assert_eq!(
+                via_reuse,
+                via_free,
+                "byte mismatch at min_code_size={mcs}, raster len={}",
+                pixels.len()
+            );
+        }
+    }
+
+    /// Two back-to-back frames through one `LzwEncoder` must each
+    /// produce the same bytes the free function would have produced
+    /// for that frame in isolation. This pins the dictionary reset:
+    /// frame 2 must not see entries left over from frame 1.
+    #[test]
+    fn lzw_encoder_resets_dictionary_between_frames() {
+        let frame_a: Vec<u8> = (0..200u32).map(|i| (i % 4) as u8).collect();
+        let frame_b: Vec<u8> = vec![3u8; 200];
+
+        let expected_a = encode(2, &frame_a).expect("frame a");
+        let expected_b = encode(2, &frame_b).expect("frame b");
+
+        let mut encoder = LzwEncoder::new();
+        let got_a = encoder.encode_frame(2, &frame_a).expect("reused a");
+        let got_b = encoder.encode_frame(2, &frame_b).expect("reused b");
+        assert_eq!(got_a, expected_a);
+        assert_eq!(got_b, expected_b);
+
+        // Sanity: same again on a third call must still produce
+        // the right bytes for frame_a — dictionary state is clean.
+        let got_a_again = encoder.encode_frame(2, &frame_a).expect("reused a again");
+        assert_eq!(got_a_again, expected_a);
+    }
+
+    /// An `InvalidInput` failure mid-frame must leave the encoder
+    /// ready for the next call; the dictionary reset runs regardless
+    /// of the error path so a hostile or bug-induced input doesn't
+    /// permanently corrupt the encoder's table.
+    #[test]
+    fn lzw_encoder_recovers_dictionary_after_error() {
+        let mut encoder = LzwEncoder::new();
+
+        // First, exercise the encoder with a happy-path frame so the
+        // dictionary is non-trivially populated and reset before the
+        // failing call. Without this lead-in the post-reset state
+        // would be identical to the construction state and the test
+        // would not actually pin the reset-on-error path.
+        let happy: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3];
+        encoder.encode_frame(2, &happy).expect("happy");
+
+        // Out-of-range pixel index: encoder must surface the error
+        // and leave its dictionary clean.
+        let bad = vec![0u8, 1, 7];
+        let err = encoder.encode_frame(2, &bad);
+        assert!(matches!(err, Err(Error::InvalidInput(_))));
+
+        // Next call on a healthy raster must produce the same bytes
+        // the free function would, confirming the dictionary was
+        // reset after the failed call.
+        let recovery: Vec<u8> = vec![0, 1, 2, 3];
+        let expected = encode(2, &recovery).expect("free recovery");
+        let got = encoder.encode_frame(2, &recovery).expect("reused recovery");
+        assert_eq!(got, expected);
+    }
+
+    /// `LzwEncoder::default()` must be equivalent to
+    /// `LzwEncoder::new()` — same fresh dictionary, same per-call
+    /// behaviour.
+    #[test]
+    fn lzw_encoder_default_matches_new() {
+        let pixels: Vec<u8> = (0..256u32).map(|i| (i % 4) as u8).collect();
+        let via_new = LzwEncoder::new()
+            .encode_frame(2, &pixels)
+            .expect("new encode");
+        let via_default = LzwEncoder::default()
+            .encode_frame(2, &pixels)
+            .expect("default encode");
+        assert_eq!(via_new, via_default);
+    }
+
+    /// A frame that triggers the deferred-clear regime (dictionary
+    /// fills at min_code_size=8) must reset cleanly so a subsequent
+    /// small frame still produces correct bytes.
+    #[test]
+    fn lzw_encoder_resets_after_dictionary_overflow() {
+        let mut encoder = LzwEncoder::new();
+        // Saturate the 4096-entry table on the first frame.
+        let mut big = Vec::with_capacity(80_000);
+        let mut state: u32 = 0xDEAD_BEEF;
+        for _ in 0..80_000 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            big.push((state & 0xFF) as u8);
+        }
+        let big_expected = encode(8, &big).expect("free big");
+        assert_eq!(
+            encoder.encode_frame(8, &big).expect("reused big"),
+            big_expected
+        );
+
+        // Now drive a tiny frame at min_code_size=2 (different
+        // alphabet, much smaller table population). Output must
+        // still match the free function — no stale entries from the
+        // saturated frame leak through.
+        let small: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3];
+        let small_expected = encode(2, &small).expect("free small");
+        assert_eq!(
+            encoder.encode_frame(2, &small).expect("reused small"),
+            small_expected
+        );
     }
 }

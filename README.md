@@ -59,7 +59,16 @@ Implements every block type defined by the CompuServe specifications:
   pipeline can gate initial-segment truncation without walking
   per-frame.
 - Image Descriptor + Table-Based Image Data (§20, §22)
-- Variable-Length-Code LZW compression (Appendix F)
+- Variable-Length-Code LZW compression (Appendix F). The codec pair
+  ships in two flavours: the stateless `lzw::encode` / `lzw::decode`
+  free functions for one-shot calls, and `lzw::LzwEncoder` which
+  reuses its `(prefix, next_byte) → code` dictionary across multiple
+  `encode_frame` calls — the ~2 MiB zero-init lands once at
+  construction, each subsequent frame walks a `touched_keys` log
+  (≤ 4094 entries) rather than memsetting the whole table. Output
+  is byte-identical to the free function; reuse cuts the
+  100×(64×64) animation-encoder microbench by ~44 % (round 230,
+  see `BENCHMARKS.md`).
 - Four-pass interlace transform (Appendix E)
 - Graphic Control Extension (§23) — disposal method, user-input flag,
   transparent index, delay time

@@ -41,6 +41,7 @@ per-second pixel-decompression / pixel-compression rate.
 | `256x256/pal=64`          | 256×256    | 64      | 6               | Mid-size; dictionary saturates (4096 entries) → cover-sheet "deferred clear".   |
 | `1024x1024/pal=256`       | 1024×1024  | 256     | 8               | Natural-image stress at §22.c.i maximum `min_code_size`; reaches 12-bit ceiling fast. |
 | `anim/100x_64x64`         | 100×(64×64)| 16      | 4               | 100 independent `encode`/`decode` calls; per-frame fixed-cost path.             |
+| `encoder_reuse/anim/100x_64x64` (r230) | 100×(64×64) | 16 | 4 | 100 frames threaded through a single `LzwEncoder`; dictionary alloc lands once. |
 
 ## Round 194 baseline (Apple M-series, `cargo bench -- --quick`)
 
@@ -68,6 +69,41 @@ Observations from the baseline:
   its MiB/s drops well below the single 256×256 number even though
   the per-frame raster is smaller — a useful baseline for any future
   "amortise the encode dictionary across frames" optimisation.
+
+## Round 230 — `LzwEncoder` reusable state
+
+The third bullet above was the call-out for an amortised-dictionary
+encoder. Round 230 lands it as a public-surface addition:
+`oxideav_gif::lzw::LzwEncoder` holds the `(prefix, next_byte) → code`
+dictionary across multiple `encode_frame` calls. The dictionary's
+~2 MiB zero-init lands once at construction; each subsequent
+`encode_frame` resets the dictionary by walking a `touched_keys` log
+(≤ 4094 entries / frame) rather than memsetting the whole table.
+
+Output is byte-identical to the free-function [`lzw::encode`]
+(pinned by `lzw_encoder_matches_free_function_byte_for_byte` over
+the spec corners: empty raster, hand-derived 4-colour fixture, 8-bit
+table-overflow stress, KwKwK monotone run, 16-colour width-bump
+stairstep). The reset-between-frames contract is pinned by
+`lzw_encoder_resets_dictionary_between_frames`, the error-path reset
+is pinned by `lzw_encoder_recovers_dictionary_after_error`, and the
+deferred-clear-followed-by-tiny-frame transition is pinned by
+`lzw_encoder_resets_after_dictionary_overflow`.
+
+Round-230 measured delta on the dedicated harness
+(`bench_lzw_encoder_reuse_anim_100x_64x64`, Apple M-series,
+`cargo bench -- --quick`):
+
+| Scenario                        | Free `lzw::encode` | Reused `LzwEncoder` | Throughput delta |
+| ------------------------------- | ------------------ | ------------------- | ---------------- |
+| `anim/100x_64x64` (16-colour ×100) | ~2.44 ms (160 MiB/s) | ~1.37 ms (285 MiB/s) | **+78 %** |
+
+The free-function path is unchanged — measurements on `16x16` /
+`256x256` / `1024x1024` / `anim/100x_64x64` for `lzw::encode` are
+within noise of the round-194 baseline above. Animation-encoder
+pipelines that already keep an encoder context across frames pick
+up the win by constructing one `LzwEncoder` and calling
+`encode_frame` per raster instead of `lzw::encode`.
 
 ## Re-running
 

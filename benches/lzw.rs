@@ -201,6 +201,38 @@ fn bench_lzw_encode_anim_100x_64x64(c: &mut Criterion) {
     g.finish();
 }
 
+/// Reusable-encoder counterpart to `bench_lzw_encode_anim_100x_64x64`.
+///
+/// Threads a single `LzwEncoder` across all 100 frame calls so the
+/// ~2 MiB dictionary allocation lands once per `b.iter` instead of
+/// once per frame; the per-frame reset walks only the touched-keys
+/// log instead of memsetting the whole table. The pair lets a
+/// regression run quantify the amortisation win in isolation.
+fn bench_lzw_encoder_reuse_anim_100x_64x64(c: &mut Criterion) {
+    let frames = build_anim_frames();
+    let total_pixels = (ANIM_FRAME_COUNT * ANIM_WIDTH * ANIM_HEIGHT) as u64;
+    let mut g = c.benchmark_group("lzw_encoder_reuse_anim_100x_64x64");
+    g.throughput(Throughput::Bytes(total_pixels));
+    g.sample_size(20);
+    g.bench_function(
+        BenchmarkId::from_parameter("encoder_reuse/anim/100x_64x64"),
+        |b| {
+            b.iter(|| {
+                let mut encoder = lzw::LzwEncoder::new();
+                let mut total = 0usize;
+                for frame in &frames {
+                    let payload = encoder
+                        .encode_frame(ANIM_MIN_CODE_SIZE, criterion::black_box(frame))
+                        .expect("LzwEncoder::encode_frame");
+                    total += payload.len();
+                }
+                criterion::black_box(total);
+            });
+        },
+    );
+    g.finish();
+}
+
 fn bench_lzw_decode_anim_100x_64x64(c: &mut Criterion) {
     let frames = build_anim_frames();
     let payloads: Vec<Vec<u8>> = frames
@@ -240,5 +272,6 @@ criterion_group!(
     bench_lzw_decode_1024x1024,
     bench_lzw_encode_anim_100x_64x64,
     bench_lzw_decode_anim_100x_64x64,
+    bench_lzw_encoder_reuse_anim_100x_64x64,
 );
 criterion_main!(benches);

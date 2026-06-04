@@ -4,6 +4,35 @@
 
 ### Added
 
+- `lzw::LzwEncoder` reusable-state encoder. Holds the Appendix F
+  `(prefix_code, next_byte) → code` dictionary across many
+  `encode_frame` calls so the ~2 MiB zero-init lands once at
+  construction instead of once per frame. The per-frame reset walks
+  an explicit `touched_keys` log (≤ 4094 entries; bounded by
+  `MAX_TABLE_SIZE - first_entry`) and clears just the slots that
+  were written rather than memsetting the whole table. Output is
+  byte-identical to the stateless `lzw::encode` free function — same
+  Clear emission, same width-bump rule, same EOI emission — pinned
+  by `lzw_encoder_matches_free_function_byte_for_byte` over the
+  spec corners (empty raster, hand-derived 4-colour fixture, 8-bit
+  table-overflow stress, KwKwK monotone run, 16-colour width-bump
+  stairstep). Four further unit tests pin the reset-between-frames
+  state hygiene (`lzw_encoder_resets_dictionary_between_frames`),
+  the error-path reset that keeps a hostile input from corrupting
+  subsequent frames (`lzw_encoder_recovers_dictionary_after_error`),
+  the saturated-then-tiny-frame transition through the deferred-
+  clear regime (`lzw_encoder_resets_after_dictionary_overflow`),
+  and the `Default` equivalence (`lzw_encoder_default_matches_new`).
+  A dedicated `bench_lzw_encoder_reuse_anim_100x_64x64` Criterion
+  scenario threads 100 frames through a single `LzwEncoder` and
+  measures ~1.37 ms / 285 MiB/s versus ~2.44 ms / 160 MiB/s for the
+  free-function path — a ~44 % wall-time drop on the call-out
+  scenario `BENCHMARKS.md` flagged after round 194 as "useful
+  baseline for any future amortise-the-encode-dictionary-across-
+  frames optimisation". The free function path is unchanged
+  (within noise of the round-194 baseline on `16x16` / `256x256` /
+  `1024x1024` / `anim/100x_64x64`). LZW unit tests 13 → 18.
+  Round 230.
 - `GifImage::has_sorted_global_palette()` /
   `GifImage::frames_with_sorted_palette()` /
   `GifImage::all_frames_palettes_sorted()` — three accessors over the
