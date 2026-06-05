@@ -85,7 +85,20 @@ Implements every block type defined by the CompuServe specifications:
   §25.e leaves the font choice to the decoder; this crate ships a
   minimal stylised font covering printable ASCII (0x20..=0x7E) and
   falls back to space for anything outside that range, matching the
-  §25.e fallback rule.
+  §25.e fallback rule. `GifImage::plain_texts()` is the stream-level
+  typed iterator: each §25 block paired with its attached §23 Graphic
+  Control Extension (`(&PlainText, Option<GraphicControl>)`) in source
+  order — the §25 companion to `frames_with_graphic_control()` so
+  callers walking "every Plain Text block and the GCE that controls
+  it" don't need to re-derive the §23 → §25 attachment from
+  `GifImage::blocks`. `plain_texts_are_printable()` reports whether
+  every payload byte sits in §25.e's recommended `0x20..=0xF7` range
+  (anything outside would be substituted with a Space by a §25.e
+  conforming renderer); `plain_texts_grid_fits_cells()` reports
+  whether every §25.c grid is an integer number of character cells
+  across and down — both surface §25.e *recommendations* as boolean
+  queries so a strict authoring pipeline can gate on them, while the
+  encoder itself never enforces a recommendation.
 - Application Extension (§26)
 - Multi-frame compositing onto the §18 Logical Screen using the §23
   disposal-method state machine. `compose()` returns the eager

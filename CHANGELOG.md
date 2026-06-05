@@ -4,6 +4,37 @@
 
 ### Added
 
+- `GifImage::plain_texts()` — stream-level typed iterator yielding each
+  §25 Plain Text Extension paired with its attached §23 Graphic Control
+  Extension (`(&PlainText, Option<GraphicControl>)`) in source order.
+  The §25 companion to `frames_with_graphic_control()`: where that
+  accessor surfaces the §20 Image side of the §23.d "this block can
+  modify the Image Descriptor Block and the Plain Text Extension"
+  attachment, `plain_texts()` surfaces the §25 side, so callers walking
+  "every Plain Text block and the GCE that controls it" don't have to
+  re-derive the §23 → §25 pairing from `GifImage::blocks`. The shared
+  timing / rendering-flag spine (`frame_delays()` /
+  `has_transparency()` / `requires_user_input()`) already walks both
+  §20 and §25 graphic-rendering blocks together; the new accessor is
+  the §25-only typed entry point. Paired with two §25.e recommendation
+  queries: `plain_texts_are_printable()` reports whether every payload
+  byte of every §25 block sits in §25.e's recommended `0x20..=0xF7`
+  range (anything outside would be substituted with a Space by a §25.e
+  conforming renderer); `plain_texts_grid_fits_cells()` reports
+  whether every §25.c text grid is an integer number of character
+  cells across and down (`width % cell_width == 0` and
+  `height % cell_height == 0`, with a zero cell dimension treated as
+  non-conforming since it collapses the §25 grid layout entirely) so
+  no glyph would be silently cropped at the right or bottom edge.
+  Both queries treat §25.e as a *recommendation* — the encoder itself
+  never enforces it — so a strict authoring pipeline can gate emission
+  on them while the decoder continues to accept conforming and
+  non-conforming streams alike. Ten new unit tests pin the
+  pairing-with-GCE / zero-PlainText / printable-edge-0x20-0xF7 /
+  below-range-0x1F / above-range-0xF8 / vacuous-printable / integer-
+  cell-fit / fractional-width / fractional-height / zero-cell-dim /
+  vacuous-grid-fit / GCE-pairing-matches-`frame_delays` semantics.
+  Total unit tests 181 → 191. Round 236.
 - `lzw::LzwEncoder` reusable-state encoder. Holds the Appendix F
   `(prefix_code, next_byte) → code` dictionary across many
   `encode_frame` calls so the ~2 MiB zero-init lands once at

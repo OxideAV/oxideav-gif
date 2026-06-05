@@ -392,6 +392,92 @@ impl GifImage {
         })
     }
 
+    /// Iterate every §25 Plain Text Extension block paired with its
+    /// attached §23 Graphic Control Extension, in source order.
+    ///
+    /// Per §23.d "This block can modify the Image Descriptor Block and
+    /// the Plain Text Extension", a §23 GCE attaches to the
+    /// immediately-following Plain Text Extension exactly as it does to
+    /// a §20 Image. On decode that attachment is stored on
+    /// [`Block::PlainText::graphic_control`]; this accessor surfaces the
+    /// §25 half of that pairing — `(&PlainText, Option<GraphicControl>)`
+    /// — in source order so a caller walking "every Plain Text block
+    /// and the GCE that controls it" can do so without re-deriving the
+    /// §23 → §25 attachment from [`Self::blocks`].
+    ///
+    /// The second tuple element is `None` for a Plain Text block with
+    /// no preceding §23 GCE per §23.a "at most one Graphic Control
+    /// Extension may precede a graphic rendering block".
+    ///
+    /// §20 Image blocks are not included — they are graphic-rendering
+    /// blocks under §23.d but not §25 Plain Text. The §20-only
+    /// companion is [`Self::frames_with_graphic_control`]; the
+    /// timing / rendering-flag spine that walks both kinds together is
+    /// [`Self::frame_delays`] / [`Self::has_transparency`] /
+    /// [`Self::requires_user_input`].
+    pub fn plain_texts(&self) -> impl Iterator<Item = (&PlainText, Option<GraphicControl>)> {
+        self.blocks.iter().filter_map(|b| match b {
+            Block::PlainText {
+                params,
+                graphic_control,
+            } => Some((params, *graphic_control)),
+            _ => None,
+        })
+    }
+
+    /// Check every §25 Plain Text Extension payload against the §25.e
+    /// printable-character recommendation: "If characters less than
+    /// 0x20 or greater than 0xf7 are encountered, it is recommended
+    /// that the decoder display a Space character (0x20)."
+    ///
+    /// Returns `true` only when every payload byte of every Plain Text
+    /// Extension is in the inclusive range `0x20..=0xF7` — i.e. no
+    /// in-payload byte would be substituted with a Space by a §25.e
+    /// conforming renderer. Streams with no Plain Text Extensions
+    /// trivially conform.
+    ///
+    /// §25.e is a *recommendation*, not a hard requirement — a stream
+    /// with bytes outside the recommended range is still a valid
+    /// GIF89a per §25.a. Consumers that want to honour the
+    /// recommendation strictly (e.g. an authoring tool that refuses to
+    /// emit a Plain Text Extension whose bytes would render as visible
+    /// gaps) can gate emission on this check; the encoder itself does
+    /// not enforce it.
+    pub fn plain_texts_are_printable(&self) -> bool {
+        self.plain_texts()
+            .all(|(pt, _)| pt.text.iter().all(|b| (0x20..=0xF7).contains(b)))
+    }
+
+    /// Check every §25 Plain Text Extension against the §25.e
+    /// "integral number of cells fit in the grid" encoder
+    /// recommendation: "an encoder must be careful to specify the grid
+    /// dimensions accurately so that this does not happen" (i.e. so
+    /// that fractional cells need not be discarded).
+    ///
+    /// Returns `true` when every Plain Text block satisfies BOTH
+    /// `width % cell_width == 0` and `height % cell_height == 0` — i.e.
+    /// the §25.c text-grid rectangle is an integer number of character
+    /// cells across and down. A block whose `cell_width` or
+    /// `cell_height` is `0` does not satisfy the check (no integer
+    /// division is defined and the §25 grid layout collapses); such a
+    /// block fails the recommendation. Streams with no Plain Text
+    /// Extensions trivially conform.
+    ///
+    /// §25.e is a *recommendation*, not a hard requirement — the
+    /// spec's "fractional cells must be discarded" clause is the
+    /// fall-back behaviour for the decoder when the encoder fails to
+    /// pick clean dimensions. Consumers that author or re-emit Plain
+    /// Text Extensions can gate on this check to ensure no glyph is
+    /// silently cropped at the right or bottom edge of the grid.
+    pub fn plain_texts_grid_fits_cells(&self) -> bool {
+        self.plain_texts().all(|(pt, _)| {
+            pt.cell_width != 0
+                && pt.cell_height != 0
+                && pt.width % pt.cell_width as u16 == 0
+                && pt.height % pt.cell_height as u16 == 0
+        })
+    }
+
     /// Iterate every §24 Comment Extension payload in source order.
     ///
     /// The CompuServe spec (§24.a) makes Comment Extensions OPTIONAL
@@ -2438,5 +2524,215 @@ mod tests {
             .map(|(f, p, _)| (f as *const _, p.map(<[Rgb]>::to_vec)))
             .collect();
         assert_eq!(with_palette, with_sorted);
+    }
+
+    // ---- §25 Plain Text typed accessor + §25.e conformance queries ----
+
+    fn plain_text_block(
+        width: u16,
+        height: u16,
+        cell_width: u8,
+        cell_height: u8,
+        text: Vec<u8>,
+    ) -> Block {
+        Block::PlainText {
+            params: PlainText {
+                left: 0,
+                top: 0,
+                width,
+                height,
+                cell_width,
+                cell_height,
+                fg_color_index: 1,
+                bg_color_index: 0,
+                text,
+            },
+            graphic_control: None,
+        }
+    }
+
+    /// `plain_texts()` yields each §25 block paired with its attached
+    /// §23 GCE (when one is present) in source order, skipping every
+    /// non-PlainText block.
+    #[test]
+    fn plain_texts_pairs_with_attached_graphic_control() {
+        let gce = GraphicControl {
+            disposal: DisposalMethod::None,
+            user_input: false,
+            transparent_index: Some(7),
+            delay_centis: 5,
+        };
+        let pt_with_gce = Block::PlainText {
+            params: PlainText {
+                left: 1,
+                top: 2,
+                width: 8,
+                height: 8,
+                cell_width: 8,
+                cell_height: 8,
+                fg_color_index: 1,
+                bg_color_index: 0,
+                text: b"HELLO".to_vec(),
+            },
+            graphic_control: Some(gce),
+        };
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"prelude".to_vec()),
+                Block::Image(frame_with(None)),
+                pt_with_gce,
+                plain_text_block(8, 8, 8, 8, b"WORLD".to_vec()),
+            ],
+        );
+        let collected: Vec<_> = img
+            .plain_texts()
+            .map(|(pt, g)| (pt.text.clone(), g))
+            .collect();
+        assert_eq!(
+            collected,
+            vec![(b"HELLO".to_vec(), Some(gce)), (b"WORLD".to_vec(), None)]
+        );
+    }
+
+    /// A stream with no §25 Plain Text blocks yields nothing.
+    #[test]
+    fn plain_texts_empty_when_no_plain_text_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Comment(b"x".to_vec()),
+            ],
+        );
+        assert_eq!(img.plain_texts().count(), 0);
+    }
+
+    /// §25.e printable check: every byte inside `0x20..=0xF7` passes;
+    /// a single byte outside that range flips the query to `false`.
+    #[test]
+    fn plain_texts_printable_check_boundaries() {
+        // Range edges: 0x20 (space) and 0xF7 are inclusive.
+        let ok = base_image(
+            Some(pal3()),
+            vec![plain_text_block(
+                8,
+                8,
+                8,
+                8,
+                vec![0x20, b'A', b'~', 0x7F, 0xA0, 0xF7],
+            )],
+        );
+        assert!(ok.plain_texts_are_printable());
+
+        // 0x1F is below the range → fails.
+        let too_low = base_image(Some(pal3()), vec![plain_text_block(8, 8, 8, 8, vec![0x1F])]);
+        assert!(!too_low.plain_texts_are_printable());
+
+        // 0xF8 is just above the range → fails.
+        let too_high = base_image(Some(pal3()), vec![plain_text_block(8, 8, 8, 8, vec![0xF8])]);
+        assert!(!too_high.plain_texts_are_printable());
+    }
+
+    /// A zero-Plain-Text stream trivially conforms to §25.e printable
+    /// recommendation.
+    #[test]
+    fn plain_texts_printable_vacuous_true() {
+        let img = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(img.plain_texts_are_printable());
+    }
+
+    /// §25.e grid-fits-cells: an 80×16 grid of 8×8 cells produces an
+    /// integer 10×2 cell count and conforms.
+    #[test]
+    fn plain_texts_grid_fits_cells_integer_count() {
+        let img = base_image(
+            Some(pal3()),
+            vec![plain_text_block(80, 16, 8, 8, b"hi".to_vec())],
+        );
+        assert!(img.plain_texts_grid_fits_cells());
+    }
+
+    /// A grid whose `width % cell_width != 0` (here 81 / 8) is exactly
+    /// the §25.e "fractional cells must be discarded" failure case.
+    #[test]
+    fn plain_texts_grid_fits_cells_rejects_fractional_width() {
+        let img = base_image(
+            Some(pal3()),
+            vec![plain_text_block(81, 16, 8, 8, b"hi".to_vec())],
+        );
+        assert!(!img.plain_texts_grid_fits_cells());
+    }
+
+    /// A grid whose `height % cell_height != 0` (here 17 / 8) also
+    /// fails the §25.e integer-cell check.
+    #[test]
+    fn plain_texts_grid_fits_cells_rejects_fractional_height() {
+        let img = base_image(
+            Some(pal3()),
+            vec![plain_text_block(80, 17, 8, 8, b"hi".to_vec())],
+        );
+        assert!(!img.plain_texts_grid_fits_cells());
+    }
+
+    /// A block whose cell dimensions are zero collapses the grid
+    /// layout entirely — we refuse it as non-conforming rather than
+    /// dividing by zero.
+    #[test]
+    fn plain_texts_grid_fits_cells_rejects_zero_cell_dimension() {
+        let zero_w = base_image(
+            Some(pal3()),
+            vec![plain_text_block(80, 16, 0, 8, b"hi".to_vec())],
+        );
+        assert!(!zero_w.plain_texts_grid_fits_cells());
+
+        let zero_h = base_image(
+            Some(pal3()),
+            vec![plain_text_block(80, 16, 8, 0, b"hi".to_vec())],
+        );
+        assert!(!zero_h.plain_texts_grid_fits_cells());
+    }
+
+    /// A zero-Plain-Text stream trivially conforms to §25.e
+    /// integer-cell recommendation.
+    #[test]
+    fn plain_texts_grid_fits_cells_vacuous_true() {
+        let img = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(img.plain_texts_grid_fits_cells());
+    }
+
+    /// `plain_texts()` is consistent with the existing
+    /// `frame_delays()` / GCE spine: a Plain Text block with a GCE
+    /// contributes the GCE's delay, and the typed iterator surfaces
+    /// the same GCE.
+    #[test]
+    fn plain_texts_gce_pairing_matches_frame_delays() {
+        let gce = GraphicControl {
+            disposal: DisposalMethod::None,
+            user_input: false,
+            transparent_index: None,
+            delay_centis: 13,
+        };
+        let img = base_image(
+            Some(pal3()),
+            vec![Block::PlainText {
+                params: PlainText {
+                    left: 0,
+                    top: 0,
+                    width: 8,
+                    height: 8,
+                    cell_width: 8,
+                    cell_height: 8,
+                    fg_color_index: 1,
+                    bg_color_index: 0,
+                    text: b"X".to_vec(),
+                },
+                graphic_control: Some(gce),
+            }],
+        );
+        let (_, paired_gce) = img.plain_texts().next().unwrap();
+        assert_eq!(paired_gce, Some(gce));
+        let delay = img.frame_delays().next().unwrap();
+        assert_eq!(delay, Duration::from_millis(130));
     }
 }
