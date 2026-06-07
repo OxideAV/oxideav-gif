@@ -58,7 +58,17 @@ Implements every block type defined by the CompuServe specifications:
   whole stream's active palettes are sorted in one query so a
   pipeline can gate initial-segment truncation without walking
   per-frame.
-- Image Descriptor + Table-Based Image Data (§20, §22)
+- Image Descriptor + Table-Based Image Data (§20, §22). §20.c.vii
+  Interlace Flag stream-level roll-up:
+  `GifImage::interlaced_frame_count()` counts §20 Image blocks whose
+  Interlace Flag is set, `has_interlaced_frames()` is `true` as soon
+  as one image carries it, and `all_frames_interlaced()` is the
+  every-frame query (vacuously `true` for zero-frame streams, matching
+  `all_frames_palettes_sorted()`'s shape). Lets a progressive-display
+  renderer gate on a single query rather than walking every
+  `Frame::interlaced`; the decoded raster is always presented
+  de-interlaced regardless, so this only affects the policy decision
+  on whether to enable an Appendix-E-aware progressive path.
 - Variable-Length-Code LZW compression (Appendix F). The codec pair
   ships in two flavours: the stateless `lzw::encode` / `lzw::decode`
   free functions for one-shot calls, and `lzw::LzwEncoder` which

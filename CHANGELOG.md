@@ -4,6 +4,27 @@
 
 ### Added
 
+- `GifImage::interlaced_frame_count()`, `has_interlaced_frames()`, and
+  `all_frames_interlaced()` — stream-level §20.c.vii Interlace Flag
+  queries. Counterpart to the §18.c.v / §20.c.viii Sort Flag accessors
+  from round 246. Per §20.c.vii the Interlace Flag is a per-image
+  property (a single stream may mix interlaced and progressive
+  frames); the decoder already presents every frame de-interlaced into
+  a row-major raster regardless, but `Frame::interlaced` preserves the
+  on-disk flag for round-trip. The three new stream-level accessors
+  roll that bit up so a renderer that wants to know whether the stream
+  relies on the Appendix E four-pass row reordering — for example, to
+  enable progressive-display of partial decoded data — can gate on a
+  single query rather than walking every `Frame::interlaced`. Only
+  `Block::Image` entries contribute (§24 Comment / §25 Plain Text /
+  §26 Application have no Interlace Flag at all);
+  `all_frames_interlaced()` is vacuously `true` for a zero-frame
+  stream per `Iterator::all`'s empty-input contract, matching
+  `all_frames_palettes_sorted()`'s shape. Nine new unit tests pin the
+  counts-image-only / metadata-only-stream / all-progressive /
+  any-interlaced / vacuous-all / mixed-progressive-interlaced /
+  skip-Comment-and-PlainText-blocks semantics. Total unit tests
+  191 → 200. Round 247.
 - `GifImage::plain_texts()` — stream-level typed iterator yielding each
   §25 Plain Text Extension paired with its attached §23 Graphic Control
   Extension (`(&PlainText, Option<GraphicControl>)`) in source order.

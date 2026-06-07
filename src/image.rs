@@ -384,6 +384,53 @@ impl GifImage {
             .all(|(_, palette, sorted)| palette.is_some() && sorted)
     }
 
+    /// Count §20 Image Descriptor blocks whose §20.c.vii Interlace Flag
+    /// is set (i.e. the on-disk pixel rows are arranged in the
+    /// four-pass Appendix E pattern).
+    ///
+    /// Per §20.c.vii the Interlace Flag is a per-image property; a
+    /// single stream may mix interlaced and non-interlaced frames. The
+    /// decoder presents every frame already de-interlaced (the
+    /// `Frame::indices` raster is row-major top-to-bottom regardless),
+    /// but the original flag is preserved on [`Frame::interlaced`] so an
+    /// encoder can round-trip it. This accessor is the stream-level
+    /// roll-up of that bit — counts only [`Block::Image`] entries, never
+    /// §24 Comment / §25 Plain Text / §26 Application (none of which
+    /// have an Interlace Flag at all).
+    pub fn interlaced_frame_count(&self) -> usize {
+        self.frames().filter(|f| f.interlaced).count()
+    }
+
+    /// `true` when any §20 Image Descriptor block in the stream has its
+    /// §20.c.vii Interlace Flag set.
+    ///
+    /// A streaming consumer that wants to know up front whether the
+    /// stream relies on the Appendix E four-pass row reordering (so it
+    /// can, for example, present partial decoded data progressively)
+    /// can gate on this single query rather than walking
+    /// [`Self::frames`] and inspecting each [`Frame::interlaced`].
+    ///
+    /// Returns `false` for a stream with no §20 Image blocks (every
+    /// metadata-only stream) and for one whose every image leaves the
+    /// Interlace Flag clear.
+    pub fn has_interlaced_frames(&self) -> bool {
+        self.frames().any(|f| f.interlaced)
+    }
+
+    /// `true` when every §20 Image Descriptor block in the stream has
+    /// its §20.c.vii Interlace Flag set.
+    ///
+    /// Vacuously `true` for a zero-frame stream per [`Iterator::all`]'s
+    /// empty-input contract — matches the shape of
+    /// [`Self::all_frames_palettes_sorted`] and is the §20.c.vii
+    /// companion to it. A caller that wants a strict "the stream has
+    /// frames and every one is interlaced" check pairs this with
+    /// [`Self::frame_count`] (`> 0`) or with
+    /// [`Self::has_interlaced_frames`].
+    pub fn all_frames_interlaced(&self) -> bool {
+        self.frames().all(|f| f.interlaced)
+    }
+
     /// Iterate every Application Extension carried by this stream.
     pub fn application_extensions(&self) -> impl Iterator<Item = &Application> {
         self.blocks.iter().filter_map(|b| match b {
@@ -2524,6 +2571,169 @@ mod tests {
             .map(|(f, p, _)| (f as *const _, p.map(<[Rgb]>::to_vec)))
             .collect();
         assert_eq!(with_palette, with_sorted);
+    }
+
+    // ---- §20.c.vii Interlace Flag stream-level accessors ----
+
+    /// Build a §20 Frame whose §20.c.vii Interlace Flag is set.
+    fn frame_with_interlaced(local: Option<Vec<Rgb>>) -> Frame {
+        let mut f = frame_with(local);
+        f.interlaced = true;
+        f
+    }
+
+    /// `interlaced_frame_count()` counts only §20 Image blocks whose
+    /// Interlace Flag is set; non-interlaced images and non-§20 blocks
+    /// (Comment / Plain Text / Application) do not contribute.
+    #[test]
+    fn interlaced_frame_count_counts_set_flag_image_blocks_only() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"hi".to_vec()),
+                Block::Image(frame_with_interlaced(None)),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_interlaced(Some(pal3_alt()))),
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 8,
+                        height: 8,
+                        cell_width: 8,
+                        cell_height: 8,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"hi".to_vec(),
+                    },
+                    graphic_control: None,
+                },
+            ],
+        );
+        assert_eq!(img.interlaced_frame_count(), 2);
+    }
+
+    /// `interlaced_frame_count() == 0` when the stream has no §20
+    /// Images at all (metadata-only).
+    #[test]
+    fn interlaced_frame_count_zero_for_metadata_only_stream() {
+        let img = base_image(Some(pal3()), vec![Block::Comment(b"hi".to_vec())]);
+        assert_eq!(img.interlaced_frame_count(), 0);
+    }
+
+    /// `interlaced_frame_count() == 0` when every §20 Image leaves the
+    /// Interlace Flag clear.
+    #[test]
+    fn interlaced_frame_count_zero_when_all_frames_progressive() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert_eq!(img.interlaced_frame_count(), 0);
+    }
+
+    /// `has_interlaced_frames()` flips to `true` as soon as one §20
+    /// Image carries the Interlace Flag set.
+    #[test]
+    fn has_interlaced_frames_true_when_any_frame_interlaced() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_interlaced(None)),
+            ],
+        );
+        assert!(img.has_interlaced_frames());
+    }
+
+    /// `has_interlaced_frames()` is `false` for a stream with no §20
+    /// Images at all, matching the stream-level no-frame contract.
+    #[test]
+    fn has_interlaced_frames_false_for_metadata_only_stream() {
+        let img = base_image(Some(pal3()), vec![Block::Comment(b"hi".to_vec())]);
+        assert!(!img.has_interlaced_frames());
+    }
+
+    /// `has_interlaced_frames()` is `false` when every §20 Image leaves
+    /// the Interlace Flag clear (the common case for modern still
+    /// images).
+    #[test]
+    fn has_interlaced_frames_false_when_no_frame_interlaced() {
+        let img = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(!img.has_interlaced_frames());
+    }
+
+    /// `all_frames_interlaced()` is `true` when every §20 Image has the
+    /// flag set.
+    #[test]
+    fn all_frames_interlaced_true_when_every_frame_interlaced() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_interlaced(None)),
+                Block::Image(frame_with_interlaced(Some(pal3_alt()))),
+            ],
+        );
+        assert!(img.all_frames_interlaced());
+    }
+
+    /// `all_frames_interlaced()` is `false` if any §20 Image leaves the
+    /// flag clear.
+    #[test]
+    fn all_frames_interlaced_false_when_any_frame_progressive() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_interlaced(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(!img.all_frames_interlaced());
+    }
+
+    /// Vacuous-truth: a zero-frame stream reports
+    /// `all_frames_interlaced() == true` per `Iterator::all`'s
+    /// empty-input contract — mirrors `all_frames_palettes_sorted()`.
+    #[test]
+    fn all_frames_interlaced_true_for_zero_frame_stream() {
+        let img = base_image(Some(pal3()), vec![Block::Comment(b"hi".to_vec())]);
+        assert!(img.all_frames_interlaced());
+        assert_eq!(img.frame_count(), 0);
+    }
+
+    /// Non-image blocks (§24 Comment / §25 Plain Text / §26 Application)
+    /// never count toward the §20.c.vii roll-up. Mixing them in around
+    /// interlaced images must not flip the all-frames query.
+    #[test]
+    fn interlace_accessors_skip_non_image_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"a".to_vec()),
+                Block::Image(frame_with_interlaced(None)),
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 8,
+                        height: 8,
+                        cell_width: 8,
+                        cell_height: 8,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"x".to_vec(),
+                    },
+                    graphic_control: None,
+                },
+                Block::Image(frame_with_interlaced(Some(pal3_alt()))),
+            ],
+        );
+        assert_eq!(img.interlaced_frame_count(), 2);
+        assert!(img.has_interlaced_frames());
+        assert!(img.all_frames_interlaced());
     }
 
     // ---- §25 Plain Text typed accessor + §25.e conformance queries ----
