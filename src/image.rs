@@ -208,6 +208,73 @@ impl Block {
     }
 }
 
+impl Frame {
+    /// §20.c.ix "Size of Local Color Table" — the 3-bit encoded field
+    /// value that would be written for this frame's Local Color Table
+    /// (`0..=7`), or `None` when no LCT is attached.
+    ///
+    /// Per §20.c.ix the field stores the smallest `N` in `0..=7` such
+    /// that `2^(N+1)` is greater than or equal to the LCT entry count;
+    /// the §21 LCT then carries `3 × 2^(N+1)` bytes on disk. A 2-entry
+    /// LCT encodes as `0`; a 256-entry LCT encodes as `7`; mid-range
+    /// counts round up — a 5-entry LCT rounds up to the 8-entry slot and
+    /// encodes as `2`.
+    ///
+    /// Returns `None` when [`Frame::local_palette`] is `None` — per
+    /// §20.c.ix "This value should be 0 if there is no Local Color
+    /// Table specified", the field is undefined and the encoded `0`
+    /// would collide with the "2-entry LCT" case, so the typed
+    /// accessor surfaces the absent-LCT case as `None` instead.
+    ///
+    /// A `Some` result is always paired with a `Some(palette)` whose
+    /// `len()` is `1..=256` (the encoder rejects empty or oversized
+    /// palettes per §20.c.ix's `1..=256` range); a stream that round-
+    /// trips through this crate's decoder always satisfies that bound.
+    pub fn local_color_table_size_field(&self) -> Option<u8> {
+        let len = self.local_palette.as_ref()?.len();
+        // Smallest k in 0..=7 with 2^(k+1) >= len. Matches the §18.c.vi
+        // / §20.c.ix encoder rule in `encoder::size_bits_for_palette`.
+        // An empty LCT cannot be encoded (the encoder rejects it before
+        // reaching the field-value step); for the lenient/decoded
+        // shape that pre-validation guarantees, treat 0 as "round up to
+        // the 2-entry slot, field value 0" rather than panicking.
+        if len == 0 {
+            return Some(0);
+        }
+        for k in 0u8..=7 {
+            if (1usize << (k as u32 + 1)) >= len {
+                return Some(k);
+            }
+        }
+        // len > 256 is rejected by the encoder; clamp to the field's
+        // maximum representable value for a defensive read-side path.
+        Some(7)
+    }
+
+    /// §20.c.ix / §21.a on-disk entry count for this frame's Local
+    /// Color Table: `2^(N+1)` where `N` is the
+    /// [`Self::local_color_table_size_field`] value, or `None` when no
+    /// LCT is attached.
+    ///
+    /// Range `2..=256` for any attached LCT (the §20.c.ix field is
+    /// 3 bits and the LCT carries at least one R,G,B triplet, so the
+    /// smallest representable on-disk LCT holds two entries). The
+    /// returned count is the *power-of-two-rounded* on-disk shape, not
+    /// `self.local_palette.as_ref().unwrap().len()`: the encoder zero-
+    /// pads the tail when the in-memory palette is shorter than the
+    /// rounded slot, since §21's table syntax leaves no representation
+    /// for the in-between counts.
+    ///
+    /// A caller comparing the rounded count to the in-memory palette
+    /// length can detect the padding window —
+    /// `entry_count - palette.len()` is the number of trailing pad
+    /// entries the encoder writes.
+    pub fn local_color_table_entry_count(&self) -> Option<u32> {
+        let field = self.local_color_table_size_field()?;
+        Some(1u32 << (field as u32 + 1))
+    }
+}
+
 /// Top-level result of a successful decode and the input shape an
 /// encoder accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +496,83 @@ impl GifImage {
     /// [`Self::has_interlaced_frames`].
     pub fn all_frames_interlaced(&self) -> bool {
         self.frames().all(|f| f.interlaced)
+    }
+
+    /// Iterate every §20 Image Descriptor block paired with the §20.c.ix
+    /// "Size of Local Color Table" 3-bit field value that would encode
+    /// its attached Local Color Table on disk, in source order.
+    ///
+    /// Per §20.c.ix the field stores the *smallest* `N` in `0..=7` such
+    /// that `2^(N+1)` is greater than or equal to the LCT's actual entry
+    /// count. The §21 LCT then carries `3 × 2^(N+1)` bytes — the same
+    /// power-of-two-rounded size relationship as §18.c.vi for the Global
+    /// Color Table. The field is meaningful only when §20.c.vi Local
+    /// Color Table Flag is set; per §20.c.ix "This value should be 0 if
+    /// there is no Local Color Table specified", which this accessor
+    /// surfaces as `None` (the LCT flag is implicitly clear too, since
+    /// [`Frame::local_palette`] is `None`) rather than a sentinel `0`
+    /// that a caller might confuse with the "2-entry LCT" case.
+    ///
+    /// The yielded field value is what an encoder writes for the LCT —
+    /// see [`Self::frames_with_local_color_table_entry_count`] for the
+    /// `2^(N+1)` on-disk entry-count companion. Use this accessor when
+    /// pinning the encoded shape (round-trip, byte budget, conformance);
+    /// use the entry-count accessor when reasoning about the actual
+    /// number of LCT colours available to the §20 image.
+    ///
+    /// Only [`Block::Image`] entries contribute. §24 Comment / §25
+    /// Plain Text / §26 Application carry no §20.c.ix at all.
+    pub fn frames_with_local_color_table_size(&self) -> impl Iterator<Item = (&Frame, Option<u8>)> {
+        self.frames().map(|f| (f, f.local_color_table_size_field()))
+    }
+
+    /// Iterate every §20 Image Descriptor block paired with the on-disk
+    /// entry count its Local Color Table occupies (`2^(N+1)` per §20.c.ix
+    /// / §21.a), in source order.
+    ///
+    /// `None` for §20 Images with no Local Color Table attached — the
+    /// §20.c.vi Local Color Table Flag is clear, so §20.c.ix is undefined
+    /// and no LCT bytes follow. `Some(count)` for §20 Images with an LCT
+    /// attached, where `count` is the power-of-two-rounded number of
+    /// entries (range `2..=256`) the on-disk LCT carries. `count` is
+    /// always `>=` `frame.local_palette.as_ref().unwrap().len()`: the
+    /// in-memory [`Frame::local_palette`] holds only the colours the
+    /// stream actually carries, but the on-disk §21 table is rounded up
+    /// to the next power of two with any unused tail entries written as
+    /// the encoder's pad (this crate writes black; the spec leaves the
+    /// pad value unspecified beyond "should not be referenced").
+    ///
+    /// Only [`Block::Image`] entries contribute (see
+    /// [`Self::frames_with_local_color_table_size`] for the field-value
+    /// companion).
+    pub fn frames_with_local_color_table_entry_count(
+        &self,
+    ) -> impl Iterator<Item = (&Frame, Option<u32>)> {
+        self.frames()
+            .map(|f| (f, f.local_color_table_entry_count()))
+    }
+
+    /// Largest §20.c.ix "Size of Local Color Table" field value across
+    /// every §20 Image Descriptor block in the stream that carries a
+    /// Local Color Table.
+    ///
+    /// `None` when no §20 Image in the stream carries an LCT (every
+    /// §20 frame's §20.c.vi Local Color Table Flag is clear, or the
+    /// stream has no §20 Images at all). `Some(0..=7)` when at least
+    /// one §20 Image attaches an LCT — the returned value is the
+    /// maximum across those frames, i.e. the smallest `N` in `0..=7`
+    /// that any individual LCT in the stream needs.
+    ///
+    /// Useful for a decoder allocating a reusable scratch LCT buffer
+    /// up front: `2^(max + 1)` entries is enough for every §21 table
+    /// the stream will produce, so the decoder never re-allocates
+    /// per-frame. The Global Color Table sized via §18.c.vi is a
+    /// separate concern — see [`Self::original_palette_color_count`]
+    /// for the §18.c.iv source-richness counterpart.
+    pub fn max_local_color_table_size_field(&self) -> Option<u8> {
+        self.frames()
+            .filter_map(|f| f.local_color_table_size_field())
+            .max()
     }
 
     /// Iterate every Application Extension carried by this stream.
@@ -2734,6 +2878,223 @@ mod tests {
         assert_eq!(img.interlaced_frame_count(), 2);
         assert!(img.has_interlaced_frames());
         assert!(img.all_frames_interlaced());
+    }
+
+    // ---- §20.c.ix Size of Local Color Table stream-level accessors ----
+
+    /// Build a palette of `n` distinct entries for the §20.c.ix tests.
+    fn pal_n(n: usize) -> Vec<Rgb> {
+        (0..n)
+            .map(|i| {
+                let v = (i & 0xFF) as u8;
+                Rgb::new(v, v.wrapping_add(1), v.wrapping_add(2))
+            })
+            .collect()
+    }
+
+    /// `Frame::local_color_table_size_field()` returns `None` when the
+    /// frame carries no Local Color Table (§20.c.vi flag clear, §20.c.ix
+    /// undefined).
+    #[test]
+    fn local_color_table_size_field_none_without_lct() {
+        let f = frame_with(None);
+        assert_eq!(f.local_color_table_size_field(), None);
+        assert_eq!(f.local_color_table_entry_count(), None);
+    }
+
+    /// §20.c.ix field encoding pins: every length in `1..=256` rounds
+    /// up to the smallest `2^(N+1)` slot, matching the §18.c.vi / §20.c.ix
+    /// encoder rule. 1-entry LCT slots into the 2-entry field (N=0);
+    /// 256-entry LCT pins the field at the maximum N=7.
+    #[test]
+    fn local_color_table_size_field_round_up_table() {
+        // (palette length, expected field, expected entry count).
+        let cases: &[(usize, u8, u32)] = &[
+            (1, 0, 2),
+            (2, 0, 2),
+            (3, 1, 4),
+            (4, 1, 4),
+            (5, 2, 8),
+            (8, 2, 8),
+            (9, 3, 16),
+            (16, 3, 16),
+            (17, 4, 32),
+            (32, 4, 32),
+            (33, 5, 64),
+            (64, 5, 64),
+            (65, 6, 128),
+            (128, 6, 128),
+            (129, 7, 256),
+            (256, 7, 256),
+        ];
+        for &(len, expected_field, expected_count) in cases {
+            let f = frame_with(Some(pal_n(len)));
+            assert_eq!(
+                f.local_color_table_size_field(),
+                Some(expected_field),
+                "len={len}"
+            );
+            assert_eq!(
+                f.local_color_table_entry_count(),
+                Some(expected_count),
+                "len={len}"
+            );
+        }
+    }
+
+    /// `frames_with_local_color_table_size()` yields one entry per §20
+    /// Image block, in source order, paired with its §20.c.ix field. §24
+    /// Comment / §25 Plain Text / §26 Application contribute nothing.
+    #[test]
+    fn frames_with_local_color_table_size_pairs_source_order() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"hdr".to_vec()),
+                // LCT of 5 entries → rounds up to 8 (N=2).
+                Block::Image(frame_with(Some(pal_n(5)))),
+                // No LCT — yields None.
+                Block::Image(frame_with(None)),
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 8,
+                        height: 8,
+                        cell_width: 8,
+                        cell_height: 8,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"x".to_vec(),
+                    },
+                    graphic_control: None,
+                },
+                // LCT of 256 entries → pins the field at N=7.
+                Block::Image(frame_with(Some(pal_n(256)))),
+            ],
+        );
+        let fields: Vec<Option<u8>> = img
+            .frames_with_local_color_table_size()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(fields, vec![Some(2), None, Some(7)]);
+    }
+
+    /// `frames_with_local_color_table_entry_count()` is the entry-count
+    /// companion: `Some(2^(N+1))` when an LCT is attached, `None` otherwise.
+    #[test]
+    fn frames_with_local_color_table_entry_count_matches_size_field() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(Some(pal_n(5)))),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(Some(pal_n(256)))),
+            ],
+        );
+        let counts: Vec<Option<u32>> = img
+            .frames_with_local_color_table_entry_count()
+            .map(|(_, c)| c)
+            .collect();
+        assert_eq!(counts, vec![Some(8), None, Some(256)]);
+    }
+
+    /// `max_local_color_table_size_field()` returns `None` when no §20
+    /// Image in the stream attaches an LCT (every frame's §20.c.vi flag
+    /// is clear) — the stream uses only the §18 Global Color Table.
+    #[test]
+    fn max_local_color_table_size_field_none_when_no_lcts() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert_eq!(img.max_local_color_table_size_field(), None);
+    }
+
+    /// `max_local_color_table_size_field()` returns `None` for a stream
+    /// with no §20 Image blocks at all (metadata-only).
+    #[test]
+    fn max_local_color_table_size_field_none_for_metadata_only_stream() {
+        let img = base_image(Some(pal3()), vec![Block::Comment(b"hi".to_vec())]);
+        assert_eq!(img.max_local_color_table_size_field(), None);
+    }
+
+    /// `max_local_color_table_size_field()` reports the largest §20.c.ix
+    /// field across every LCT-carrying §20 Image. Frames without an LCT
+    /// are skipped, not folded as `0`.
+    #[test]
+    fn max_local_color_table_size_field_picks_largest() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(Some(pal_n(2)))),  // field 0
+                Block::Image(frame_with(None)),            // skipped
+                Block::Image(frame_with(Some(pal_n(17)))), // field 4
+                Block::Image(frame_with(Some(pal_n(5)))),  // field 2
+            ],
+        );
+        assert_eq!(img.max_local_color_table_size_field(), Some(4));
+    }
+
+    /// `max_local_color_table_size_field()` does not consider §25 Plain
+    /// Text or §24 Comment / §26 Application blocks (they carry no
+    /// §20.c.ix at all).
+    #[test]
+    fn max_local_color_table_size_field_ignores_non_image_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"a".to_vec()),
+                Block::Image(frame_with(Some(pal_n(8)))), // field 2
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 8,
+                        height: 8,
+                        cell_width: 8,
+                        cell_height: 8,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"x".to_vec(),
+                    },
+                    graphic_control: None,
+                },
+                Block::Application(Application {
+                    identifier: *b"NETSCAPE",
+                    auth_code: *b"2.0",
+                    data: vec![1, 0, 0, 0],
+                }),
+            ],
+        );
+        assert_eq!(img.max_local_color_table_size_field(), Some(2));
+    }
+
+    /// Round-trip pin: `entry_count == 1 << (size_field + 1)` for every
+    /// LCT-carrying frame the accessors surface.
+    #[test]
+    fn local_color_table_size_field_and_entry_count_consistency() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(Some(pal_n(1)))),
+                Block::Image(frame_with(Some(pal_n(3)))),
+                Block::Image(frame_with(Some(pal_n(33)))),
+                Block::Image(frame_with(Some(pal_n(256)))),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        for (f, field) in img.frames_with_local_color_table_size() {
+            let count = f.local_color_table_entry_count();
+            match (field, count) {
+                (Some(n), Some(c)) => assert_eq!(c, 1u32 << (n as u32 + 1)),
+                (None, None) => {}
+                pair => panic!("field/count out of sync: {pair:?}"),
+            }
+        }
     }
 
     // ---- §25 Plain Text typed accessor + §25.e conformance queries ----

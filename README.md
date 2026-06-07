@@ -68,7 +68,21 @@ Implements every block type defined by the CompuServe specifications:
   renderer gate on a single query rather than walking every
   `Frame::interlaced`; the decoded raster is always presented
   de-interlaced regardless, so this only affects the policy decision
-  on whether to enable an Appendix-E-aware progressive path.
+  on whether to enable an Appendix-E-aware progressive path. §20.c.ix
+  Size of Local Color Table surface:
+  `Frame::local_color_table_size_field()` returns the 3-bit encoded
+  field value (`0..=7`, smallest `N` such that `2^(N+1)` is ≥ the LCT
+  entry count) per attached LCT, or `None` when §20.c.vi is clear (and
+  the field is undefined); `Frame::local_color_table_entry_count()` is
+  the `2^(N+1)` on-disk entry-count companion (range `2..=256`).
+  Stream-level rollups:
+  `GifImage::frames_with_local_color_table_size()` and
+  `frames_with_local_color_table_entry_count()` pair every §20 Image
+  with its §20.c.ix field / on-disk entry count in source order;
+  `max_local_color_table_size_field()` is the largest §20.c.ix across
+  every LCT-carrying §20 Image (`None` when no §20 frame attaches an
+  LCT), so a decoder allocating a reusable scratch LCT buffer can size
+  it once up front rather than re-allocating per-frame.
 - Variable-Length-Code LZW compression (Appendix F). The codec pair
   ships in two flavours: the stateless `lzw::encode` / `lzw::decode`
   free functions for one-shot calls, and `lzw::LzwEncoder` which

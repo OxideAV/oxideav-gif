@@ -4,6 +4,33 @@
 
 ### Added
 
+- `Frame::local_color_table_size_field()` and
+  `Frame::local_color_table_entry_count()` — typed accessors for the
+  §20.c.ix "Size of Local Color Table" 3-bit field and its `2^(N+1)`
+  on-disk entry count. Per §20.c.ix the field stores the smallest `N`
+  in `0..=7` such that `2^(N+1)` is ≥ the LCT entry count; the §21 LCT
+  then carries `3 × 2^(N+1)` bytes on disk. A 2-entry LCT encodes as
+  `0`; a 256-entry LCT pins the field at `7`; mid-range counts round
+  up — a 5-entry LCT slots into the 8-entry slot and encodes as `2`,
+  matching the §18.c.vi rounding the encoder already applies. Both
+  accessors return `None` when no LCT is attached (§20.c.vi flag clear,
+  §20.c.ix undefined) so a caller never confuses the "absent LCT" case
+  with a real "2-entry LCT" (encoded field `0`). Paired stream-level
+  rollups: `GifImage::frames_with_local_color_table_size()` and
+  `GifImage::frames_with_local_color_table_entry_count()` iterate every
+  §20 Image block paired with its §20.c.ix field value / on-disk entry
+  count in source order; `GifImage::max_local_color_table_size_field()`
+  returns the largest §20.c.ix field across every LCT-carrying §20
+  Image (`None` when no §20 frame attaches an LCT), so a decoder
+  allocating a reusable scratch LCT buffer can size it once up front at
+  `2^(max + 1)` entries rather than re-allocating per-frame. Only
+  `Block::Image` entries contribute (§24 Comment / §25 Plain Text / §26
+  Application carry no §20.c.ix at all). Nine new unit tests pin the
+  round-up table across the full `1..=256` palette range, the
+  None-without-LCT contract, the source-order pairing, the largest
+  pick, non-image-block skipping, and the round-trip
+  `entry_count == 1 << (size_field + 1)` consistency. Total unit tests
+  201 → 210. Round 249.
 - `GifImage::interlaced_frame_count()`, `has_interlaced_frames()`, and
   `all_frames_interlaced()` — stream-level §20.c.vii Interlace Flag
   queries. Counterpart to the §18.c.v / §20.c.viii Sort Flag accessors
