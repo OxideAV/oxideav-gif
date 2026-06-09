@@ -95,7 +95,16 @@ Implements every block type defined by the CompuServe specifications:
   see `BENCHMARKS.md`).
 - Four-pass interlace transform (Appendix E)
 - Graphic Control Extension (§23) — disposal method, user-input flag,
-  transparent index, delay time
+  transparent index, delay time. §23.c.iv Disposal Method stream-level
+  roll-up: `GifImage::frame_disposals()` yields the GCE Disposal Method
+  per graphic-rendering block in source order (no GCE attached →
+  `DisposalMethod::None` per §23.c.iv value `0` "No disposal specified"),
+  `uses_disposal(method)` / `all_frames_use_disposal(method)` are the
+  any-block / every-block queries (vacuously `true` for zero-frame
+  streams, matching the surrounding rollup shapes), and
+  `requires_canvas_snapshot()` reports whether any block selects
+  `RestorePrevious` so a renderer can skip pre-allocating the §23.e.i
+  snapshot buffer for streams that never use it.
 - Comment Extension (§24), with `GifImage::comments()` iterator and
   `concatenated_comment()` helper for the common "give me every comment
   in one buffer" path. `comments_are_7bit_ascii()` and

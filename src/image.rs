@@ -1251,6 +1251,86 @@ impl GifImage {
             .any(|gce| gce.user_input)
     }
 
+    /// One item per *graphic-rendering block* (§20 Image **and** §25
+    /// Plain Text — both are graphic-rendering blocks whose §23 Graphic
+    /// Control Extension carries the Disposal Method field per §23.d),
+    /// in source order; the item is that block's §23.c.iv Disposal
+    /// Method.
+    ///
+    /// A graphic-rendering block with no attached GCE contributes
+    /// [`DisposalMethod::None`] — per §23.c.iv value `0` is "No disposal
+    /// specified", which is also the default for the missing-GCE case
+    /// (the decoder "is not required to take any action"). §24 Comment
+    /// and §26 Application Extensions produce no rendered output and so
+    /// carry no Disposal Method; they are skipped, matching the
+    /// [`Self::frame_delays`] / [`Self::has_transparency`] /
+    /// [`Self::requires_user_input`] spine.
+    ///
+    /// This is the disposal-method-side companion to
+    /// [`Self::frame_delays`]: a renderer that wants to know up front
+    /// which disposal modes a stream exercises (and therefore which
+    /// branches of the §23 disposal-method state machine it needs to
+    /// implement) can walk this iterator once rather than re-deriving it
+    /// from [`Self::blocks`].
+    pub fn frame_disposals(&self) -> impl Iterator<Item = DisposalMethod> + '_ {
+        self.graphic_rendering_controls()
+            .map(|gce| gce.map(|g| g.disposal).unwrap_or(DisposalMethod::None))
+    }
+
+    /// `true` when any graphic-rendering block in the stream carries a
+    /// §23 Graphic Control Extension with §23.c.iv Disposal Method
+    /// `3` (*Restore To Previous*).
+    ///
+    /// §23.e.i flags this mode as the one that "imposes severe demands
+    /// on the decoder to store the section of the graphic that needs to
+    /// be saved" — a renderer that wants to skip pre-allocating the
+    /// snapshot buffer for streams that never use it can gate on this
+    /// single query rather than walking every frame's
+    /// [`GraphicControl::disposal`]. The §23.e.i fallback recommendation
+    /// for decoders that "cannot save an area" — restore to background
+    /// colour instead — applies per-frame at render time; this query is
+    /// the up-front decision point.
+    ///
+    /// Returns `false` for a stream with no Graphic Control Extensions
+    /// at all and for one whose GCEs all use a non-`RestorePrevious`
+    /// disposal.
+    pub fn requires_canvas_snapshot(&self) -> bool {
+        self.frame_disposals()
+            .any(|d| matches!(d, DisposalMethod::RestorePrevious))
+    }
+
+    /// `true` when any graphic-rendering block in the stream uses the
+    /// given §23.c.iv Disposal Method.
+    ///
+    /// A graphic-rendering block with no attached GCE counts as
+    /// [`DisposalMethod::None`] per [`Self::frame_disposals`], so
+    /// `uses_disposal(DisposalMethod::None)` is `true` for any stream
+    /// that contains at least one §20 Image or §25 Plain Text without an
+    /// attached GCE (the common GIF87a / un-controlled-89a case).
+    ///
+    /// Returns `false` for a zero-graphic-rendering-block stream (only
+    /// metadata blocks).
+    pub fn uses_disposal(&self, method: DisposalMethod) -> bool {
+        self.frame_disposals().any(|d| d == method)
+    }
+
+    /// `true` when **every** graphic-rendering block in the stream uses
+    /// the given §23.c.iv Disposal Method.
+    ///
+    /// A graphic-rendering block with no attached GCE counts as
+    /// [`DisposalMethod::None`] per [`Self::frame_disposals`], so
+    /// `all_frames_use_disposal(DisposalMethod::None)` covers the
+    /// no-GCE-anywhere still-image case as well as the uniformly-disposed
+    /// case.
+    ///
+    /// Vacuously `true` for a stream with no graphic-rendering blocks
+    /// at all (only §24 Comment / §26 Application metadata), matching
+    /// the shape of [`Self::all_frames_interlaced`] /
+    /// [`Self::all_frames_palettes_sorted`].
+    pub fn all_frames_use_disposal(&self, method: DisposalMethod) -> bool {
+        self.frame_disposals().all(|d| d == method)
+    }
+
     /// `true` when the stream carries more than one graphic-rendering
     /// block (§20 Image or §25 Plain Text) — i.e. the stream is a
     /// multi-frame animation rather than a single still.
@@ -2044,6 +2124,224 @@ mod tests {
             ],
         );
         assert!(waits.requires_user_input());
+    }
+
+    /// §23.c.iv — `frame_disposals` yields the GCE Disposal Method per
+    /// graphic-rendering block in source order; a block with no attached
+    /// GCE contributes `DisposalMethod::None`. §24 / §26 metadata
+    /// blocks are skipped.
+    #[test]
+    fn frame_disposals_reads_gce_disposal_method() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::RestoreBackground,
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with(None)), // no GCE -> None
+                Block::Comment(b"x".to_vec()),  // skipped
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::RestorePrevious,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        let disposals: Vec<DisposalMethod> = img.frame_disposals().collect();
+        assert_eq!(
+            disposals,
+            vec![
+                DisposalMethod::RestoreBackground,
+                DisposalMethod::None,
+                DisposalMethod::RestorePrevious,
+            ]
+        );
+    }
+
+    /// §25 Plain Text is a graphic-rendering block too, so its attached
+    /// GCE Disposal Method participates in the disposal-method spine
+    /// alongside §20 Images — mirrors `frame_delays_includes_plain_text_blocks`.
+    #[test]
+    fn frame_disposals_includes_plain_text_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::Keep,
+                    ..GraphicControl::default()
+                })),
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 1,
+                        height: 1,
+                        cell_width: 1,
+                        cell_height: 1,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"A".to_vec(),
+                    },
+                    graphic_control: Some(GraphicControl {
+                        disposal: DisposalMethod::RestoreBackground,
+                        ..GraphicControl::default()
+                    }),
+                },
+            ],
+        );
+        assert_eq!(
+            img.frame_disposals().collect::<Vec<_>>(),
+            vec![DisposalMethod::Keep, DisposalMethod::RestoreBackground]
+        );
+    }
+
+    /// §23.c.iv / §23.e.i — `requires_canvas_snapshot` is true iff some
+    /// graphic-rendering block's GCE selects RestorePrevious.
+    #[test]
+    fn requires_canvas_snapshot_keys_off_restore_previous() {
+        // No GCEs anywhere -> no snapshot needed.
+        let none = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(!none.requires_canvas_snapshot());
+
+        // GCEs present but all non-RestorePrevious.
+        let no_snapshot = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::Keep,
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::RestoreBackground,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(!no_snapshot.requires_canvas_snapshot());
+
+        // A single RestorePrevious anywhere -> snapshot needed.
+        let snapshot = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::RestorePrevious,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(snapshot.requires_canvas_snapshot());
+
+        // §25 Plain Text carrying a RestorePrevious GCE counts too.
+        let pt = base_image(
+            Some(pal3()),
+            vec![Block::PlainText {
+                params: PlainText {
+                    left: 0,
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    cell_width: 1,
+                    cell_height: 1,
+                    fg_color_index: 1,
+                    bg_color_index: 0,
+                    text: b"A".to_vec(),
+                },
+                graphic_control: Some(GraphicControl {
+                    disposal: DisposalMethod::RestorePrevious,
+                    ..GraphicControl::default()
+                }),
+            }],
+        );
+        assert!(pt.requires_canvas_snapshot());
+    }
+
+    /// `uses_disposal` reports whether any block uses the queried method.
+    /// `all_frames_use_disposal` is the every-block query, vacuously true
+    /// for zero-rendering-block streams.
+    #[test]
+    fn uses_disposal_and_all_frames_use_disposal() {
+        // Zero-rendering-block stream: `uses_disposal` is false for every
+        // method, `all_frames_use_disposal` is vacuously true.
+        let meta_only = base_image(Some(pal3()), vec![Block::Comment(b"c".to_vec())]);
+        assert!(!meta_only.uses_disposal(DisposalMethod::None));
+        assert!(!meta_only.uses_disposal(DisposalMethod::RestorePrevious));
+        assert!(meta_only.all_frames_use_disposal(DisposalMethod::None));
+        assert!(meta_only.all_frames_use_disposal(DisposalMethod::Keep));
+
+        // No-GCE still — counts as DisposalMethod::None per the spine.
+        let still = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(still.uses_disposal(DisposalMethod::None));
+        assert!(!still.uses_disposal(DisposalMethod::Keep));
+        assert!(still.all_frames_use_disposal(DisposalMethod::None));
+        assert!(!still.all_frames_use_disposal(DisposalMethod::Keep));
+
+        // Mixed disposals — `uses_disposal` true for each present method,
+        // `all_frames_use_disposal` false for every method.
+        let mixed = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::Keep,
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::RestoreBackground,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(mixed.uses_disposal(DisposalMethod::Keep));
+        assert!(mixed.uses_disposal(DisposalMethod::RestoreBackground));
+        assert!(!mixed.uses_disposal(DisposalMethod::None));
+        assert!(!mixed.uses_disposal(DisposalMethod::RestorePrevious));
+        assert!(!mixed.all_frames_use_disposal(DisposalMethod::Keep));
+        assert!(!mixed.all_frames_use_disposal(DisposalMethod::RestoreBackground));
+
+        // Uniform disposal across every block -> `all_frames_use_disposal`
+        // is true for that method only.
+        let uniform = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::Keep,
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::Keep,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(uniform.all_frames_use_disposal(DisposalMethod::Keep));
+        assert!(!uniform.all_frames_use_disposal(DisposalMethod::None));
+    }
+
+    /// `frame_disposals` must match exactly the disposal method that
+    /// `frames_with_graphic_control` carries — the two views share the
+    /// §20 image spine and must agree on the disposal field.
+    #[test]
+    fn frame_disposals_matches_frames_with_graphic_control() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::RestoreBackground,
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_gce(GraphicControl {
+                    disposal: DisposalMethod::Keep,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        let from_disposals: Vec<DisposalMethod> = img.frame_disposals().collect();
+        let from_pairs: Vec<DisposalMethod> = img
+            .frames_with_graphic_control()
+            .map(|(_, gce)| gce.map(|g| g.disposal).unwrap_or(DisposalMethod::None))
+            .collect();
+        assert_eq!(from_disposals, from_pairs);
     }
 
     /// `is_animated` keys off the count of graphic-rendering blocks, not

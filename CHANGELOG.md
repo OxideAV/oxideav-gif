@@ -4,6 +4,34 @@
 
 ### Added
 
+- `GifImage::frame_disposals()`, `requires_canvas_snapshot()`,
+  `uses_disposal()`, and `all_frames_use_disposal()` — stream-level
+  §23.c.iv Disposal Method roll-up. `frame_disposals()` yields the
+  `DisposalMethod` per graphic-rendering block (§20 Image **and** §25
+  Plain Text — both carry §23-attachable Disposal Method per §23.d)
+  in source order; a block with no attached GCE contributes
+  `DisposalMethod::None` per §23.c.iv value `0` "No disposal specified"
+  (the spec's "decoder is not required to take any action" default).
+  `requires_canvas_snapshot()` is `true` when any block selects the
+  §23.c.iv `RestorePrevious` (`3`) mode — the §23.e.i mode that
+  "imposes severe demands on the decoder to store the section of the
+  graphic that needs to be saved" — so a renderer can skip
+  pre-allocating the snapshot buffer for streams that never use it
+  rather than walking every frame's `GraphicControl::disposal`.
+  `uses_disposal(method)` and `all_frames_use_disposal(method)` are
+  the any-block / every-block queries; both treat the no-GCE case as
+  `DisposalMethod::None`, and the every-block form is vacuously `true`
+  for a zero-graphic-rendering-block stream, matching the shape of
+  `all_frames_interlaced()` and `all_frames_palettes_sorted()`. §24
+  Comment / §26 Application metadata blocks produce no rendered output
+  and so carry no Disposal Method; they are skipped, matching the
+  spine shared with `frame_delays()` / `has_transparency()` /
+  `requires_user_input()`. Five new unit tests pin the source-order
+  spine across §20 + §25 blocks, the no-GCE-counts-as-None mapping, the
+  RestorePrevious-anywhere `requires_canvas_snapshot` semantics, the
+  any-block / every-block / vacuously-true forms, and the
+  `frame_disposals` vs `frames_with_graphic_control` cross-check.
+  Total unit tests 210 → 215. Round 266.
 - `Frame::local_color_table_size_field()` and
   `Frame::local_color_table_entry_count()` — typed accessors for the
   §20.c.ix "Size of Local Color Table" 3-bit field and its `2^(N+1)`
