@@ -4,6 +4,37 @@
 
 ### Added
 
+- `GifImage::frame_transparent_indices()`, `transparent_index_count()`,
+  `uses_transparent_index()`, and `all_frames_transparent()` —
+  stream-level §23.c.viii Transparent Index roll-up, the
+  transparent-index-side companion to the §23.c.iv Disposal Method
+  family from round 266. `frame_transparent_indices()` yields the
+  `Option<u8>` Transparent Index per graphic-rendering block (§20 Image
+  **and** §25 Plain Text — both carry a §23-attachable GCE per §23.d)
+  in source order; a block whose GCE leaves the §23.c.vi Transparency
+  Flag clear (value `0`, "Transparent Index is not given") or carries
+  no GCE at all contributes `None`, exactly the "no transparency for
+  this block" case since §23.c.viii makes the index "present if and
+  only if the Transparency Flag is set to 1".
+  `transparent_index_count()` is the count of blocks that *do* give an
+  index — `count == frame_count()` flags a stream where every frame
+  reserves a transparent slot, a strict mid-range value flags a mixed
+  stream. `uses_transparent_index(index)` is the per-slot any-block
+  query (§21.a precedence: the index addresses the active table, LCT
+  superseding GCT) so a palette-optimisation pass can check whether a
+  slot is ever treated as transparent before reclaiming it.
+  `all_frames_transparent()` is the every-block form, vacuously `true`
+  for a metadata-only stream, matching the shape of
+  `all_frames_use_disposal()` / `all_frames_interlaced()`. §24 Comment
+  / §26 Application metadata blocks produce no rendered output and carry
+  no Transparent Index; they are skipped, matching the
+  `frame_delays()` / `frame_disposals()` / `has_transparency()` spine.
+  Four new unit tests pin the source-order spine across §20 + §25
+  blocks (no-GCE and flag-clear both mapping to `None`), the
+  count-only-flagged mapping, the specific-slot match vs the opaque
+  miss, the every-block / vacuously-true semantics, and the
+  has_transparency / count cross-check. Total unit tests 215 → 219.
+  Round 273.
 - `GifImage::frame_disposals()`, `requires_canvas_snapshot()`,
   `uses_disposal()`, and `all_frames_use_disposal()` — stream-level
   §23.c.iv Disposal Method roll-up. `frame_disposals()` yields the

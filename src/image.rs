@@ -1232,6 +1232,80 @@ impl GifImage {
             .any(|gce| gce.transparent_index.is_some())
     }
 
+    /// One item per *graphic-rendering block* (§20 Image **and** §25
+    /// Plain Text — both carry a §23-attachable Graphic Control Extension
+    /// per §23.d), in source order; the item is that block's §23.c.viii
+    /// Transparent Index, or `None` when the block's GCE leaves the
+    /// §23.c.vi Transparency Flag clear (value `0`, "Transparent Index is
+    /// not given") or carries no GCE at all.
+    ///
+    /// This is the transparent-index-side companion to
+    /// [`Self::frame_disposals`]: where [`Self::has_transparency`] answers
+    /// the any-block question, this iterator surfaces *which* index each
+    /// block skips, so a renderer building a per-frame alpha mask can walk
+    /// it once rather than re-deriving the §23 → §20 / §25 attachment from
+    /// [`Self::blocks`]. Per §23.c.viii the transparent pixel is one the
+    /// decoder "does not modify"; the index is "present if and only if the
+    /// Transparency Flag is set to 1", so a `None` here is exactly the
+    /// "no transparency for this block" case. §24 Comment / §26
+    /// Application Extensions produce no rendered output and carry no
+    /// Transparent Index; they are skipped, matching the
+    /// [`Self::frame_delays`] / [`Self::frame_disposals`] spine.
+    pub fn frame_transparent_indices(&self) -> impl Iterator<Item = Option<u8>> + '_ {
+        self.graphic_rendering_controls()
+            .map(|gce| gce.and_then(|g| g.transparent_index))
+    }
+
+    /// The number of graphic-rendering blocks (§20 Image or §25 Plain
+    /// Text) whose §23 Graphic Control Extension sets the §23.c.vi
+    /// Transparency Flag (i.e. gives a §23.c.viii Transparent Index).
+    ///
+    /// The count-valued companion to [`Self::has_transparency`]: a stream
+    /// with `transparent_index_count() == frame_count()` declares every
+    /// graphic-rendering block transparent, while a value strictly between
+    /// `0` and the block count flags a mixed stream where only some frames
+    /// reserve a transparent index. Returns `0` for a stream with no
+    /// Graphic Control Extensions and for one whose GCEs all leave the
+    /// Transparency Flag clear.
+    pub fn transparent_index_count(&self) -> usize {
+        self.frame_transparent_indices().flatten().count()
+    }
+
+    /// `true` when any graphic-rendering block in the stream selects the
+    /// given §23.c.viii Transparent Index.
+    ///
+    /// Per §23.c.viii the index addresses the active colour table (§21.a
+    /// precedence: Local Color Table supersedes Global), so a caller that
+    /// wants to know whether a particular palette slot is ever treated as
+    /// transparent — for example, to decide whether reclaiming that slot
+    /// for a fresh colour is safe during a palette-optimisation pass — can
+    /// gate on this single query. A block with the §23.c.vi Transparency
+    /// Flag clear contributes no index per [`Self::frame_transparent_indices`],
+    /// so this returns `false` for a fully-opaque stream.
+    pub fn uses_transparent_index(&self, index: u8) -> bool {
+        self.frame_transparent_indices()
+            .flatten()
+            .any(|i| i == index)
+    }
+
+    /// `true` when **every** graphic-rendering block in the stream carries
+    /// a §23 Graphic Control Extension with the §23.c.vi Transparency Flag
+    /// set (a §23.c.viii Transparent Index is given for each).
+    ///
+    /// The every-block counterpart to [`Self::has_transparency`], matching
+    /// the shape of [`Self::all_frames_use_disposal`] /
+    /// [`Self::all_frames_interlaced`]: a renderer can gate the
+    /// "allocate one alpha channel for the whole animation" fast path on
+    /// this, rather than re-checking each frame. A graphic-rendering block
+    /// with no attached GCE — or one whose Transparency Flag is clear —
+    /// contributes `None` per [`Self::frame_transparent_indices`] and so
+    /// makes this `false`. Vacuously `true` for a stream with no
+    /// graphic-rendering blocks at all (only §24 Comment / §26 Application
+    /// metadata).
+    pub fn all_frames_transparent(&self) -> bool {
+        self.frame_transparent_indices().all(|i| i.is_some())
+    }
+
     /// `true` when any graphic-rendering block in the stream carries a
     /// §23 Graphic Control Extension with the §23.c.v User Input Flag set.
     ///
@@ -2095,6 +2169,151 @@ mod tests {
             }],
         );
         assert!(pt.has_transparency());
+    }
+
+    /// §23.c.viii — `frame_transparent_indices` yields the GCE Transparent
+    /// Index per graphic-rendering block in source order; a block with no
+    /// attached GCE, or one whose §23.c.vi Transparency Flag is clear,
+    /// contributes `None`. §24 / §26 metadata blocks are skipped, and §25
+    /// Plain Text participates alongside §20 Image.
+    #[test]
+    fn frame_transparent_indices_reads_gce_transparent_index() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(2),
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with(None)), // no GCE -> None
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: None, // flag clear -> None
+                    ..GraphicControl::default()
+                })),
+                Block::Comment(b"x".to_vec()), // not a rendering block
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 1,
+                        height: 1,
+                        cell_width: 1,
+                        cell_height: 1,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"A".to_vec(),
+                    },
+                    graphic_control: Some(GraphicControl {
+                        transparent_index: Some(0),
+                        ..GraphicControl::default()
+                    }),
+                },
+            ],
+        );
+        assert_eq!(
+            img.frame_transparent_indices().collect::<Vec<_>>(),
+            vec![Some(2), None, None, Some(0)]
+        );
+    }
+
+    /// §23.c.vi — `transparent_index_count` counts only the
+    /// graphic-rendering blocks whose Transparency Flag is set.
+    #[test]
+    fn transparent_index_count_counts_transparency_flag_set() {
+        // Zero GCEs / all-opaque -> 0.
+        let opaque = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: None,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert_eq!(opaque.transparent_index_count(), 0);
+
+        // Two of three rendering blocks transparent.
+        let mixed = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(1),
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(2),
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert_eq!(mixed.transparent_index_count(), 2);
+    }
+
+    /// §23.c.viii — `uses_transparent_index` reports whether any block
+    /// selects a specific palette slot as transparent.
+    #[test]
+    fn uses_transparent_index_matches_specific_slot() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(2),
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(img.uses_transparent_index(2));
+        assert!(!img.uses_transparent_index(0));
+
+        // A fully-opaque stream never matches any index.
+        let opaque = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(!opaque.uses_transparent_index(0));
+    }
+
+    /// §23.c.vi — `all_frames_transparent` is true iff every
+    /// graphic-rendering block gives a Transparent Index; vacuously true
+    /// for a metadata-only stream.
+    #[test]
+    fn all_frames_transparent_requires_every_block_flagged() {
+        // Every rendering block transparent.
+        let all = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(0),
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(1),
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(all.all_frames_transparent());
+
+        // One opaque block -> false.
+        let mixed = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_gce(GraphicControl {
+                    transparent_index: Some(0),
+                    ..GraphicControl::default()
+                })),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert!(!mixed.all_frames_transparent());
+
+        // Vacuously true: only metadata, no graphic-rendering blocks.
+        let meta_only = base_image(Some(pal3()), vec![Block::Comment(b"x".to_vec())]);
+        assert!(meta_only.all_frames_transparent());
+
+        // Cross-check against has_transparency / count on the all-true case.
+        assert!(all.has_transparency());
+        assert_eq!(all.transparent_index_count(), 2);
     }
 
     /// §23.c.v — `requires_user_input` is true iff some graphic-rendering
