@@ -4,6 +4,40 @@
 
 ### Added
 
+- `GifImage::optimize_frame_rects()` — encoder-side inter-frame rect
+  optimisation, the §20-placement companion to
+  `optimize_color_tables()`. Re-runs the §23 disposal-method state
+  machine over the block list and crops every §20 Image frame to the
+  bounding rectangle of the pixels it actually changes on the composed
+  logical screen: §20.c.ii–v give each Image its own `(left, top,
+  width, height)` placement, so pixels outside the rectangle are
+  simply never overwritten and the prior canvas shows through.
+  Shrinks the §22 pixel payload (and the Appendix F LZW stream with
+  it) while keeping `compose()` / `Playback` output byte-identical.
+  Eligibility follows §23.c.iv: disposal values 0/1 (no disposal / do
+  not dispose) are rect-independent and croppable; value 3 (restore to
+  previous) is also safe — the pixels a cropped frame no longer
+  overwrites already equal the pre-render canvas the disposal
+  restores; value 2 (restore to background) is never cropped because
+  "the area used by the graphic must be restored to the background
+  color" and shrinking the rect would shrink the cleared region.
+  §23.c.viii transparent pixels ("the corresponding pixel of the
+  display device is not modified") and pixels re-drawing the colour
+  already on the canvas count as unchanged; an exact-duplicate frame
+  shrinks to a 1×1 rect at its original top-left (§20 has no zero-area
+  image). Plan-then-apply: a stream that doesn't compose (placement
+  escaping the §18 screen, missing palette, out-of-range index) is
+  left completely unmodified, and the pass is idempotent (second call
+  returns `0`). New `tests/optimize_frame_rects.rs` (8 tests) pins the
+  changed-patch crop + encoded-size win + re-decode round-trip, the
+  duplicate-frame 1×1 crop, the RestoreBackground exclusion, the
+  RestorePrevious crop, the transparent-overlay opaque-bbox crop, §25
+  Plain Text blocks participating in the state machine but never being
+  modified, the non-composing-stream no-op, and a 24-seed randomized
+  compose-equivalence + idempotency + size-monotonicity property. The
+  end-to-end `decode` fuzz harness now *asserts* `compose(before) ==
+  compose(after)` through `optimize_frame_rects` on every decodable
+  input (219 k executions in 60 s locally, crash-free). Round 280.
 - `GifImage::frame_transparent_indices()`, `transparent_index_count()`,
   `uses_transparent_index()`, and `all_frames_transparent()` —
   stream-level §23.c.viii Transparent Index roll-up, the

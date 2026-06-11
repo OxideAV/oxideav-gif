@@ -58,7 +58,29 @@ fuzz_target!(|data: &[u8]| {
     //    machine, §23.c.viii transparent-index handling, frame-rect
     //    bounds check, palette-index range check, and Plain Text
     //    (§25) rendering against the crate-local 8×8 font.
-    let _ = compose(&img);
+    let composed = compose(&img);
+
+    // 3b. §20 inter-frame rect optimisation — cropping each frame to
+    //     its changed region must preserve the composed output
+    //     *exactly* on every decodable stream. This is an asserted
+    //     equivalence, not just panic-freedom: a mismatch is a finding.
+    {
+        let mut optimized = img.clone();
+        let _ = optimized.optimize_frame_rects();
+        match (&composed, compose(&optimized)) {
+            (Ok(before), Ok(after)) => assert_eq!(
+                before, &after,
+                "optimize_frame_rects changed the composed output"
+            ),
+            (Err(_), _) => {
+                // A non-composing stream must be left untouched.
+                assert_eq!(&optimized, &img);
+            }
+            (Ok(_), Err(e)) => {
+                panic!("optimize_frame_rects broke composability: {e}");
+            }
+        }
+    }
 
     // 4. Lazy playback iterators — same compositor state machine via a
     //    different driver, plus the NETSCAPE2.0 *Looping* sub-block

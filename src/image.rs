@@ -928,6 +928,55 @@ impl GifImage {
         true
     }
 
+    /// Crop every §20 Image frame to the bounding rectangle of the
+    /// pixels it actually changes on the composed logical screen — the
+    /// inter-frame companion to [`Self::optimize_color_tables`].
+    ///
+    /// Animation tools commonly emit every frame as a full
+    /// logical-screen raster even when consecutive frames differ in a
+    /// small region. §20.c.ii–v give each Image its own `(left, top,
+    /// width, height)` placement rectangle, so an encoder may instead
+    /// ship only the changed region: pixels outside a frame's rectangle
+    /// are simply not overwritten and the prior canvas shows through.
+    /// This pass rewrites each frame to that minimal rectangle, which
+    /// shrinks the §22 pixel payload (and the LZW-compressed stream
+    /// with it) without altering anything a viewer displays.
+    ///
+    /// # What is preserved
+    ///
+    /// The composed output — [`crate::compose`] and
+    /// [`crate::playback::Playback`] yield byte-identical RGBA
+    /// canvases before and after
+    /// the call. Equivalence is judged at the composed-RGBA level (the
+    /// §18 + §23 display model): a frame pixel that re-draws the colour
+    /// already on the canvas, or that is skipped via the §23.c.viii
+    /// Transparent Index ("the corresponding pixel of the display
+    /// device is not modified"), is croppable. Per-frame delays, GCEs,
+    /// palettes, metadata blocks, and block order are untouched.
+    ///
+    /// # Which frames are eligible
+    ///
+    /// Frames whose §23.c.iv Disposal Method is rect-independent:
+    /// values 0 / 1 (no disposal / do not dispose) and value 3 (restore
+    /// to previous — the pixels a cropped frame no longer overwrites
+    /// already equal the pre-render canvas, so restoring a smaller area
+    /// is indistinguishable). Value 2 (restore to background) frames
+    /// are **never** cropped: §23.c.iv requires "the area used by the
+    /// graphic" to be cleared to the background colour, and shrinking
+    /// that area would change what the next frame composes over. §25
+    /// Plain Text blocks participate in the state machine but are never
+    /// modified. A frame that changes nothing at all (an exact
+    /// duplicate) shrinks to a 1×1 rectangle at its original top-left.
+    ///
+    /// Returns the number of frames whose rectangle was shrunk (`0`
+    /// when nothing could be cropped). A stream that does not compose —
+    /// placement escaping the §18 logical screen, a missing palette, an
+    /// out-of-range pixel index — is left completely unmodified. The
+    /// transformation is idempotent: a second call returns `0`.
+    pub fn optimize_frame_rects(&mut self) -> usize {
+        crate::compose::optimize_frame_rects_impl(self)
+    }
+
     /// Minimum GIF version that this stream's block list requires.
     ///
     /// Returns the maximum of every contained [`Block::required_version`]

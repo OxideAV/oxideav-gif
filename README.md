@@ -205,6 +205,26 @@ Implements every block type defined by the CompuServe specifications:
   Table and clears the now-redundant §21 Local Color Tables, saving
   `3 × 2^(size_bits + 1)` bytes per frame. Pixels are unaffected
   (§21 says a frame with the LCT flag clear uses the §18 GCT).
+- Encoder inter-frame rect optimisation
+  (`GifImage::optimize_frame_rects`) — the §20-placement companion to
+  `optimize_color_tables`. Re-runs the §23 disposal-method state
+  machine and crops every §20 Image frame to the bounding rectangle of
+  the pixels it actually changes on the composed logical screen
+  (§20.c.ii–v let a frame cover any sub-rectangle; pixels outside it
+  are simply not overwritten), shrinking the §22 pixel payload + LZW
+  stream while leaving the composed RGBA output byte-identical.
+  Frames whose §23.c.iv disposal is rect-independent are eligible
+  (values 0/1, and 3 — the pixels a cropped frame no longer overwrites
+  already equal the pre-render canvas it restores); Restore-to-
+  background frames are never touched ("the area used by the graphic
+  must be restored" — shrinking it would change the cleared region).
+  §23.c.viii transparent pixels and pixels that re-draw the colour
+  already on the canvas count as unchanged; exact-duplicate frames
+  shrink to 1×1; non-composing streams are left unmodified; the pass
+  is idempotent. `tests/optimize_frame_rects.rs` pins the per-disposal
+  eligibility plus a randomized compose-equivalence property, and the
+  `decode` fuzz harness asserts `compose(before) == compose(after)` on
+  every decodable fuzz input.
 - `decode_first_frame` cover-frame fast-path that short-circuits at
   the first image-bearing block and skips the per-block dispatch
   for everything that follows. Useful when you only need a static
@@ -240,7 +260,10 @@ panic-freedom on arbitrary bytes:
   `Playback::looping_frames` + the §26 Application Extension typed
   parsers + the §24 Comment Extension accessors + the §18.c.viii Pixel
   Aspect Ratio decoder + the §7 Required Version inference + an
-  encode-then-re-decode through every fuzz-derived `GifImage`. Caps the
+  encode-then-re-decode through every fuzz-derived `GifImage`. Also
+  asserts (not just panic-freedom) that `optimize_frame_rects`
+  preserves the composed output exactly on every decodable input —
+  a `compose(before) != compose(after)` mismatch fails the run. Caps the
   composited canvas at 1 Mpx and the looping iterator at 64 frames so a
   `loop_count = Some(0)` (forever) stream doesn't pin the fuzzer.
 - `encode` — end-to-end encode-side harness: derives a `GifImage` from
@@ -287,11 +310,13 @@ no-op render short-circuit. Bootstrap a fresh corpus with
 content-addressed by SHA-1 and regenerable via `tools/seedgen.py`
 (pure-Python, no GIF library invoked).
 
-Latest local baseline: the end-to-end `decode` target cleared 345 k
-executions in 60 s, `decode_lenient_panic_free` cleared 16 M, and
-`encode` cleared 256 k — all crash-free. (The `encode` run followed a
-fix to a divide-by-zero in the harness's background-index reduction that
-the daily scheduled run had flagged; the bug was in the fuzz target, not
+Latest local baseline (round 280, with the `optimize_frame_rects`
+compose-equivalence assert in the loop): the end-to-end `decode`
+target cleared 219 k executions in 60 s, crash-free. Earlier baseline:
+`decode` 345 k (pre-assert), `decode_lenient_panic_free` 16 M, and
+`encode` 256 k — all crash-free. (The `encode` run followed a fix to a
+divide-by-zero in the harness's background-index reduction that the
+daily scheduled run had flagged; the bug was in the fuzz target, not
 the codec.)
 
 ## Benchmarking

@@ -215,6 +215,223 @@ pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
     Ok(out)
 }
 
+/// Planned rectangle replacement for the §20 Image block at
+/// `block_index` — the absolute crop computed by [`plan_frame_crops`].
+struct CropPlan {
+    block_index: usize,
+    left: u16,
+    top: u16,
+    width: u16,
+    height: u16,
+}
+
+/// Implementation behind [`GifImage::optimize_frame_rects`] — see the
+/// public method for the full contract. Lives here because it re-runs
+/// the same §23 disposal-method state machine as [`compose`].
+pub(crate) fn optimize_frame_rects_impl(image: &mut GifImage) -> usize {
+    // Phase 1 — walk the disposal state machine over the *unmodified*
+    // stream and record the crop for every eligible frame. A stream
+    // that doesn't compose (placement escapes the §18 screen, missing
+    // palette, out-of-range pixel index) is left completely untouched.
+    let plans = match plan_frame_crops(image) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    // Phase 2 — apply the crops. Each plan is independent of the
+    // others: phase 1 proved the composed canvases are unchanged, so
+    // no plan invalidates another.
+    for plan in &plans {
+        let Block::Image(frame) = &mut image.blocks[plan.block_index] else {
+            unreachable!("crop plans only target Block::Image entries");
+        };
+        let rel_left = (plan.left - frame.left) as usize;
+        let rel_top = (plan.top - frame.top) as usize;
+        let new_w = plan.width as usize;
+        let new_h = plan.height as usize;
+        let old_w = frame.width as usize;
+        let mut indices = Vec::with_capacity(new_w * new_h);
+        for y in 0..new_h {
+            let row = (rel_top + y) * old_w + rel_left;
+            indices.extend_from_slice(&frame.indices[row..row + new_w]);
+        }
+        frame.left = plan.left;
+        frame.top = plan.top;
+        frame.width = plan.width;
+        frame.height = plan.height;
+        frame.indices = indices;
+    }
+    plans.len()
+}
+
+/// Run the §23 disposal-method state machine over `image` (exactly the
+/// walk [`compose`] performs) and plan a crop for every §20 Image block
+/// whose changed-pixel bounding box is smaller than its declared
+/// placement rectangle.
+///
+/// A frame is eligible when its disposal method's effect does not
+/// depend on the rectangle size:
+///
+/// * §23.c.iv values 0 / 1 (no disposal / do not dispose) leave the
+///   canvas alone — rect-independent.
+/// * §23.c.iv value 3 (restore to previous) reverts "the area
+///   overwritten by the graphic" to the pre-render canvas. Pixels the
+///   cropped frame no longer overwrites already equal that canvas (the
+///   crop kept every pixel that *changed* it), so shrinking the
+///   overwritten area restores the identical result.
+/// * §23.c.iv value 2 (restore to background) is **excluded**: "the
+///   area used by the graphic must be restored to the background
+///   color", so shrinking the rect would shrink the cleared region and
+///   change what the next frame composes over.
+fn plan_frame_crops(image: &GifImage) -> Result<Vec<CropPlan>> {
+    let mut canvas = RgbaCanvas::new(image.screen_width, image.screen_height);
+    let background_rgba: [u8; 4] = image.background_color_rgba();
+    let mut plans = Vec::new();
+
+    for (block_index, block) in image.blocks.iter().enumerate() {
+        let (rect, gce, kind): (Rect, Option<&crate::image::GraphicControl>, BlockKind) =
+            match block {
+                Block::Image(f) => (
+                    Rect {
+                        left: f.left,
+                        top: f.top,
+                        width: f.width,
+                        height: f.height,
+                    },
+                    f.graphic_control.as_ref(),
+                    BlockKind::Image(f),
+                ),
+                Block::PlainText {
+                    params,
+                    graphic_control,
+                } => (
+                    Rect {
+                        left: params.left,
+                        top: params.top,
+                        width: params.width,
+                        height: params.height,
+                    },
+                    graphic_control.as_ref(),
+                    BlockKind::PlainText(params),
+                ),
+                _ => continue,
+            };
+
+        check_rect_in_screen(image, &rect)?;
+
+        let pre_render_snapshot = canvas.pixels.clone();
+
+        match &kind {
+            BlockKind::Image(f) => {
+                render_frame(&mut canvas, f, image.global_palette.as_deref())?;
+            }
+            BlockKind::PlainText(p) => {
+                // §25.a — requires a Global Color Table; no-op without
+                // one (same rule as `compose`).
+                if let Some(gct) = image.global_palette.as_deref() {
+                    render_plain_text(&mut canvas, p, gct);
+                }
+            }
+        }
+
+        let disposal = gce.map(|g| g.disposal).unwrap_or(DisposalMethod::None);
+
+        // §25 Plain Text blocks are never cropped (their rectangle is
+        // a text grid, not a pixel raster); they still participate in
+        // the state machine above so image-frame diffs stay exact.
+        if let BlockKind::Image(f) = kind {
+            if disposal != DisposalMethod::RestoreBackground && f.width > 0 && f.height > 0 {
+                if let Some(plan) = plan_for_frame(block_index, f, &pre_render_snapshot, &canvas) {
+                    plans.push(plan);
+                }
+            }
+        }
+
+        match disposal {
+            DisposalMethod::None | DisposalMethod::Keep => {}
+            DisposalMethod::RestoreBackground => {
+                clear_rect_to_color(&mut canvas, &rect, background_rgba);
+            }
+            DisposalMethod::RestorePrevious => {
+                canvas.pixels = pre_render_snapshot;
+            }
+        }
+    }
+    Ok(plans)
+}
+
+/// Compute the bounding box of composed-canvas pixels `frame` actually
+/// changed (`before` = pre-render canvas, `after` = post-render canvas)
+/// and turn it into a [`CropPlan`] when it is strictly smaller than the
+/// frame's declared rectangle.
+///
+/// Equality is judged on the composed RGBA values — the §23/§18 display
+/// model this module implements. A frame pixel that re-draws the colour
+/// already on the canvas (or is skipped via the §23.c.viii Transparent
+/// Index) is "unchanged" and croppable: not drawing it leaves the
+/// identical canvas behind for every later frame.
+///
+/// A frame that changes nothing at all shrinks to a 1×1 rect at its
+/// original top-left: that pixel either re-draws the value already
+/// there or is the transparent index (skipped), so the canvas is
+/// untouched either way, and §20 has no representation for a zero-area
+/// image.
+fn plan_for_frame(
+    block_index: usize,
+    frame: &Frame,
+    before: &[u8],
+    after: &RgbaCanvas,
+) -> Option<CropPlan> {
+    let canvas_w = after.width as usize;
+    let fl = frame.left as usize;
+    let ft = frame.top as usize;
+    let fw = frame.width as usize;
+    let fh = frame.height as usize;
+
+    let mut min_x = usize::MAX;
+    let mut max_x = 0usize;
+    let mut min_y = 0usize;
+    let mut max_y = 0usize;
+    let mut any = false;
+    for fy in 0..fh {
+        let row = ((ft + fy) * canvas_w + fl) * 4;
+        for fx in 0..fw {
+            let off = row + fx * 4;
+            if before[off..off + 4] != after.pixels[off..off + 4] {
+                if !any {
+                    any = true;
+                    min_y = fy;
+                }
+                max_y = fy;
+                min_x = min_x.min(fx);
+                max_x = max_x.max(fx);
+            }
+        }
+    }
+
+    let (left, top, width, height) = if any {
+        (
+            frame.left + min_x as u16,
+            frame.top + min_y as u16,
+            (max_x - min_x + 1) as u16,
+            (max_y - min_y + 1) as u16,
+        )
+    } else {
+        (frame.left, frame.top, 1, 1)
+    };
+    if (width as usize) * (height as usize) >= fw * fh {
+        // The change region already fills the declared rect (or the
+        // frame is 1×1) — nothing to save.
+        return None;
+    }
+    Some(CropPlan {
+        block_index,
+        left,
+        top,
+        width,
+        height,
+    })
+}
+
 /// Axis-aligned rectangle on the logical screen.
 struct Rect {
     left: u16,
