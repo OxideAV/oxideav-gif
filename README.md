@@ -82,7 +82,21 @@ Implements every block type defined by the CompuServe specifications:
   `max_local_color_table_size_field()` is the largest §20.c.ix across
   every LCT-carrying §20 Image (`None` when no §20 frame attaches an
   LCT), so a decoder allocating a reusable scratch LCT buffer can size
-  it once up front rather than re-allocating per-frame.
+  it once up front rather than re-allocating per-frame. §20.a / §25.a
+  "must fit within the boundaries of the Logical Screen" validation:
+  `GifImage::all_blocks_fit_screen()` reports whether every §20 Image
+  and §25 Plain Text grid's placement rectangle stays inside the §18
+  Logical Screen (right edge `left + width` ≤ Logical Screen Width and
+  bottom edge `top + height` ≤ Logical Screen Height; edge sums widen
+  to `u32` so a placement at the 65 535 coordinate ceiling cannot
+  wrap), and `out_of_bounds_block_count()` is the complementary count
+  of escaping graphic-rendering blocks. `compose()` / `Playback`
+  already reject an out-of-bounds placement with an error because the
+  spec's boundary clause is a hard requirement with no defined
+  clipping fall-back; these accessors surface the same check as a
+  query so a consumer can validate a decoded or freshly-built stream
+  before attempting to render. Streams with no graphic-rendering block
+  conform vacuously, matching the shape of `all_frames_interlaced()`.
 - Variable-Length-Code LZW compression (Appendix F). The codec pair
   ships in two flavours: the stateless `lzw::encode` / `lzw::decode`
   free functions for one-shot calls, and `lzw::LzwEncoder` which

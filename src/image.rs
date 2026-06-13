@@ -669,6 +669,79 @@ impl GifImage {
         })
     }
 
+    /// Yield each §20 Image / §25 Plain Text graphic-rendering block's
+    /// `(left, top, width, height)` placement rectangle in source order.
+    ///
+    /// Only the two graphic-rendering block types contribute: §20 Image
+    /// Descriptors (`left`/`top`/`width`/`height`) and §25 Plain Text
+    /// Extensions (the §25.c Text Grid `left`/`top`/`width`/`height`).
+    /// §24 Comment and §26 Application Extensions have no placement and
+    /// are skipped. The four values are exactly the coordinates §20.a /
+    /// §25.a constrain against the §18 Logical Screen.
+    fn placement_rects(&self) -> impl Iterator<Item = (u16, u16, u16, u16)> + '_ {
+        self.blocks.iter().filter_map(|b| match b {
+            Block::Image(f) => Some((f.left, f.top, f.width, f.height)),
+            Block::PlainText { params, .. } => {
+                Some((params.left, params.top, params.width, params.height))
+            }
+            Block::Comment(_) | Block::Application(_) => None,
+        })
+    }
+
+    /// Report whether a single `(left, top, width, height)` placement
+    /// rectangle fits within this stream's §18 Logical Screen.
+    ///
+    /// The §20.a / §25.a constraint is that the graphic-rendering block
+    /// "must fit within the boundaries of the Logical Screen": the
+    /// rectangle's right edge (`left + width`) must not exceed the §18.b
+    /// Logical Screen Width and its bottom edge (`top + height`) must not
+    /// exceed the §18.b Logical Screen Height. The `u16` coordinates are
+    /// widened to `u32` for the edge sums so a placement near the 65 535
+    /// coordinate ceiling cannot wrap. The left/top origin is always
+    /// in-bounds by construction (both are `u16` ≥ 0 and a zero-extent
+    /// edge sits exactly on the far boundary, which the `<=` admits).
+    fn rect_fits_screen(&self, left: u16, top: u16, width: u16, height: u16) -> bool {
+        let right = left as u32 + width as u32;
+        let bottom = top as u32 + height as u32;
+        right <= self.screen_width as u32 && bottom <= self.screen_height as u32
+    }
+
+    /// Report whether every §20 Image / §25 Plain Text graphic-rendering
+    /// block fits within the §18 Logical Screen boundaries (§20.a /
+    /// §25.a).
+    ///
+    /// `compose()` / [`Playback`] reject an out-of-bounds placement with
+    /// an error (the spec makes "must fit within the boundaries of the
+    /// Logical Screen" a hard requirement, not a recommendation, so the
+    /// composer has no defined clipping behaviour to fall back on). This
+    /// accessor surfaces the same check as a boolean so a consumer can
+    /// validate a freshly-decoded or freshly-built stream up front —
+    /// before attempting to render — without catching the compose error.
+    ///
+    /// Streams with no graphic-rendering blocks trivially conform
+    /// (vacuously `true`), matching the shape of the surrounding
+    /// stream-level rollups ([`Self::all_frames_interlaced`],
+    /// [`Self::all_frames_palettes_sorted`]).
+    ///
+    /// [`Playback`]: crate::Playback
+    pub fn all_blocks_fit_screen(&self) -> bool {
+        self.placement_rects()
+            .all(|(l, t, w, h)| self.rect_fits_screen(l, t, w, h))
+    }
+
+    /// Count §20 Image / §25 Plain Text graphic-rendering blocks whose
+    /// placement rectangle escapes the §18 Logical Screen boundaries
+    /// (§20.a / §25.a) — the complement of [`Self::all_blocks_fit_screen`]
+    /// expressed as a count so a validator can report *how many* blocks
+    /// would fail `compose()` rather than just whether any does.
+    ///
+    /// Zero exactly when [`Self::all_blocks_fit_screen`] is `true`.
+    pub fn out_of_bounds_block_count(&self) -> usize {
+        self.placement_rects()
+            .filter(|&(l, t, w, h)| !self.rect_fits_screen(l, t, w, h))
+            .count()
+    }
+
     /// Iterate every §24 Comment Extension payload in source order.
     ///
     /// The CompuServe spec (§24.a) makes Comment Extensions OPTIONAL
@@ -3836,6 +3909,154 @@ mod tests {
     fn plain_texts_grid_fits_cells_vacuous_true() {
         let img = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
         assert!(img.plain_texts_grid_fits_cells());
+    }
+
+    // ---- §20.a / §25.a "must fit within the boundaries of the
+    //      Logical Screen" validation accessors ----
+
+    /// A §20 Image at `(left, top)` with `width × height`, filled with
+    /// index 0 so the indices buffer matches the declared rectangle.
+    fn placed_frame(left: u16, top: u16, width: u16, height: u16) -> Block {
+        Block::Image(Frame {
+            left,
+            top,
+            width,
+            height,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![0; width as usize * height as usize],
+            graphic_control: None,
+        })
+    }
+
+    /// A §25 Plain Text grid at `(left, top)` with `width × height`.
+    fn placed_plain_text(left: u16, top: u16, width: u16, height: u16) -> Block {
+        Block::PlainText {
+            params: PlainText {
+                left,
+                top,
+                width,
+                height,
+                cell_width: 8,
+                cell_height: 8,
+                fg_color_index: 1,
+                bg_color_index: 0,
+                text: b"x".to_vec(),
+            },
+            graphic_control: None,
+        }
+    }
+
+    /// A `GifImage` with an arbitrary §18 Logical Screen size.
+    fn screen_image(screen_width: u16, screen_height: u16, blocks: Vec<Block>) -> GifImage {
+        GifImage {
+            version: Version::Gif89a,
+            screen_width,
+            screen_height,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(pal3()),
+            blocks,
+        }
+    }
+
+    /// Every §20 Image fits inside the §18 Logical Screen (a frame flush
+    /// to the far corner counts as fitting — the `<=` boundary).
+    #[test]
+    fn all_blocks_fit_screen_accepts_in_bounds_frames() {
+        let img = screen_image(
+            16,
+            16,
+            vec![placed_frame(0, 0, 8, 8), placed_frame(8, 8, 8, 8)],
+        );
+        assert!(img.all_blocks_fit_screen());
+        assert_eq!(img.out_of_bounds_block_count(), 0);
+    }
+
+    /// A frame whose right edge exceeds the §18.b Logical Screen Width
+    /// fails §20.a.
+    #[test]
+    fn all_blocks_fit_screen_rejects_right_overflow() {
+        let img = screen_image(16, 16, vec![placed_frame(10, 0, 8, 8)]);
+        assert!(!img.all_blocks_fit_screen());
+        assert_eq!(img.out_of_bounds_block_count(), 1);
+    }
+
+    /// A frame whose bottom edge exceeds the §18.b Logical Screen Height
+    /// fails §20.a.
+    #[test]
+    fn all_blocks_fit_screen_rejects_bottom_overflow() {
+        let img = screen_image(16, 16, vec![placed_frame(0, 10, 8, 8)]);
+        assert!(!img.all_blocks_fit_screen());
+        assert_eq!(img.out_of_bounds_block_count(), 1);
+    }
+
+    /// §25.a applies the same boundary constraint to the Plain Text Text
+    /// Grid; an out-of-bounds grid is counted exactly like an image.
+    #[test]
+    fn all_blocks_fit_screen_covers_plain_text_grid() {
+        let img = screen_image(16, 16, vec![placed_plain_text(12, 12, 8, 8)]);
+        assert!(!img.all_blocks_fit_screen());
+        assert_eq!(img.out_of_bounds_block_count(), 1);
+    }
+
+    /// The count tallies *each* escaping graphic-rendering block; §24
+    /// Comment and §26 Application Extensions never contribute (they
+    /// have no placement).
+    #[test]
+    fn out_of_bounds_block_count_tallies_each_escaping_block() {
+        let img = screen_image(
+            16,
+            16,
+            vec![
+                placed_frame(0, 0, 8, 8),         // fits
+                placed_frame(10, 0, 8, 8),        // escapes (right)
+                placed_plain_text(0, 10, 8, 8),   // escapes (bottom)
+                Block::Comment(b"note".to_vec()), // no placement
+            ],
+        );
+        assert!(!img.all_blocks_fit_screen());
+        assert_eq!(img.out_of_bounds_block_count(), 2);
+    }
+
+    /// A coordinate sum near the `u16` ceiling must not wrap: a frame at
+    /// `left = 65_535` with `width = 1` has a right edge of 65_536,
+    /// which exceeds any `u16` screen width and must be reported as
+    /// escaping rather than wrapping to 0.
+    #[test]
+    fn all_blocks_fit_screen_no_u16_wrap_at_ceiling() {
+        let img = screen_image(u16::MAX, u16::MAX, vec![placed_frame(u16::MAX, 0, 1, 1)]);
+        assert!(!img.all_blocks_fit_screen());
+        assert_eq!(img.out_of_bounds_block_count(), 1);
+    }
+
+    /// A stream with no graphic-rendering block trivially conforms,
+    /// matching the vacuous-true shape of the surrounding rollups.
+    #[test]
+    fn all_blocks_fit_screen_vacuous_true() {
+        let img = screen_image(1, 1, vec![Block::Comment(b"only metadata".to_vec())]);
+        assert!(img.all_blocks_fit_screen());
+        assert_eq!(img.out_of_bounds_block_count(), 0);
+    }
+
+    /// The boolean and the count agree: `all_blocks_fit_screen()` is
+    /// `true` exactly when `out_of_bounds_block_count()` is `0`.
+    #[test]
+    fn all_blocks_fit_screen_is_zero_count() {
+        let fits = screen_image(16, 16, vec![placed_frame(0, 0, 16, 16)]);
+        assert_eq!(
+            fits.all_blocks_fit_screen(),
+            fits.out_of_bounds_block_count() == 0
+        );
+
+        let escapes = screen_image(16, 16, vec![placed_frame(1, 0, 16, 16)]);
+        assert_eq!(
+            escapes.all_blocks_fit_screen(),
+            escapes.out_of_bounds_block_count() == 0
+        );
     }
 
     /// `plain_texts()` is consistent with the existing

@@ -4,6 +4,22 @@
 
 ### Added
 
+- `GifImage::all_blocks_fit_screen()` / `out_of_bounds_block_count()` —
+  read-only §20.a / §25.a validation accessors. The spec makes "each
+  image must fit within the boundaries of the Logical Screen" a hard
+  requirement (not a recommendation), and `compose()` / `Playback`
+  already reject an escaping placement with an error. These accessors
+  surface the same check up front without rendering: `all_blocks_fit_
+  screen()` is `true` when every §20 Image and §25 Plain Text grid's
+  right edge (`left + width`) is within the §18.b Logical Screen Width
+  and its bottom edge (`top + height`) within the Logical Screen
+  Height; `out_of_bounds_block_count()` is the complementary count of
+  escaping graphic-rendering blocks (zero exactly when the boolean is
+  `true`). Edge sums widen to `u32` so a placement at the 65 535
+  coordinate ceiling cannot wrap. §24 Comment / §26 Application
+  Extensions have no placement and never contribute; a stream with no
+  graphic-rendering block conforms vacuously.
+
 - `GifImage::optimize_frame_rects()` — encoder-side inter-frame rect
   optimisation, the §20-placement companion to
   `optimize_color_tables()`. Re-runs the §23 disposal-method state
