@@ -186,7 +186,11 @@ impl<'a> Iterator for FrameIter<'a> {
                 // §25.a — needs a Global Color Table; skip-render
                 // when absent so the block is visually a no-op.
                 if let Some(gct) = self.image.global_palette.as_deref() {
-                    render_plain_text(&mut self.canvas, p, gct);
+                    // §23.d — the GCE "can modify ... the Plain Text
+                    // Extension", so its §23.c.viii Transparency Index
+                    // applies to plain-text cells as well.
+                    let transparent_index = gce.and_then(|g| g.transparent_index);
+                    render_plain_text(&mut self.canvas, p, gct, transparent_index);
                 }
             }
         }
@@ -424,7 +428,12 @@ fn clear_rect_to_color(canvas: &mut RgbaCanvas, rect: &Rect, rgba: [u8; 4]) {
 /// `compose.rs`; duplicated rather than re-exported because both
 /// modules host their own canvas-helper sets and we want each to
 /// evolve independently.
-fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
+fn render_plain_text(
+    canvas: &mut RgbaCanvas,
+    params: &PlainText,
+    gct: &[Rgb],
+    transparent_index: Option<u8>,
+) {
     if params.cell_width == 0 || params.cell_height == 0 {
         return;
     }
@@ -434,6 +443,12 @@ fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
     let cell_h = params.cell_height as u16;
     let fg_rgba = palette_index_to_rgba(gct, params.fg_color_index);
     let bg_rgba = palette_index_to_rgba(gct, params.bg_color_index);
+
+    // §23.c.viii / §23.d — leave the canvas pixel unmodified when a
+    // foreground or background colour index matches the GCE Transparency
+    // Index, mirroring §20 image transparency.
+    let fg_transparent = transparent_index == Some(params.fg_color_index);
+    let bg_transparent = transparent_index == Some(params.bg_color_index);
 
     let canvas_w = canvas.width as usize;
     let mut text_iter = params.text.iter().copied();
@@ -454,6 +469,9 @@ fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
                     } else {
                         false
                     };
+                    if (painted && fg_transparent) || (!painted && bg_transparent) {
+                        continue;
+                    }
                     let rgba = if painted { fg_rgba } else { bg_rgba };
                     canvas.pixels[dst..dst + 4].copy_from_slice(&rgba);
                 }
@@ -722,5 +740,79 @@ mod tests {
         let mut it = Playback::new(&img).frames();
         assert!(matches!(it.next(), Some(Err(Error::InvalidData(_)))));
         assert!(it.next().is_none());
+    }
+
+    /// §23.d / §23.c.viii — the lazy iterator applies the GCE
+    /// Transparency Index to a §25 Plain Text block: a transparent
+    /// background lets the prior canvas show through, matching the
+    /// eager `compose` path bit-for-bit.
+    #[test]
+    fn plain_text_transparent_background_matches_eager() {
+        let pt = crate::image::PlainText {
+            left: 0,
+            top: 0,
+            width: 8,
+            height: 8,
+            cell_width: 8,
+            cell_height: 8,
+            fg_color_index: 1, // red
+            bg_color_index: 2, // green (declared transparent)
+            text: b"A".to_vec(),
+        };
+        let img = GifImage {
+            version: Version::Gif89a,
+            screen_width: 8,
+            screen_height: 8,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(palette_4()),
+            blocks: vec![
+                Block::Image(Frame {
+                    left: 0,
+                    top: 0,
+                    width: 8,
+                    height: 8,
+                    local_palette: None,
+                    palette_sorted: false,
+                    interlaced: false,
+                    indices: vec![3; 64], // prior canvas all blue
+                    graphic_control: None,
+                }),
+                Block::PlainText {
+                    params: pt,
+                    graphic_control: Some(GraphicControl {
+                        disposal: DisposalMethod::None,
+                        user_input: false,
+                        transparent_index: Some(2),
+                        delay_centis: 0,
+                    }),
+                },
+            ],
+        };
+        let eager = crate::compose::compose(&img).unwrap();
+        let lazy: Vec<PlaybackFrame> = Playback::new(&img)
+            .frames()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(eager.len(), lazy.len());
+        for (e, l) in eager.iter().zip(lazy.iter()) {
+            assert_eq!(e.canvas, l.canvas);
+        }
+        // Spot-check the rendered frame: glyph foreground = red,
+        // transparent background = blue prior canvas.
+        let canvas = &lazy[1].canvas;
+        let glyph_a = crate::font::glyph(b'A');
+        for row in 0u8..8 {
+            for col in 0u8..8 {
+                let expected = if crate::font::pixel(&glyph_a, col, row) {
+                    [0xFF, 0, 0, 0xFF]
+                } else {
+                    [0, 0, 0xFF, 0xFF]
+                };
+                assert_eq!(px(canvas, col as u16, row as u16), expected);
+            }
+        }
     }
 }

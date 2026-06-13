@@ -297,6 +297,22 @@
   1024×1024 / 100×(64×64)); baseline numbers + matrix recorded in
   `BENCHMARKS.md` (round 194).
 
+### Fixed
+
+- §23.d / §23.c.viii — a §23 Graphic Control Extension attached to a
+  §25 Plain Text block now applies its Transparency Index to plain-text
+  rendering, where previously it was ignored. §23.d states the GCE "can
+  modify ... the Plain Text Extension", and §23.c.viii says a pixel
+  whose index equals the Transparency Index "is not modified" on the
+  display device. A plain-text cell foreground or background pixel
+  whose Global-Color-Table index matches the transparency index is now
+  skipped (the prior canvas shows through) in `compose()`, the lazy
+  `Playback` iterator, and the `optimize_frame_rects()` crop-planning
+  walk — matching how §20 image transparency already behaved. Four new
+  unit tests (transparent background / transparent foreground /
+  non-matching-index opaque, plus an eager-vs-lazy parity check) pin
+  the three cases. Round 289.
+
 ## [0.0.11](https://github.com/OxideAV/oxideav-gif/compare/v0.0.10...v0.0.11) - 2026-05-29
 
 ### Other

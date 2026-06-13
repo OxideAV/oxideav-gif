@@ -174,7 +174,12 @@ pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
                 // be available". Without one the block has no defined
                 // fg/bg colour mapping; treat it as a no-op.
                 if let Some(gct) = image.global_palette.as_deref() {
-                    render_plain_text(&mut canvas, p, gct);
+                    // §23.d — a GCE "can modify ... the Plain Text
+                    // Extension", so its §23.c.viii Transparency Index
+                    // applies to plain-text cells exactly as it does to
+                    // §20 image pixels.
+                    let transparent_index = gce.and_then(|g| g.transparent_index);
+                    render_plain_text(&mut canvas, p, gct, transparent_index);
                 }
             }
         }
@@ -328,7 +333,11 @@ fn plan_frame_crops(image: &GifImage) -> Result<Vec<CropPlan>> {
                 // §25.a — requires a Global Color Table; no-op without
                 // one (same rule as `compose`).
                 if let Some(gct) = image.global_palette.as_deref() {
-                    render_plain_text(&mut canvas, p, gct);
+                    // §23.d — keep the crop-planning canvas walk
+                    // byte-identical to `compose` by honouring the GCE
+                    // Transparency Index here too.
+                    let transparent_index = gce.and_then(|g| g.transparent_index);
+                    render_plain_text(&mut canvas, p, gct, transparent_index);
                 }
             }
         }
@@ -542,7 +551,12 @@ fn clear_rect_to_color(canvas: &mut RgbaCanvas, rect: &Rect, rgba: [u8; 4]) {
 /// "more padding around the same 8×8 glyph"). Characters outside
 /// `0x20..=0x7E` (or the spec's wider 0x20..=0xF7 with no glyph
 /// available) render as space per §25.e.
-fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
+fn render_plain_text(
+    canvas: &mut RgbaCanvas,
+    params: &PlainText,
+    gct: &[Rgb],
+    transparent_index: Option<u8>,
+) {
     // §25.a — fractional cells are discarded. Integer division here
     // is exactly that.
     if params.cell_width == 0 || params.cell_height == 0 {
@@ -561,6 +575,12 @@ fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
     // earlier "no Plain Text rendering" path effectively provided.
     let fg_rgba = palette_index_to_rgba(gct, params.fg_color_index);
     let bg_rgba = palette_index_to_rgba(gct, params.bg_color_index);
+
+    // §23.c.viii / §23.d — a foreground or background pixel whose colour
+    // *index* equals the GCE Transparency Index leaves the display
+    // device pixel unmodified, exactly as in §20 image rendering.
+    let fg_transparent = transparent_index == Some(params.fg_color_index);
+    let bg_transparent = transparent_index == Some(params.bg_color_index);
 
     let canvas_w = canvas.width as usize;
     let mut text_iter = params.text.iter().copied();
@@ -591,6 +611,11 @@ fn render_plain_text(canvas: &mut RgbaCanvas, params: &PlainText, gct: &[Rgb]) {
                     } else {
                         false
                     };
+                    // §23.c.viii — a transparent cell pixel is skipped,
+                    // leaving whatever the canvas already held.
+                    if (painted && fg_transparent) || (!painted && bg_transparent) {
+                        continue;
+                    }
                     let rgba = if painted { fg_rgba } else { bg_rgba };
                     canvas.pixels[dst..dst + 4].copy_from_slice(&rgba);
                 }
@@ -1052,6 +1077,145 @@ mod tests {
         for row in 0..8 {
             for col in 0..8 {
                 assert_eq!(px(&frames[0].canvas, col, row), [0, 0, 0, 0]);
+            }
+        }
+    }
+
+    /// Build an 8×8 stream whose first block paints the whole canvas a
+    /// solid index, then a §25 Plain Text "A" cell at the origin
+    /// carrying a GCE with the given transparency index. Returns the
+    /// composed canvas of the plain-text frame.
+    fn plain_text_over_solid(
+        prior_index: u8,
+        fg_index: u8,
+        bg_index: u8,
+        transparent_index: Option<u8>,
+    ) -> RgbaCanvas {
+        let prior = Frame {
+            left: 0,
+            top: 0,
+            width: 8,
+            height: 8,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![prior_index; 64],
+            graphic_control: None,
+        };
+        let pt = crate::image::PlainText {
+            left: 0,
+            top: 0,
+            width: 8,
+            height: 8,
+            cell_width: 8,
+            cell_height: 8,
+            fg_color_index: fg_index,
+            bg_color_index: bg_index,
+            text: b"A".to_vec(),
+        };
+        let img = GifImage {
+            version: Version::Gif89a,
+            screen_width: 8,
+            screen_height: 8,
+            color_resolution: 1,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(palette_4()),
+            blocks: vec![
+                Block::Image(prior),
+                Block::PlainText {
+                    params: pt,
+                    graphic_control: Some(GraphicControl {
+                        disposal: DisposalMethod::None,
+                        user_input: false,
+                        transparent_index,
+                        delay_centis: 0,
+                    }),
+                },
+            ],
+        };
+        let frames = compose(&img).unwrap();
+        assert_eq!(frames.len(), 2);
+        frames[1].canvas.clone()
+    }
+
+    /// §23.d / §23.c.viii — a GCE attached to a §25 Plain Text block
+    /// can modify it. When the Text Background Color Index equals the
+    /// Transparency Index, background cell pixels are left unmodified
+    /// (the prior canvas shows through), while glyph-foreground pixels
+    /// still paint.
+    #[test]
+    fn plain_text_transparent_background_lets_prior_show() {
+        // Prior canvas = blue (idx 3). Plain Text fg = red (idx 1),
+        // bg = green (idx 2), with green declared transparent.
+        let canvas = plain_text_over_solid(3, 1, 2, Some(2));
+        let glyph_a = crate::font::glyph(b'A');
+        for row in 0u8..8 {
+            for col in 0u8..8 {
+                let expected = if crate::font::pixel(&glyph_a, col, row) {
+                    // Foreground glyph pixel paints red.
+                    [0xFF, 0, 0, 0xFF]
+                } else {
+                    // Transparent background: blue prior canvas shows.
+                    [0, 0, 0xFF, 0xFF]
+                };
+                assert_eq!(
+                    px(&canvas, col as u16, row as u16),
+                    expected,
+                    "mismatch at ({col},{row})"
+                );
+            }
+        }
+    }
+
+    /// §23.d / §23.c.viii — when the Text Foreground Color Index equals
+    /// the Transparency Index, glyph-foreground pixels are skipped (the
+    /// prior canvas shows through) while background cell pixels paint.
+    #[test]
+    fn plain_text_transparent_foreground_lets_prior_show() {
+        // Prior canvas = blue (idx 3). Plain Text fg = red (idx 1),
+        // bg = green (idx 2), with red (the foreground) transparent.
+        let canvas = plain_text_over_solid(3, 1, 2, Some(1));
+        let glyph_a = crate::font::glyph(b'A');
+        for row in 0u8..8 {
+            for col in 0u8..8 {
+                let expected = if crate::font::pixel(&glyph_a, col, row) {
+                    // Transparent foreground: blue prior canvas shows.
+                    [0, 0, 0xFF, 0xFF]
+                } else {
+                    // Background paints green.
+                    [0, 0xFF, 0, 0xFF]
+                };
+                assert_eq!(
+                    px(&canvas, col as u16, row as u16),
+                    expected,
+                    "mismatch at ({col},{row})"
+                );
+            }
+        }
+    }
+
+    /// A non-matching Transparency Index leaves the plain-text render
+    /// fully opaque — both foreground and background paint as usual.
+    #[test]
+    fn plain_text_non_matching_transparent_index_is_opaque() {
+        // Prior = blue (idx 3); transparent idx 0 matches neither
+        // fg (1) nor bg (2), so the whole cell paints.
+        let canvas = plain_text_over_solid(3, 1, 2, Some(0));
+        let glyph_a = crate::font::glyph(b'A');
+        for row in 0u8..8 {
+            for col in 0u8..8 {
+                let expected = if crate::font::pixel(&glyph_a, col, row) {
+                    [0xFF, 0, 0, 0xFF]
+                } else {
+                    [0, 0xFF, 0, 0xFF]
+                };
+                assert_eq!(
+                    px(&canvas, col as u16, row as u16),
+                    expected,
+                    "mismatch at ({col},{row})"
+                );
             }
         }
     }

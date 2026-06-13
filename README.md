@@ -118,7 +118,14 @@ Implements every block type defined by the CompuServe specifications:
   §25.e leaves the font choice to the decoder; this crate ships a
   minimal stylised font covering printable ASCII (0x20..=0x7E) and
   falls back to space for anything outside that range, matching the
-  §25.e fallback rule. `GifImage::plain_texts()` is the stream-level
+  §25.e fallback rule. Per §23.d ("This block can modify ... the Plain
+  Text Extension"), an attached §23 Graphic Control Extension's
+  §23.c.viii Transparency Index is honoured during plain-text
+  rendering exactly as for §20 images: a cell foreground or background
+  pixel whose Global-Color-Table *index* matches the transparency
+  index leaves the display-device pixel unmodified (the prior canvas
+  shows through) in both `compose()` and the lazy `Playback`
+  iterator. `GifImage::plain_texts()` is the stream-level
   typed iterator: each §25 block paired with its attached §23 Graphic
   Control Extension (`(&PlainText, Option<GraphicControl>)`) in source
   order — the §25 companion to `frames_with_graphic_control()` so
