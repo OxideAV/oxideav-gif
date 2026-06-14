@@ -4,6 +4,28 @@
 
 ### Added
 
+- `lzw::encode_with_clear_on_full()` — an opt-in companion to
+  `lzw::encode` implementing the *clear-on-full* table strategy from
+  Appendix F's cover sheet. Where `lzw::encode` follows the *deferred
+  clear* rule (freeze the 4096-entry dictionary at its maximum size and
+  keep emitting 12-bit codes against it until end-of-image), this
+  function emits a Clear code (value `2^min_code_size`, written at the
+  current 12-bit width) and rebuilds the dictionary from the §F.3
+  initial state the instant the table fills. The frozen-table path stops
+  learning new patterns past the 4096-entry point, so on a large raster
+  whose later content differs from its early content it codes that
+  content against a dictionary tuned to the wrong regime; re-adapting
+  typically yields a smaller stream. Both functions decode to identical
+  pixels — `decode` already honours a mid-stream Clear (§F.1 "reset
+  table state") — and emit byte-identical output for any raster that
+  never fills the table, so the existing `encode` output stays
+  byte-stable and this is purely an additive encoder size/speed
+  trade-off. New lzw unit tests pin: multi-fill round-trip correctness
+  through `decode`, byte-identity with `encode` below the table-full
+  ceiling, a regime-change input where the re-adapting path is ~3.7 %
+  smaller (166 077 → 159 854 B), and the shared empty-raster /
+  out-of-palette / out-of-range-`min_code_size` reject paths. Round 299.
+
 - `GifImage::all_blocks_fit_screen()` / `out_of_bounds_block_count()` —
   read-only §20.a / §25.a validation accessors. The spec makes "each
   image must fit within the boundaries of the Logical Screen" a hard

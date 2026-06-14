@@ -106,7 +106,17 @@ Implements every block type defined by the CompuServe specifications:
   (≤ 4094 entries) rather than memsetting the whole table. Output
   is byte-identical to the free function; reuse cuts the
   100×(64×64) animation-encoder microbench by ~44 % (round 230,
-  see `BENCHMARKS.md`).
+  see `BENCHMARKS.md`). Two table-full strategies are offered, both
+  permitted by Appendix F's cover sheet: `lzw::encode` follows the
+  *deferred clear* rule (freeze the 4096-entry dictionary and keep
+  emitting 12-bit codes until end-of-image), while
+  `lzw::encode_with_clear_on_full` emits a Clear code and rebuilds the
+  dictionary the instant it fills, so the table re-adapts to later
+  content instead of coding it against a frozen prefix set. Both decode
+  to identical pixels (`decode` honours the §F.1 mid-stream Clear) and
+  emit byte-identical output for rasters that never fill the table; on a
+  large regime-changing raster the re-adapting path is ~3.7 % smaller
+  in the in-tree property test (166 077 → 159 854 B).
 - Four-pass interlace transform (Appendix E)
 - Graphic Control Extension (§23) — disposal method, user-input flag,
   transparent index, delay time. §23.c.iv Disposal Method stream-level

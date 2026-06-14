@@ -311,6 +311,142 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
     Ok(writer.finish())
 }
 
+/// Encode `pixels` like [`encode`], but emit a Clear code and rebuild
+/// the dictionary from scratch whenever the table fills (rather than
+/// freezing it under the cover-sheet "deferred clear" rule that
+/// [`encode`] follows).
+///
+/// # Why both strategies exist
+///
+/// Appendix F's cover sheet describes two legal behaviours once the
+/// dictionary reaches its maximum size (`2^12 = 4096` entries):
+///
+/// * **Deferred clear** ([`encode`]): "keep emitting 12-bit codes
+///   against the existing table until you choose to send a Clear." The
+///   frozen table stops learning new patterns, so on a large image with
+///   varied content past the 4096-entry point compression efficiency
+///   degrades — every subsequent pattern is coded against a dictionary
+///   that can no longer grow.
+/// * **Clear on full** (this function): the moment the table fills, emit
+///   a Clear code (value `2^min_code_size`, written at the current
+///   12-bit width) and reset the dictionary to its `min_code_size + 1`
+///   initial width. The dictionary then re-adapts to the local content,
+///   which on large varied rasters typically produces a *smaller*
+///   stream than the frozen-table path.
+///
+/// Both outputs decode to the same pixels — the [`decode`] reader
+/// already honours a mid-stream Clear (§F.1 "reset table state"). The
+/// strategy is purely an encoder size/speed trade-off, so this is an
+/// opt-in companion rather than a change to [`encode`]'s byte-stable
+/// output. For rasters that never fill the table the two functions emit
+/// identical bytes.
+///
+/// Returns the raw compressed byte stream excluding the leading LZW
+/// Minimum Code Size byte and the §15 sub-block framing, exactly like
+/// [`encode`].
+pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
+    if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
+        return Err(Error::InvalidInput(format!(
+            "LZW minimum code size {min_code_size} outside [2, 8]"
+        )));
+    }
+
+    let clear_code: u16 = 1 << min_code_size;
+    let eoi_code: u16 = clear_code + 1;
+    let first_entry: u16 = clear_code + 2;
+    let initial_width: u8 = min_code_size + 1;
+
+    let mut writer = BitWriter::new();
+
+    // §F.1 recommendation — output Clear as the first code.
+    writer.write(clear_code, initial_width);
+
+    let mut table: Vec<u16> = vec![0u16; MAX_TABLE_SIZE * 256];
+    let mut next_code: u16 = first_entry;
+    let mut width: u8 = initial_width;
+
+    let mut iter = pixels.iter().copied();
+    let mut prev: u16 = match iter.next() {
+        Some(b) => {
+            if (b as u16) >= clear_code {
+                return Err(Error::InvalidInput(format!(
+                    "pixel index {b} >= 2^min_code_size ({clear_code})"
+                )));
+            }
+            b as u16
+        }
+        None => {
+            // Empty raster: emit only EOI after the Clear we already wrote.
+            writer.write(eoi_code, width);
+            return Ok(writer.finish());
+        }
+    };
+
+    for byte in iter {
+        if (byte as u16) >= clear_code {
+            return Err(Error::InvalidInput(format!(
+                "pixel index {byte} >= 2^min_code_size ({clear_code})"
+            )));
+        }
+        let key = (prev as usize) * 256 + (byte as usize);
+        let slot = table[key];
+        if slot != 0 {
+            // The string `prev + byte` already has a code — extend.
+            prev = slot - 1;
+        } else {
+            // Emit the code for `prev` and learn the new pattern.
+            writer.write(prev, width);
+
+            // The table is never frozen here: it is guaranteed to have a
+            // free slot because a Clear+reset below fires the instant it
+            // would otherwise fill.
+            table[key] = next_code + 1;
+            let assigned = next_code;
+            next_code += 1;
+            if assigned == (1u16 << width) - 1 && width < MAX_CODE_WIDTH {
+                width += 1;
+            }
+
+            // Clear-on-full: the assignment that lands on entry
+            // MAX_TABLE_SIZE − 1 fills the dictionary. Rather than
+            // freezing it (the deferred-clear path), emit a Clear at the
+            // current 12-bit width and rebuild from the §F.3 initial
+            // state. The decoder mirrors this on receipt of the Clear
+            // (§F.1 "reset table state").
+            if next_code == MAX_TABLE_SIZE as u16 {
+                writer.write(clear_code, width);
+                // Wipe only the slots this generation touched. The flat
+                // table cannot be iterated cheaply for live entries, but
+                // a fresh `next_code` makes every old slot unreachable:
+                // a future lookup only trusts `table[key] - 1 < next_code`
+                // through the emit path, and we re-zero on demand below.
+                // Simplest correct reset: zero the whole table.
+                for s in table.iter_mut() {
+                    *s = 0;
+                }
+                next_code = first_entry;
+                width = initial_width;
+            }
+
+            prev = byte as u16;
+        }
+    }
+
+    // Final pending prefix + phantom width bump (see [`encode`]).
+    writer.write(prev, width);
+    if next_code < MAX_TABLE_SIZE as u16
+        && next_code == (1u16 << width) - 1
+        && width < MAX_CODE_WIDTH
+    {
+        width += 1;
+    }
+
+    // §F.2 — EOI must be the last code output for an image.
+    writer.write(eoi_code, width);
+
+    Ok(writer.finish())
+}
+
 /// Reusable LZW encoder state.
 ///
 /// Holds the `(prefix_code, next_byte) → code` lookup table — a flat
@@ -762,6 +898,130 @@ mod tests {
         let encoded = encode(8, &pixels).unwrap();
         let decoded = decode(8, &encoded, pixels.len()).unwrap();
         assert_eq!(decoded, pixels);
+    }
+
+    // -----------------------------------------------------------------
+    // `encode_with_clear_on_full` — Clear-on-full table strategy.
+    //
+    // Decodes to the same pixels as `encode` (the §F.1 mid-stream Clear
+    // is honoured by `decode`); for rasters that never fill the table it
+    // emits byte-identical output; on a table-overflowing raster it
+    // re-adapts the dictionary instead of freezing it.
+    // -----------------------------------------------------------------
+
+    /// A table-overflowing raster encoded with the Clear-on-full
+    /// strategy must round-trip through `decode` bit-for-bit. This is
+    /// the core correctness claim: the decoder's §F.1 reset on a
+    /// mid-stream Clear keeps the two sides in lock-step across every
+    /// dictionary rebuild.
+    #[test]
+    fn clear_on_full_roundtrips_across_multiple_fills() {
+        // 200_000 pseudo-random 8-bit pixels fills the 4096-entry
+        // dictionary several times over, so the encoder emits multiple
+        // mid-stream Clears.
+        let mut pixels = Vec::with_capacity(200_000);
+        let mut state: u32 = 0xC0FF_EE11;
+        for _ in 0..200_000 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            pixels.push((state & 0xFF) as u8);
+        }
+        let encoded = encode_with_clear_on_full(8, &pixels).unwrap();
+        let decoded = decode(8, &encoded, pixels.len()).unwrap();
+        assert_eq!(decoded, pixels);
+    }
+
+    /// For a raster that never fills the dictionary, Clear-on-full and
+    /// the deferred-clear `encode` must emit identical bytes — the new
+    /// strategy only diverges once the table is full.
+    #[test]
+    fn clear_on_full_matches_encode_below_table_full() {
+        // Each of these stays well under the 4096-entry ceiling, so the
+        // deferred-clear freeze never triggers and the two strategies
+        // emit the same bytes. (A raster that *does* fill the table —
+        // e.g. tens of thousands of high-entropy pixels — is expected to
+        // diverge; that divergence is what `clear_on_full_*` cover.)
+        let cases: Vec<(u8, Vec<u8>)> = vec![
+            (2, Vec::new()),
+            (2, vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]),
+            (2, vec![3u8; 3000]),
+            (3, vec![0u8; 16]),
+            (4, (0..600u32).map(|i| (i % 16) as u8).collect()),
+        ];
+        for (mcs, pixels) in &cases {
+            let baseline = encode(*mcs, pixels).expect("encode");
+            let variant = encode_with_clear_on_full(*mcs, pixels).expect("clear-on-full");
+            assert_eq!(
+                variant,
+                baseline,
+                "diverged below table-full at min_code_size={mcs}, len={}",
+                pixels.len()
+            );
+        }
+    }
+
+    /// On a large raster whose later content differs from its early
+    /// content, re-adapting the dictionary (Clear-on-full) must not
+    /// produce a *larger* stream than freezing it (deferred clear). The
+    /// raster is two regimes concatenated so the frozen first-half
+    /// dictionary is a poor fit for the second half — the case the
+    /// strategy exists to win.
+    #[test]
+    fn clear_on_full_not_worse_on_regime_change() {
+        let mut pixels = Vec::with_capacity(160_000);
+        // First regime: a low-entropy repeating texture that fills the
+        // table with patterns tuned to itself.
+        let mut s: u32 = 0xABCD_1234;
+        for _ in 0..80_000 {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            pixels.push((s & 0x0F) as u8); // only 16 distinct values
+        }
+        // Second regime: full 8-bit entropy, unrelated to the first.
+        for _ in 0..80_000 {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            pixels.push((s & 0xFF) as u8);
+        }
+        let frozen = encode(8, &pixels).unwrap();
+        let readapt = encode_with_clear_on_full(8, &pixels).unwrap();
+        // Both must decode to the source.
+        assert_eq!(decode(8, &frozen, pixels.len()).unwrap(), pixels);
+        assert_eq!(decode(8, &readapt, pixels.len()).unwrap(), pixels);
+        // Re-adapting must not lose to freezing on this regime-change
+        // input (it typically wins).
+        assert!(
+            readapt.len() <= frozen.len(),
+            "clear-on-full {} bytes worse than deferred-clear {} bytes",
+            readapt.len(),
+            frozen.len()
+        );
+    }
+
+    #[test]
+    fn clear_on_full_empty_and_error_paths() {
+        // Empty raster: Clear + EOI, same as `encode`.
+        assert_eq!(
+            encode_with_clear_on_full(2, &[]).unwrap(),
+            encode(2, &[]).unwrap()
+        );
+        // Out-of-palette pixel and out-of-range min_code_size reject
+        // exactly like `encode`.
+        assert!(matches!(
+            encode_with_clear_on_full(2, &[0, 1, 5]),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            encode_with_clear_on_full(1, &[0]),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            encode_with_clear_on_full(9, &[0]),
+            Err(Error::InvalidInput(_))
+        ));
     }
 
     #[test]
