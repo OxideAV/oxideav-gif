@@ -127,7 +127,7 @@ pub mod registry;
 pub use builder::AnimationBuilder;
 pub use compose::{compose, ComposedFrame, RgbaCanvas};
 pub use decoder::{decode, decode_first_frame, decode_lenient};
-pub use encoder::encode;
+pub use encoder::{encode, encode_with_options, EncodeOptions, LzwStrategy};
 pub use error::{Error, Result};
 pub use image::{
     Application, Block, DisposalMethod, Frame, GifImage, GraphicControl, PlainText, Rgb, Version,

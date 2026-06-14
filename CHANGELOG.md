@@ -4,6 +4,26 @@
 
 ### Added
 
+- `encode_with_options()` + `EncodeOptions` + `LzwStrategy` — the
+  top-level encoder now exposes the Appendix-F table-full strategy as a
+  caller-selectable knob. `EncodeOptions { lzw_strategy }` chooses
+  between `LzwStrategy::DeferredClear` (the byte-stable historical
+  default: freeze the full 4096-entry dictionary and keep emitting 12-bit
+  codes against it to end-of-image) and `LzwStrategy::ClearOnFull`
+  (emit a Clear and rebuild the dictionary the instant the table fills,
+  so it re-adapts to later content). Before this, the size-minimising
+  `ClearOnFull` path added in round 299 was only reachable on the raw
+  `lzw::encode_with_clear_on_full` free function — never through the GIF
+  encoder; now every §20 Image frame's LZW stream routes through the
+  selected strategy. `encode(image)` is unchanged and equals
+  `encode_with_options(image, EncodeOptions::default())` byte-for-byte.
+  Both strategies decode to identical pixels (`lzw::decode` honours a
+  mid-stream §F.1 Clear) and emit byte-identical streams for any frame
+  whose dictionary never reaches the 4096-entry ceiling — the choice
+  only changes the bytes for table-filling frames, where `ClearOnFull`
+  is strictly smaller on a regime-changing raster (pinned in
+  `encoder` unit tests on a 192×192 two-regime fixture). Round 305.
+
 - `lzw::encode_with_clear_on_full()` — an opt-in companion to
   `lzw::encode` implementing the *clear-on-full* table strategy from
   Appendix F's cover sheet. Where `lzw::encode` follows the *deferred

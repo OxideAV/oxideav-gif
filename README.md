@@ -116,7 +116,13 @@ Implements every block type defined by the CompuServe specifications:
   to identical pixels (`decode` honours the §F.1 mid-stream Clear) and
   emit byte-identical output for rasters that never fill the table; on a
   large regime-changing raster the re-adapting path is ~3.7 % smaller
-  in the in-tree property test (166 077 → 159 854 B).
+  in the in-tree property test (166 077 → 159 854 B). The top-level
+  encoder exposes the choice: `encode_with_options(image, EncodeOptions
+  { lzw_strategy })` drives every §20 Image frame's LZW through the
+  selected `LzwStrategy` (`DeferredClear` default / `ClearOnFull`), while
+  the bare `encode(image)` keeps the byte-stable deferred-clear default.
+  Both decode to identical pixels and emit byte-identical streams for any
+  frame whose dictionary never reaches the 4096-entry ceiling.
 - Four-pass interlace transform (Appendix E)
 - Graphic Control Extension (§23) — disposal method, user-input flag,
   transparent index, delay time. §23.c.iv Disposal Method stream-level

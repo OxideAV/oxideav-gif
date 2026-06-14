@@ -5,9 +5,58 @@ use crate::image::{Application, Block, Frame, GifImage, GraphicControl, PlainTex
 use crate::interlace::interlace_row_order;
 use crate::lzw;
 
+/// The Appendix-F table-full strategy the encoder uses when an image's
+/// LZW dictionary fills its 4096-entry ceiling.
+///
+/// Both strategies are permitted by Appendix F's cover sheet and decode
+/// to identical pixels — [`crate::lzw::decode`] honours a mid-stream
+/// Clear (§F.1) regardless. They emit *byte-identical* compressed output
+/// for any frame whose raster never fills the table; the choice only
+/// affects frames large and varied enough to reach 4096 entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LzwStrategy {
+    /// Freeze the full dictionary and keep emitting 12-bit codes against
+    /// it until end-of-image (the §F cover-sheet *deferred clear* rule).
+    /// This is the historical default and keeps [`encode`]'s output
+    /// byte-stable.
+    #[default]
+    DeferredClear,
+    /// Emit a Clear code and rebuild the dictionary the instant the table
+    /// fills, so it re-adapts to later content instead of coding it
+    /// against a frozen prefix set. Typically produces a smaller stream
+    /// on a large raster whose later content differs from its early
+    /// content.
+    ClearOnFull,
+}
+
+/// Encoder tuning knobs. Construct with [`EncodeOptions::default`] (which
+/// reproduces [`encode`] exactly) and override individual fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EncodeOptions {
+    /// Which Appendix-F table-full strategy to apply to every image
+    /// frame's LZW stream. Defaults to [`LzwStrategy::DeferredClear`].
+    pub lzw_strategy: LzwStrategy,
+}
+
 /// Serialise a [`GifImage`] into a byte stream conforming to the
 /// `<GIF Data Stream>` grammar in Appendix B.
+///
+/// Uses the default [`EncodeOptions`] (deferred-clear LZW). Call
+/// [`encode_with_options`] to select a different Appendix-F table-full
+/// strategy.
 pub fn encode(image: &GifImage) -> Result<Vec<u8>> {
+    encode_with_options(image, EncodeOptions::default())
+}
+
+/// Serialise a [`GifImage`] like [`encode`], but with caller-chosen
+/// [`EncodeOptions`].
+///
+/// The output is byte-identical to [`encode`] whenever
+/// `options == EncodeOptions::default()` *and* whenever no image frame's
+/// LZW dictionary reaches its 4096-entry ceiling — the
+/// [`LzwStrategy`] choice only changes the bytes for table-filling
+/// frames. Every produced stream decodes to the same pixels.
+pub fn encode_with_options(image: &GifImage, options: EncodeOptions) -> Result<Vec<u8>> {
     validate(image)?;
 
     let mut out = Vec::new();
@@ -23,7 +72,12 @@ pub fn encode(image: &GifImage) -> Result<Vec<u8>> {
                 if let Some(gce) = &frame.graphic_control {
                     write_graphic_control_extension(&mut out, gce);
                 }
-                write_image_block(&mut out, frame, image.global_palette.as_deref())?;
+                write_image_block(
+                    &mut out,
+                    frame,
+                    image.global_palette.as_deref(),
+                    options.lzw_strategy,
+                )?;
             }
             Block::PlainText {
                 params,
@@ -182,6 +236,7 @@ fn write_image_block(
     out: &mut Vec<u8>,
     frame: &Frame,
     global_palette: Option<&[Rgb]>,
+    lzw_strategy: LzwStrategy,
 ) -> Result<()> {
     out.push(0x2C); // Image Separator (§20.c.i)
     write_u16_le(out, frame.left);
@@ -246,7 +301,10 @@ fn write_image_block(
         frame.indices.clone()
     };
 
-    let compressed = lzw::encode(min_code_size, &pixels_for_lzw)?;
+    let compressed = match lzw_strategy {
+        LzwStrategy::DeferredClear => lzw::encode(min_code_size, &pixels_for_lzw)?,
+        LzwStrategy::ClearOnFull => lzw::encode_with_clear_on_full(min_code_size, &pixels_for_lzw)?,
+    };
     out.push(min_code_size);
     write_data_sub_blocks(out, &compressed);
     Ok(())
@@ -545,5 +603,151 @@ mod tests {
         assert_eq!(bits_required_for(5), 3);
         assert_eq!(bits_required_for(16), 4);
         assert_eq!(bits_required_for(256), 8);
+    }
+
+    // -----------------------------------------------------------------
+    // LzwStrategy selection (encode_with_options).
+    // -----------------------------------------------------------------
+
+    /// A 256-colour image whose raster changes "regime" partway through:
+    /// the first half repeats a small set of indices (long LZW runs that
+    /// fill the 4096-entry table quickly), the second half is a different
+    /// pseudo-random byte sequence the early dictionary cannot code well.
+    /// Large enough (192×192 = 36 864 px) to fill the dictionary, so the
+    /// deferred-clear vs clear-on-full split is exercised.
+    fn regime_change_image() -> GifImage {
+        let palette: Vec<Rgb> = (0..256u32)
+            .map(|i| Rgb::new(i as u8, (i ^ 0x5A) as u8, (i.wrapping_mul(7)) as u8))
+            .collect();
+        let w: u16 = 192;
+        let h: u16 = 192;
+        let total = w as usize * h as usize;
+        let mut indices = Vec::with_capacity(total);
+        let half = total / 2;
+        // First regime: low-entropy ramp over a small alphabet.
+        for i in 0..half {
+            indices.push((i % 7) as u8);
+        }
+        // Second regime: a wholly different pseudo-random stream.
+        let mut state: u32 = 0x1234_5678;
+        for _ in half..total {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            indices.push((state >> 16) as u8);
+        }
+        GifImage {
+            version: Version::Gif89a,
+            screen_width: w,
+            screen_height: h,
+            color_resolution: 7,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(palette),
+            blocks: vec![Block::Image(GifFrame {
+                left: 0,
+                top: 0,
+                width: w,
+                height: h,
+                local_palette: None,
+                palette_sorted: false,
+                interlaced: false,
+                indices,
+                graphic_control: None,
+            })],
+        }
+    }
+
+    /// `encode_with_options(EncodeOptions::default())` is byte-identical
+    /// to `encode` — the default knobs must not change the output.
+    #[test]
+    fn encode_with_default_options_matches_encode() {
+        let img = regime_change_image();
+        let baseline = encode(&img).unwrap();
+        let via_options = encode_with_options(&img, EncodeOptions::default()).unwrap();
+        assert_eq!(baseline, via_options);
+    }
+
+    /// Both strategies decode to the same `GifImage` (identical pixels).
+    /// The choice is purely a compressed-size trade-off; pixel output is
+    /// invariant because `lzw::decode` honours a mid-stream Clear.
+    #[test]
+    fn both_strategies_decode_identically() {
+        let img = regime_change_image();
+        let deferred = encode_with_options(
+            &img,
+            EncodeOptions {
+                lzw_strategy: LzwStrategy::DeferredClear,
+            },
+        )
+        .unwrap();
+        let clear_on_full = encode_with_options(
+            &img,
+            EncodeOptions {
+                lzw_strategy: LzwStrategy::ClearOnFull,
+            },
+        )
+        .unwrap();
+
+        let a = crate::decoder::decode(&deferred).unwrap();
+        let b = crate::decoder::decode(&clear_on_full).unwrap();
+        // Same decoded structure: one frame, identical index payloads.
+        let fa: Vec<_> = a.frames().map(|f| f.indices.clone()).collect();
+        let fb: Vec<_> = b.frames().map(|f| f.indices.clone()).collect();
+        assert_eq!(fa, fb);
+        // And those indices match the source raster.
+        let src: Vec<_> = img.frames().map(|f| f.indices.clone()).collect();
+        assert_eq!(fa, src);
+    }
+
+    /// On a large regime-changing raster, the clear-on-full strategy
+    /// re-adapts its dictionary and produces a strictly smaller stream
+    /// than the frozen-table deferred-clear default.
+    #[test]
+    fn clear_on_full_is_smaller_on_regime_change() {
+        let img = regime_change_image();
+        let deferred = encode_with_options(
+            &img,
+            EncodeOptions {
+                lzw_strategy: LzwStrategy::DeferredClear,
+            },
+        )
+        .unwrap();
+        let clear_on_full = encode_with_options(
+            &img,
+            EncodeOptions {
+                lzw_strategy: LzwStrategy::ClearOnFull,
+            },
+        )
+        .unwrap();
+        assert!(
+            clear_on_full.len() < deferred.len(),
+            "clear-on-full ({}) should beat deferred-clear ({}) on a \
+             regime-changing raster",
+            clear_on_full.len(),
+            deferred.len()
+        );
+    }
+
+    /// A small raster that never fills the LZW table emits byte-identical
+    /// output under both strategies (the cover-sheet guarantee: the
+    /// strategies only diverge once the dictionary reaches 4096 entries).
+    #[test]
+    fn strategies_agree_below_table_full() {
+        let img = one_pixel_image(Version::Gif89a, vec![one_frame_no_gce()]);
+        let deferred = encode_with_options(
+            &img,
+            EncodeOptions {
+                lzw_strategy: LzwStrategy::DeferredClear,
+            },
+        )
+        .unwrap();
+        let clear_on_full = encode_with_options(
+            &img,
+            EncodeOptions {
+                lzw_strategy: LzwStrategy::ClearOnFull,
+            },
+        )
+        .unwrap();
+        assert_eq!(deferred, clear_on_full);
     }
 }
