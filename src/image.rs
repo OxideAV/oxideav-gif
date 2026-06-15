@@ -116,6 +116,29 @@ pub struct GraphicControl {
     pub delay_centis: u16,
 }
 
+impl GraphicControl {
+    /// `true` when this Graphic Control Extension asks the decoder to
+    /// **block indefinitely** on user input — the §23.e.ii corner where
+    /// the §23.c.v User Input Flag is set *and* no §23.c.vii Delay Time
+    /// is specified (`delay_centis == 0`).
+    ///
+    /// §23.e.ii: "In the absence of a specified Delay Time, the decoder
+    /// should wait for user input indefinitely." This is the case a
+    /// purely time-driven playback loop cannot serve: there is no timeout
+    /// to fall back on, so the frame holds until the application supplies
+    /// the §23.c.v "Carriage Return, Mouse Button Click, etc." input.
+    ///
+    /// Distinct from a GCE that pairs the User Input Flag *with* a
+    /// non-zero Delay Time — §23.c.vii says processing then continues
+    /// "when user input is received or when the delay time expires,
+    /// whichever occurs first", so that frame is bounded and this returns
+    /// `false`. Also `false` when the User Input Flag is clear regardless
+    /// of the Delay Time.
+    pub fn waits_for_user_input_indefinitely(&self) -> bool {
+        self.user_input && self.delay_centis == 0
+    }
+}
+
 /// Plain Text Extension (§25) — textual data rendered in a grid of
 /// monospaced cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1447,6 +1470,32 @@ impl GifImage {
             .any(|gce| gce.user_input)
     }
 
+    /// `true` when any graphic-rendering block's §23 Graphic Control
+    /// Extension would make playback **block indefinitely** on user
+    /// input — the §23.e.ii corner where the §23.c.v User Input Flag is
+    /// set with no §23.c.vii Delay Time
+    /// ([`GraphicControl::waits_for_user_input_indefinitely`]).
+    ///
+    /// This is a strictly stronger condition than
+    /// [`Self::requires_user_input`]: a stream can require user input yet
+    /// never block indefinitely if every user-input GCE also carries a
+    /// non-zero Delay Time (per §23.c.vii, processing then resumes "when
+    /// user input is received or when the delay time expires, whichever
+    /// occurs first" — a bounded wait). When this query is `true`, a
+    /// playback engine *must* be input-aware: there is at least one frame
+    /// that a time-only loop would hang on forever, and
+    /// [`Self::total_play_duration`] cannot account for it (the §23.e.ii
+    /// wait has no upper bound).
+    ///
+    /// Returns `false` for a stream with no Graphic Control Extensions,
+    /// one whose GCEs all leave the User Input Flag clear, and one whose
+    /// user-input GCEs all pair the flag with a non-zero Delay Time.
+    pub fn blocks_indefinitely_for_user_input(&self) -> bool {
+        self.graphic_rendering_controls()
+            .flatten()
+            .any(|gce| gce.waits_for_user_input_indefinitely())
+    }
+
     /// One item per *graphic-rendering block* (§20 Image **and** §25
     /// Plain Text — both are graphic-rendering blocks whose §23 Graphic
     /// Control Extension carries the Disposal Method field per §23.d),
@@ -2465,6 +2514,77 @@ mod tests {
             ],
         );
         assert!(waits.requires_user_input());
+    }
+
+    /// §23.e.ii — `blocks_indefinitely_for_user_input` is true iff some
+    /// graphic-rendering block's GCE sets the User Input Flag *and* leaves
+    /// the Delay Time at 0 (the "wait indefinitely" corner). A user-input
+    /// GCE that also carries a non-zero Delay Time is a bounded wait
+    /// (§23.c.vii) and does not count.
+    #[test]
+    fn blocks_indefinitely_only_when_user_input_without_delay() {
+        // No GCE anywhere -> never blocks indefinitely.
+        let none = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(!none.blocks_indefinitely_for_user_input());
+
+        // User input set but with a Delay Time -> bounded wait per
+        // §23.c.vii, so requires_user_input but not indefinite.
+        let bounded = base_image(
+            Some(pal3()),
+            vec![Block::Image(frame_with_gce(GraphicControl {
+                user_input: true,
+                delay_centis: 50,
+                ..GraphicControl::default()
+            }))],
+        );
+        assert!(bounded.requires_user_input());
+        assert!(!bounded.blocks_indefinitely_for_user_input());
+
+        // Delay Time but no user input -> not indefinite either.
+        let timed = base_image(
+            Some(pal3()),
+            vec![Block::Image(frame_with_gce(GraphicControl {
+                user_input: false,
+                delay_centis: 0,
+                ..GraphicControl::default()
+            }))],
+        );
+        assert!(!timed.blocks_indefinitely_for_user_input());
+
+        // User input with no Delay Time -> §23.e.ii indefinite wait.
+        let indefinite = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with_gce(GraphicControl {
+                    user_input: true,
+                    delay_centis: 0,
+                    ..GraphicControl::default()
+                })),
+            ],
+        );
+        assert!(indefinite.requires_user_input());
+        assert!(indefinite.blocks_indefinitely_for_user_input());
+
+        // Per-GCE predicate matches the stream-level any-block roll-up.
+        assert!(GraphicControl {
+            user_input: true,
+            delay_centis: 0,
+            ..GraphicControl::default()
+        }
+        .waits_for_user_input_indefinitely());
+        assert!(!GraphicControl {
+            user_input: true,
+            delay_centis: 1,
+            ..GraphicControl::default()
+        }
+        .waits_for_user_input_indefinitely());
+        assert!(!GraphicControl {
+            user_input: false,
+            delay_centis: 0,
+            ..GraphicControl::default()
+        }
+        .waits_for_user_input_indefinitely());
     }
 
     /// §23.c.iv — `frame_disposals` yields the GCE Disposal Method per

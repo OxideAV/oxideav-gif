@@ -211,6 +211,17 @@ Implements every block type defined by the CompuServe specifications:
   sets the §23.c.v User Input Flag, telling an interactive viewer
   whether it needs an input-aware playback loop. Both share the
   §23.d graphic-rendering-block spine with `frame_delays()`.
+  `blocks_indefinitely_for_user_input()` is the §23.e.ii corner that
+  `requires_user_input()` alone misses: it is `true` only when some GCE
+  sets the User Input Flag *and* leaves the §23.c.vii Delay Time at 0,
+  the case §23.e.ii says the decoder "should wait for user input
+  indefinitely" (a strictly stronger condition — a user-input GCE that
+  pairs the flag with a non-zero Delay Time is the bounded "user input
+  or delay expiry, whichever first" wait of §23.c.vii, and so does not
+  count). `GraphicControl::waits_for_user_input_indefinitely()` is the
+  per-GCE predicate it rolls up. When the stream-level query is `true`,
+  `total_play_duration()` cannot bound the run and a renderer must be
+  input-aware.
 - Fluent animation assembly (`builder::AnimationBuilder`) — the
   encode-side counterpart to the timing accessors.
   `new(width, height, palette)` shares one §18 Global Color Table;

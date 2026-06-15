@@ -4,6 +4,21 @@
 
 ### Added
 
+- `GifImage::blocks_indefinitely_for_user_input()` +
+  `GraphicControl::waits_for_user_input_indefinitely()` — surface the
+  §23.e.ii "wait for user input indefinitely" corner. Per §23.e.ii, when
+  the §23.c.v User Input Flag is set with no §23.c.vii Delay Time
+  (`delay_centis == 0`), "the decoder should wait for user input
+  indefinitely" — an unbounded wait that a purely time-driven playback
+  loop cannot serve. The per-GCE predicate flags exactly that pair; the
+  stream-level any-block query is a strictly stronger condition than
+  `requires_user_input()` (a stream can require user input yet never
+  block indefinitely if every user-input GCE also carries a non-zero
+  Delay Time, which §23.c.vii makes a bounded "user input *or* delay
+  expiry, whichever first" wait). When the new query is `true`,
+  `total_play_duration()` cannot bound the run and a renderer must be
+  input-aware. Round 315.
+
 - `encode_with_options()` + `EncodeOptions` + `LzwStrategy` — the
   top-level encoder now exposes the Appendix-F table-full strategy as a
   caller-selectable knob. `EncodeOptions { lzw_strategy }` chooses
