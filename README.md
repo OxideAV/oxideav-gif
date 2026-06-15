@@ -105,8 +105,8 @@ Implements every block type defined by the CompuServe specifications:
   construction, each subsequent frame walks a `touched_keys` log
   (≤ 4094 entries) rather than memsetting the whole table. Output
   is byte-identical to the free function; reuse cuts the
-  100×(64×64) animation-encoder microbench by ~44 % (round 230,
-  see `BENCHMARKS.md`). Two table-full strategies are offered, both
+  100×(64×64) animation-encoder microbench by ~44 %
+  (see `BENCHMARKS.md`). Two table-full strategies are offered, both
   permitted by Appendix F's cover sheet: `lzw::encode` follows the
   *deferred clear* rule (freeze the 4096-entry dictionary and keep
   emitting 12-bit codes until end-of-image), while
@@ -312,7 +312,7 @@ panic-freedom on arbitrary bytes:
   can't construct (sub-screen placements, mismatched palette sizes,
   multi-frame disposal sequences). Caps screen at 256×256 and frame
   count at 16.
-- `plain_text` (round 200) — dedicated §25 Plain Text Extension
+- `plain_text` — dedicated §25 Plain Text Extension
   harness. `AnimationBuilder` exposes image frames only, and the
   decoder-side harnesses can only emit a `Block::PlainText` when the
   fuzzer stumbles onto the `0x21 0x01 0x0C` extension-introducer
@@ -347,14 +347,10 @@ no-op render short-circuit. Bootstrap a fresh corpus with
 content-addressed by SHA-1 and regenerable via `tools/seedgen.py`
 (pure-Python, no GIF library invoked).
 
-Latest local baseline (round 280, with the `optimize_frame_rects`
-compose-equivalence assert in the loop): the end-to-end `decode`
-target cleared 219 k executions in 60 s, crash-free. Earlier baseline:
-`decode` 345 k (pre-assert), `decode_lenient_panic_free` 16 M, and
-`encode` 256 k — all crash-free. (The `encode` run followed a fix to a
-divide-by-zero in the harness's background-index reduction that the
-daily scheduled run had flagged; the bug was in the fuzz target, not
-the codec.)
+All five harnesses run crash-free over long fuzzing sessions
+(the end-to-end `decode` target clears hundreds of thousands of
+executions per minute with the `optimize_frame_rects`
+compose-equivalence assert enabled in the loop).
 
 ## Benchmarking
 
@@ -375,12 +371,10 @@ single-frame stills (320×240 / 64×64), multi-frame animations
 (320×240 4f / 64×64 8f), the `decode_lenient` resync path, the
 `decode_first_frame` cover-frame fast path, the lazy `Playback::frames`
 iterator vs eager `compose`, and the `AnimationBuilder::build`
-validation pass in isolation. The fourth (`lzw`, round 194) measures
+validation pass in isolation. The fourth (`lzw`) measures
 the `lzw::encode` / `lzw::decode` pair in isolation across four
 sizes — see [`BENCHMARKS.md`](BENCHMARKS.md) for the scenario matrix
-and the round-194 baseline numbers. Future LZW /
-sub-block-sizing / disposal-state-machine optimisation rounds use
-these baselines for A/B comparisons.
+and the baseline numbers.
 
 ## Not implemented
 
