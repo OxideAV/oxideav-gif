@@ -4,6 +4,32 @@
 
 ### Added
 
+- `fuzz/fuzz_targets/lzw.rs` — dedicated Appendix F LZW codec fuzz
+  harness (round 318, depth-mode fuzz). The decoder-facing harnesses
+  (`decode`, `decode_panic_free`, `decode_lenient_panic_free`,
+  `roundtrip`) reach `lzw::decode` only *through* the §17/§18/§20
+  container parser, which constrains `min_code_size` to the §22.c.i
+  byte, the compressed bytes to re-assembled §15 sub-blocks, and
+  `expected_pixels` to exactly the Image Descriptor's `width × height`.
+  This harness drives `lzw::decode` / `lzw::encode` directly with
+  fuzzer-controlled parameters: the full `u8` `min_code_size` range
+  (out-of-[2,8] values must `Err`, never panic on the
+  `1 << min_code_size` shift), a 32-bit `expected_pixels` selector (a
+  value near `u32::MAX` against a tiny payload forces the
+  `expected_pixels.min(src.len() × MAX_TABLE_SIZE)` allocation clamp),
+  and an arbitrary compressed bitstream. Surfaces §F.4 code-width
+  growth on encoder-impossible code sequences, the KwKwK first-code /
+  uninitialised-prefix branch, the over-dictionary (`code > next_code`)
+  rejection, §F.1 Clear / §F.2 EOI at arbitrary positions, the
+  no-EOI-before-end `Err`, and the deferred-clear 4096-entry saturation
+  regime. Also asserts `lzw::decode(lzw::encode(x)) == x` on every
+  index buffer the encoder accepts and that `LzwEncoder::encode_frame`
+  is byte-identical to the free `lzw::encode`. Six tracked seeds in
+  `fuzz/seed_corpus/lzw/` (two well-formed mcs=2 streams from the
+  `lzw::decode` unit fixtures + four adversarial parameter perturbations)
+  anchor each path; regenerable via `tools/seedgen.py`. Cleared 437K
+  runs in 46 s with zero finds.
+
 - `GifImage::blocks_indefinitely_for_user_input()` +
   `GraphicControl::waits_for_user_input_indefinitely()` — surface the
   §23.e.ii "wait for user input indefinitely" corner. Per §23.e.ii, when

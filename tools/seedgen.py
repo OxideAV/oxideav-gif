@@ -19,6 +19,11 @@ corpora (a flat copy under `fuzz/seed_corpus/<target>/`):
      length (claims 0x42 bytes when only 0x03 follow) — exercises the
      §15 sub-block-chain framing on adversarial length prefixes.
 
+Also emits the `plain_text` (§25) seeds and the round-318 `lzw` seeds
+(direct Appendix F codec-pair parameter streams: two well-formed mcs=2
+compressed payloads from the `lzw::decode` unit fixtures + four
+adversarial parameter perturbations).
+
 All seeds are pure spec-walks; no external library code consulted.
 """
 import hashlib
@@ -201,6 +206,79 @@ plain_text_seeds = {
     "pt_degenerate_cell_size":    pt_seed_degenerate_cell,
 }
 
+# =============================================================================
+# Direct LZW codec fuzz target seeds (fuzz/fuzz_targets/lzw.rs, round 318).
+# =============================================================================
+#
+# The `lzw` harness consumes raw fuzz bytes (NOT GIF on-disk format) and
+# drives `oxideav_gif::lzw::{decode,encode}` directly. The byte layout
+# the harness reads:
+#
+#     data[0]      min_code_size (the FULL u8 range; [2,8] are spec-valid,
+#                  everything else must `Err` cleanly)
+#     data[1..5]   expected_pixels selector (u32, little-endian)
+#     data[5..]    the compressed-byte payload (also reused as the
+#                  `lzw::encode` palette-index buffer)
+#
+# Each seed anchors one Appendix F decode path so a fresh fuzz session
+# reaches it on iteration 1..N rather than after coverage warm-up. The
+# compressed payloads are byte-for-byte the encoder's own output for a
+# known index buffer (hand-derived from the §F state machine + verified
+# against the in-tree `lzw::encode` unit-test fixtures — no external
+# library consulted).
+
+def _lzw_seed(min_code_size, expected_pixels, payload):
+    return bytes([min_code_size & 0xFF]) + \
+        int(expected_pixels & 0xFFFFFFFF).to_bytes(4, "little") + bytes(payload)
+
+# Seed 1 — well-formed mcs=2 stream for the 16-pixel [0,1,2,3]×4 buffer.
+# Compressed bytes are the `known_good_4color_byte_pattern` unit-test
+# fixture in src/lzw.rs (§F emission sequence Clear,0,1,2,3,6,8,10,9,7,3,EOI).
+# expected_pixels = 16 → decodes exactly back to the source indices.
+lzw_seed_valid_4color = _lzw_seed(
+    0x02, 16, [0x44, 0x64, 0x0C, 0x35, 0x6F, 0x0A]
+)
+
+# Seed 2 — well-formed mcs=2 single-pixel stream (the §22.c.i payload
+# from the 1×1 GIF87a fixture: Clear,0,EOI packed as 0x44,0x01).
+# expected_pixels = 1.
+lzw_seed_valid_1px = _lzw_seed(0x02, 1, [0x44, 0x01])
+
+# Seed 3 — illegal min_code_size = 12 (> §F ceiling of 8). Must hit the
+# `[2,8]` validation rejection in `lzw::decode` (and the encoder's mirror
+# guard), never the `1 << 12` / `clear_code + 2` arithmetic. Payload and
+# expected_pixels are arbitrary — the rejection fires before they matter.
+lzw_seed_illegal_mcs = _lzw_seed(0x0C, 64, [0x44, 0x64, 0x0C])
+
+# Seed 4 — hostile expected_pixels (near u32::MAX) against a tiny 2-byte
+# compressed payload. Forces the `expected_pixels.min(src.len() *
+# MAX_TABLE_SIZE)` allocation clamp: 2 * 4096 = 8192 caps the
+# `Vec::with_capacity`, never a multi-gigabyte reservation. mcs=2.
+lzw_seed_alloc_clamp = _lzw_seed(0x02, 0xFFFF_FFFF, [0x44, 0x01])
+
+# Seed 5 — a non-Clear first code that references an out-of-range entry
+# (KwKwK / uninitialised-prefix path). mcs=8 so the first code is 9 bits;
+# the bytes 0xFF,0xFF feed code 0x1FF which exceeds the initial dictionary
+# size, so the decoder must `Err` ("uninitialised prefix" / "exceeds
+# dictionary size") rather than index past `next_code`.
+lzw_seed_bad_first_code = _lzw_seed(0x08, 32, [0xFF, 0xFF])
+
+# Seed 6 — truncated stream that ends before EOI. A lone Clear code
+# (0x04 at mcs=2 = clear_code, 3 bits) then end-of-input: the decoder
+# must `Err` ("ended before End-of-Information code"), never loop.
+lzw_seed_no_eoi = _lzw_seed(0x02, 8, [0x04])
+
+lzw_seeds = {
+    "lzw_valid_4color_16px":   lzw_seed_valid_4color,
+    "lzw_valid_1px":           lzw_seed_valid_1px,
+    "lzw_illegal_min_code":    lzw_seed_illegal_mcs,
+    "lzw_alloc_clamp":         lzw_seed_alloc_clamp,
+    "lzw_bad_first_code":      lzw_seed_bad_first_code,
+    "lzw_no_eoi":              lzw_seed_no_eoi,
+}
+
+OUT_LZW = "fuzz/seed_corpus/lzw"
+
 def sha1hex(b): return hashlib.sha1(b).hexdigest()
 
 written = []
@@ -229,7 +307,20 @@ for label, blob in plain_text_seeds.items():
     written.append((label, OUT_PLAIN_TEXT, name, len(blob)))
     print(f"[write] {label} -> {OUT_PLAIN_TEXT}/{name} ({len(blob)} B)")
 
+for label, blob in lzw_seeds.items():
+    name = sha1hex(blob)
+    path = os.path.join(OUT_LZW, name)
+    if os.path.exists(path):
+        print(f"[skip] {label}: {OUT_LZW}/{name} already present")
+        continue
+    os.makedirs(OUT_LZW, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(blob)
+    written.append((label, OUT_LZW, name, len(blob)))
+    print(f"[write] {label} -> {OUT_LZW}/{name} ({len(blob)} B)")
+
 print(
     f"\n{len(written)} seed file(s) written across "
-    f"{OUT_DECODE}, {OUT_LENIENT}, {OUT_DECODE_E2E}, and {OUT_PLAIN_TEXT}."
+    f"{OUT_DECODE}, {OUT_LENIENT}, {OUT_DECODE_E2E}, {OUT_PLAIN_TEXT}, "
+    f"and {OUT_LZW}."
 )

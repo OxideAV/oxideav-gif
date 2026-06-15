@@ -21,6 +21,7 @@ fuzz/seed_corpus/decode/...
 fuzz/seed_corpus/decode_panic_free/...
 fuzz/seed_corpus/decode_lenient_panic_free/...
 fuzz/seed_corpus/plain_text/...
+fuzz/seed_corpus/lzw/...
 ```
 
 ## Bootstrapping `fuzz/corpus/<target>/`
@@ -74,6 +75,34 @@ reaches them on iteration 1..3 rather than after coverage warm-up.
 | `pt_gce_restore_previous`   | 41    | §23.f.i pre-render snapshot + §23.c.iv `RestorePrevious` revert on a non-image block; back-to-back blocks share the canvas |
 | `pt_degenerate_cell_size`   | 12    | §25.c.viii/ix `cell_width = cell_height = 0` — `render_plain_text` short-circuits to a no-op |
 
+### `lzw` (round 318)
+
+Like `plain_text`, the `lzw` harness consumes a *fuzz-encoded*
+parameter stream — not GIF on-disk bytes — and drives the direct
+Appendix F codec pair (`lzw::decode` / `lzw::encode`). The byte
+layout the harness reads:
+
+```
+data[0]      min_code_size (full u8 range; [2,8] spec-valid)
+data[1..5]   expected_pixels (u32, little-endian)
+data[5..]    compressed-byte payload / encode index buffer
+```
+
+| Label                   | Bytes | Appendix F path anchored                       |
+|-------------------------|-------|------------------------------------------------|
+| `lzw_valid_4color_16px` | 11    | well-formed mcs=2 stream for `[0,1,2,3]×4`; §F width-bump + KwKwK (from the `lzw::decode` unit fixture) |
+| `lzw_valid_1px`         | 7     | well-formed mcs=2 single-pixel stream (Clear,0,EOI) |
+| `lzw_illegal_min_code`  | 8     | `min_code_size = 12` — §F [2,8] validation rejection |
+| `lzw_alloc_clamp`       | 7     | `expected_pixels ≈ u32::MAX` vs 2-byte payload — `src.len() × MAX_TABLE_SIZE` allocation clamp |
+| `lzw_bad_first_code`    | 7     | non-Clear first code referencing an out-of-range entry — KwKwK / uninitialised-prefix `Err` |
+| `lzw_no_eoi`            | 6     | Clear-only stream ending before EOI — §F.2 "ended before EOI" `Err` |
+
+The two well-formed compressed payloads are byte-for-byte the
+`lzw::decode` unit-test fixtures in `src/lzw.rs` (derived by walking
+the §F emission state machine; no external library consulted). The
+four adversarial seeds perturb a single parameter to anchor a
+specific decode-side error or allocation path.
+
 ## Verification (round 153)
 
 Each well-formed seed decodes via both `decode()` and
@@ -89,6 +118,14 @@ All 3 `plain_text` seeds run to completion through the fuzz harness
 A follow-up `-runs=200000` random walk seeded from these inputs
 likewise reports zero crashes — the harness contract holds on every
 spec-classic path the seeds anchor.
+
+## Verification (round 318, `lzw` seeds)
+
+All 6 `lzw` seeds run to completion through the fuzz harness
+(`-runs=0` against the seed corpus prints `DONE` with zero finds).
+A follow-up random walk seeded from these inputs cleared 437K runs
+in 46 s with zero crashes — the direct-codec panic-free + idempotence
+contract holds on every Appendix F path the seeds anchor.
 
 ## Regenerating
 

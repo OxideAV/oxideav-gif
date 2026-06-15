@@ -55,3 +55,9 @@ name = "plain_text"
 path = "fuzz_targets/plain_text.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "lzw"
+path = "fuzz_targets/lzw.rs"
+test = false
+doc = false

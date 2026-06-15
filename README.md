@@ -295,7 +295,7 @@ Implements every block type defined by the CompuServe specifications:
 
 ## Fuzzing
 
-`fuzz/fuzz_targets/` ships six `cargo-fuzz` harnesses, all asserting
+`fuzz/fuzz_targets/` ships seven `cargo-fuzz` harnesses, all asserting
 panic-freedom on arbitrary bytes:
 
 - `decode_panic_free` — strict `decode` entry point.
@@ -338,6 +338,26 @@ panic-freedom on arbitrary bytes:
   space for non-ASCII bytes, and the §23.f.i snapshot-and-revert
   path when a `RestorePrevious` GCE is attached to a Plain Text
   block (a path the decoder-side fuzzer reaches only by chance).
+- `lzw` — dedicated Appendix F LZW codec harness driving
+  `lzw::decode` / `lzw::encode` *directly* with fuzzer-controlled
+  parameters. Every decoder-facing harness reaches the LZW path only
+  through the §17/§18/§20 container parser, which constrains
+  `min_code_size` to the §22.c.i byte, the compressed bytes to
+  re-assembled §15 sub-blocks, and `expected_pixels` to exactly the
+  Image Descriptor's `width × height`. This harness instead slices the
+  fuzz input into a raw `min_code_size` (the full `u8` range — values
+  outside [2, 8] must `Err`, never panic on the `1 << min_code_size`
+  shift), a 32-bit `expected_pixels` selector (a hostile value near
+  `u32::MAX` against a tiny payload forces the
+  `expected_pixels.min(src.len() × MAX_TABLE_SIZE)` allocation clamp),
+  and an arbitrary compressed bitstream. Walks the §F.4 code-width
+  growth on code sequences the encoder would never emit, the KwKwK
+  self-reference branch on the first non-Clear code, the
+  over-dictionary (`code > next_code`) rejection, §F.1 Clear / §F.2 EOI
+  at arbitrary positions, the no-EOI-before-end `Err`, and the
+  deferred-clear 4096-entry saturation regime. Also asserts
+  `decode(encode(x)) == x` on every index buffer the encoder accepts,
+  and that `LzwEncoder::encode_frame` matches the free `lzw::encode`.
 
 Each harness keeps a local corpus under `fuzz/corpus/` (gitignored —
 the corpus is a per-machine flywheel, not a checked-in artifact).
@@ -353,15 +373,22 @@ trailer, §22.c.i LZW min-code-size = 12 (illegal per Appendix F's
 over-claims by 0x42 − 0x03 = 63 bytes. The `plain_text` target gets
 three §25-specific seeds — one bare in-bounds block, one with a §23
 `RestorePrevious` GCE attached, and one with `cell_width = 0` for the
-no-op render short-circuit. Bootstrap a fresh corpus with
+no-op render short-circuit. The `lzw` target gets six seeds: two
+well-formed mcs=2 streams (the 16-pixel `[0,1,2,3]×4` and 1-pixel
+fixtures from the `lzw::decode` unit tests), an illegal
+`min_code_size = 12`, a hostile `expected_pixels` near `u32::MAX`
+against a 2-byte payload (allocation-clamp), an out-of-range first
+code (KwKwK / uninitialised-prefix), and a Clear-only stream that ends
+before EOI. Bootstrap a fresh corpus with
 `cp -n fuzz/seed_corpus/<target>/* fuzz/corpus/<target>/`. Seeds are
 content-addressed by SHA-1 and regenerable via `tools/seedgen.py`
 (pure-Python, no GIF library invoked).
 
-All five harnesses run crash-free over long fuzzing sessions
+All seven harnesses run crash-free over long fuzzing sessions
 (the end-to-end `decode` target clears hundreds of thousands of
 executions per minute with the `optimize_frame_rects`
-compose-equivalence assert enabled in the loop).
+compose-equivalence assert enabled in the loop; the `lzw` target
+cleared 437K runs in 46 s with zero finds at round 318).
 
 ## Benchmarking
 
