@@ -246,7 +246,17 @@ Implements every block type defined by the CompuServe specifications:
   accessors over the same raw `Block::Application` data, which stays
   in `GifImage::blocks` for byte-stable round-trip;
   `GifImage::loop_count()` prefers NETSCAPE2.0 and falls back to
-  ANIMEXTS1.0 when NETSCAPE2.0 is absent.
+  ANIMEXTS1.0 when NETSCAPE2.0 is absent. Because the decoder collapses
+  the §15 sub-block boundaries into one flat `Application::data` buffer,
+  `LoopControl::from_application` / `AnimextsLoopControl::from_application`
+  re-frame that buffer by scanning for the known *Looping* (`0x01`) and
+  *Buffering* (`0x02`) sub-block IDs: an unrecognised sub-block (a future
+  NETSCAPE2.0 control or an encoder-private hint) interleaved ahead of the
+  *Looping* sub-block is resynced past one byte at a time rather than
+  abandoning the block, so the loop count is recovered regardless of
+  sub-block order. Each field is captured at its first complete
+  occurrence, keeping the typed view stable and `to_application`
+  round-trips byte-identical.
 - Encoder Global vs Local Color Table optimisation
   (`GifImage::optimize_color_tables`) — when every image frame
   carries the same palette, hoists it into the §18 Global Color

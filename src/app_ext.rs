@@ -155,24 +155,33 @@ impl LoopControl {
         // LE u32. We don't know the original §15 sub-block boundaries
         // — `Application::data` collapses the sequence — so we treat
         // each known ID as introducing its fixed-size payload.
+        //
+        // §15 sub-blocks are independent length-prefixed units, so the
+        // *Looping* and *Buffering* sub-blocks may appear in either
+        // order and a producer is free to interleave a sub-block this
+        // parser does not recognise (e.g. a future NETSCAPE2.0 control
+        // or an encoder-private hint). When the leading byte is neither
+        // a known ID nor the start of a complete known sub-block, we
+        // advance a single byte and keep scanning rather than abandoning
+        // the whole block — that recovers a *Looping* count even when it
+        // is preceded by an unrecognised sub-block, which the earlier
+        // "bail on first unknown ID" rule silently dropped. Each field
+        // is captured at its first complete occurrence; a later stray
+        // match cannot overwrite an already-resolved value, keeping the
+        // typed view stable.
         let mut out = LoopControl::default();
         let mut i = 0;
         while i < app.data.len() {
             match app.data[i] {
-                NETSCAPE_SUBBLOCK_LOOP => {
-                    if app.data.len() < i + 3 {
-                        // Truncated; surface what we have.
-                        break;
-                    }
+                NETSCAPE_SUBBLOCK_LOOP if out.loop_count.is_none() && i + 3 <= app.data.len() => {
                     let lo = app.data[i + 1] as u16;
                     let hi = app.data[i + 2] as u16;
                     out.loop_count = Some(lo | (hi << 8));
                     i += 3;
                 }
-                NETSCAPE_SUBBLOCK_BUFFER => {
-                    if app.data.len() < i + 5 {
-                        break;
-                    }
+                NETSCAPE_SUBBLOCK_BUFFER
+                    if out.buffer_size.is_none() && i + 5 <= app.data.len() =>
+                {
                     let b = [
                         app.data[i + 1],
                         app.data[i + 2],
@@ -183,9 +192,11 @@ impl LoopControl {
                     i += 5;
                 }
                 _ => {
-                    // Unknown sub-block ID — bail rather than risk
-                    // misframing the rest of the buffer.
-                    break;
+                    // Unknown sub-block ID, an already-captured field, or
+                    // a truncated tail of a known sub-block: resync by a
+                    // single byte instead of misframing or abandoning the
+                    // remainder of the buffer.
+                    i += 1;
                 }
             }
         }
@@ -243,20 +254,24 @@ impl AnimextsLoopControl {
         if &app.identifier != ANIMEXTS_IDENTIFIER || &app.auth_code != ANIMEXTS_AUTH_CODE {
             return None;
         }
+        // As in [`LoopControl::from_application`], the §15 sub-block
+        // boundaries are already collapsed, so we scan the flat payload
+        // for the *Looping* sub-block ID and resync a single byte past
+        // anything we do not recognise rather than bailing at the first
+        // unknown byte — this recovers a *Looping* count even when an
+        // unrecognised sub-block precedes it. The first complete
+        // occurrence wins.
         let mut out = AnimextsLoopControl::default();
         let mut i = 0;
         while i < app.data.len() {
             match app.data[i] {
-                NETSCAPE_SUBBLOCK_LOOP => {
-                    if app.data.len() < i + 3 {
-                        break;
-                    }
+                NETSCAPE_SUBBLOCK_LOOP if out.loop_count.is_none() && i + 3 <= app.data.len() => {
                     let lo = app.data[i + 1] as u16;
                     let hi = app.data[i + 2] as u16;
                     out.loop_count = Some(lo | (hi << 8));
                     i += 3;
                 }
-                _ => break,
+                _ => i += 1,
             }
         }
         Some(out)
@@ -681,6 +696,112 @@ mod tests {
         // LoopControl checks identifier+auth strictly, so ANIMEXTS1.0
         // must NOT decode as a NETSCAPE2.0 view.
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn netscape_loop_recovered_after_unknown_subblock() {
+        // §15 sub-blocks are independent units; a producer may place a
+        // sub-block this parser does not recognise (here a one-byte 0x42
+        // "id" stand-in) ahead of the *Looping* sub-block. The earlier
+        // "bail on first unknown ID" rule dropped the loop count; the
+        // resync scan must still recover it.
+        let app = Application {
+            identifier: *NETSCAPE_IDENTIFIER,
+            auth_code: *NETSCAPE_AUTH_CODE,
+            data: vec![0x42, NETSCAPE_SUBBLOCK_LOOP, 0x09, 0x00],
+        };
+        let parsed = LoopControl::from_application(&app).unwrap();
+        assert_eq!(parsed.loop_count, Some(9));
+        assert_eq!(parsed.buffer_size, None);
+    }
+
+    #[test]
+    fn netscape_buffer_then_loop_order_independent() {
+        // Buffering sub-block first, then Looping. Both must surface
+        // regardless of order.
+        let mut data = vec![NETSCAPE_SUBBLOCK_BUFFER];
+        data.extend_from_slice(&0x0000_0400u32.to_le_bytes());
+        data.push(NETSCAPE_SUBBLOCK_LOOP);
+        data.push(0x03);
+        data.push(0x00);
+        let app = Application {
+            identifier: *NETSCAPE_IDENTIFIER,
+            auth_code: *NETSCAPE_AUTH_CODE,
+            data,
+        };
+        let parsed = LoopControl::from_application(&app).unwrap();
+        assert_eq!(parsed.loop_count, Some(3));
+        assert_eq!(parsed.buffer_size, Some(0x0400));
+    }
+
+    #[test]
+    fn netscape_first_loop_occurrence_wins() {
+        // Two *Looping* sub-blocks: the first complete occurrence must
+        // be the one surfaced; a later stray match cannot overwrite it.
+        let app = Application {
+            identifier: *NETSCAPE_IDENTIFIER,
+            auth_code: *NETSCAPE_AUTH_CODE,
+            data: vec![
+                NETSCAPE_SUBBLOCK_LOOP,
+                0x01,
+                0x00,
+                NETSCAPE_SUBBLOCK_LOOP,
+                0x02,
+                0x00,
+            ],
+        };
+        let parsed = LoopControl::from_application(&app).unwrap();
+        assert_eq!(parsed.loop_count, Some(1));
+    }
+
+    #[test]
+    fn netscape_trailing_unknown_after_loop_is_ignored() {
+        // A recognised *Looping* sub-block followed by trailing bytes
+        // that are not a known sub-block: the loop count is captured and
+        // the tail is harmlessly resynced away.
+        let app = Application {
+            identifier: *NETSCAPE_IDENTIFIER,
+            auth_code: *NETSCAPE_AUTH_CODE,
+            data: vec![NETSCAPE_SUBBLOCK_LOOP, 0x07, 0x00, 0xAA, 0xBB],
+        };
+        let parsed = LoopControl::from_application(&app).unwrap();
+        assert_eq!(parsed.loop_count, Some(7));
+    }
+
+    #[test]
+    fn animexts_loop_recovered_after_unknown_subblock() {
+        let app = Application {
+            identifier: *ANIMEXTS_IDENTIFIER,
+            auth_code: *ANIMEXTS_AUTH_CODE,
+            data: vec![0x42, NETSCAPE_SUBBLOCK_LOOP, 0x04, 0x00],
+        };
+        let parsed = AnimextsLoopControl::from_application(&app).unwrap();
+        assert_eq!(parsed.loop_count, Some(4));
+    }
+
+    #[test]
+    fn empty_payload_yields_default_view() {
+        // A NETSCAPE2.0 / ANIMEXTS1.0 block with a zero-byte payload is
+        // structurally valid §26 and must surface as the empty typed
+        // view rather than panic on the now byte-at-a-time scan.
+        let ns = Application {
+            identifier: *NETSCAPE_IDENTIFIER,
+            auth_code: *NETSCAPE_AUTH_CODE,
+            data: vec![],
+        };
+        assert_eq!(
+            LoopControl::from_application(&ns).unwrap(),
+            LoopControl::default()
+        );
+        let ax = Application {
+            identifier: *ANIMEXTS_IDENTIFIER,
+            auth_code: *ANIMEXTS_AUTH_CODE,
+            data: vec![],
+        };
+        assert_eq!(
+            AnimextsLoopControl::from_application(&ax).unwrap(),
+            AnimextsLoopControl::default()
+        );
     }
 
     #[test]

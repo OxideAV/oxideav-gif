@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `app_ext::LoopControl::from_application` and
+  `AnimextsLoopControl::from_application` now resync past unrecognised
+  bytes instead of abandoning the whole block at the first unknown
+  sub-block ID. Because the decoder collapses the §15 sub-block
+  boundaries into one flat `Application::data` buffer, the parser
+  re-frames the payload by scanning for the known *Looping* (`0x01`) and
+  *Buffering* (`0x02`) sub-block IDs; the previous "bail on first unknown
+  ID" rule silently dropped a *Looping* loop count whenever a sub-block
+  this parser does not recognise (e.g. a future NETSCAPE2.0 control or an
+  encoder-private hint) preceded it. The scan now advances a single byte
+  past anything it cannot frame and keeps looking, so the *Looping* count
+  is recovered regardless of sub-block order or interleaved unknown
+  sub-blocks. Each field is captured at its first complete occurrence (a
+  later stray match cannot overwrite a resolved value), so the typed view
+  stays stable and the existing `to_application` round-trips are
+  unaffected. New `app_ext` unit tests pin loop-recovery-after-unknown,
+  buffer-then-loop ordering, first-occurrence-wins, trailing-unknown, and
+  the empty-payload default-view shapes.
+
 ### Added
 
 - `fuzz/fuzz_targets/lzw.rs` — dedicated Appendix F LZW codec fuzz
