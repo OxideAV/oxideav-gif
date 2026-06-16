@@ -229,6 +229,84 @@ impl Block {
             Block::PlainText { .. } | Block::Comment(_) | Block::Application(_) => Version::Gif89a,
         }
     }
+
+    /// §12 "Blocks, Extensions and Scope" classification for this block.
+    ///
+    /// The spec groups every block into one of three classes and
+    /// assigns each a label-byte range so that "decoders can handle
+    /// block scope by appropriately identifying block labels, even when
+    /// the block itself cannot be processed":
+    ///
+    /// * **Graphic-Rendering** — labels `0x00..=0x7F` excluding the
+    ///   §27 Trailer `0x3B`. §12 names "the Image Descriptor and the
+    ///   Plain Text Extension"; their on-wire labels are the §20.c.i
+    ///   Image Separator `0x2C` and the §25.c.ii Plain Text Label
+    ///   `0x01`, both inside `0x00..=0x7F`.
+    /// * **Control** — labels `0x80..=0xF9`. §12 names "the Header, the
+    ///   Logical Screen Descriptor, the Graphic Control Extension and
+    ///   the Trailer"; of the variants this enum models, none is a
+    ///   Control block (the §23 Graphic Control Extension is stored
+    ///   *attached* to the graphic-rendering block it scopes, not as a
+    ///   free-standing [`Block`], and the Header / LSD / Trailer are
+    ///   structural fields of [`GifImage`], not list entries).
+    /// * **Special-Purpose** — labels `0xFA..=0xFF`. §12 names "the
+    ///   Comment Extension and the Application Extension"; their labels
+    ///   are the §24.c.ii Comment Label `0xFE` and the §26.c.ii
+    ///   Application Extension Label `0xFF`.
+    ///
+    /// §12: "Special Purpose blocks do not delimit the scope of any
+    /// Control blocks; Special Purpose blocks are transparent to the
+    /// decoding process." A renderer can therefore skip every
+    /// [`BlockClass::SpecialPurpose`] block without affecting how the
+    /// §23 Graphic Control Extension scopes the graphic-rendering
+    /// blocks around it.
+    pub fn class(&self) -> BlockClass {
+        match self {
+            Block::Image(_) | Block::PlainText { .. } => BlockClass::GraphicRendering,
+            Block::Comment(_) | Block::Application(_) => BlockClass::SpecialPurpose,
+        }
+    }
+
+    /// `true` when this block is a §12 Graphic-Rendering block (a §20
+    /// Image or a §25 Plain Text Extension) — one that "contains
+    /// information and data used to render a graphic on the display
+    /// device".
+    pub fn is_graphic_rendering(&self) -> bool {
+        self.class() == BlockClass::GraphicRendering
+    }
+
+    /// `true` when this block is a §12 Special-Purpose block (a §24
+    /// Comment or a §26 Application Extension) — one that is "neither
+    /// used to control the process of the Data Stream nor [does it]
+    /// contain information or data used to render a graphic", and so is
+    /// "transparent to the decoding process".
+    pub fn is_special_purpose(&self) -> bool {
+        self.class() == BlockClass::SpecialPurpose
+    }
+}
+
+/// §12 "Blocks, Extensions and Scope" block class.
+///
+/// GIF89a §12 partitions every block into three groups by purpose and
+/// label-byte range. The third group — Control — covers the Header,
+/// Logical Screen Descriptor, §23 Graphic Control Extension and §27
+/// Trailer; in this crate those are structural fields of [`GifImage`]
+/// or attached to the graphic-rendering block they scope, so a
+/// free-standing [`Block`] is never Control. The variant is still
+/// modelled for completeness and forward-compatibility with the §12
+/// taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockClass {
+    /// §12 Graphic-Rendering: §20 Image Descriptor, §25 Plain Text
+    /// Extension. Labels `0x00..=0x7F` (excluding §27 Trailer `0x3B`).
+    GraphicRendering,
+    /// §12 Control: Header, §18 Logical Screen Descriptor, §23 Graphic
+    /// Control Extension, §27 Trailer. Labels `0x80..=0xF9`.
+    Control,
+    /// §12 Special-Purpose: §24 Comment Extension, §26 Application
+    /// Extension. Labels `0xFA..=0xFF`. "Transparent to the decoding
+    /// process."
+    SpecialPurpose,
 }
 
 impl Frame {
@@ -1253,6 +1331,65 @@ impl GifImage {
     /// scanning past corrupted image data.
     pub fn frame_count(&self) -> usize {
         self.frames().count()
+    }
+
+    /// Count of §12 Graphic-Rendering blocks in this stream — every §20
+    /// Image plus every §25 Plain Text Extension.
+    ///
+    /// Unlike [`Self::frame_count`] (§20 Images only), this includes
+    /// §25 Plain Text blocks, which §12 also classifies as
+    /// graphic-rendering ("the Image Descriptor and the Plain Text
+    /// Extension"). It is the number of blocks that actually paint onto
+    /// the §18 Logical Screen during [`crate::compose`].
+    pub fn graphic_rendering_block_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter(|b| b.is_graphic_rendering())
+            .count()
+    }
+
+    /// Count of §12 Special-Purpose blocks in this stream — every §24
+    /// Comment plus every §26 Application Extension.
+    ///
+    /// §12: Special-Purpose blocks "are neither used to control the
+    /// process of the Data Stream nor do they contain information or
+    /// data used to render a graphic", and are "transparent to the
+    /// decoding process". A renderer can skip all of them; this count
+    /// tells a consumer how many metadata-only blocks the stream
+    /// carries without walking the §24 / §26 accessors separately.
+    pub fn special_purpose_block_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter(|b| b.is_special_purpose())
+            .count()
+    }
+
+    /// `true` when this stream is a §11 "palette-loader" Data Stream:
+    /// one that carries a §18 Global Color Table but **no**
+    /// graphic-rendering block at all.
+    ///
+    /// §11 "About Color Tables" defines this shape explicitly: "The
+    /// Definition of the GIF Format allows for a Data Stream to contain
+    /// only the Header, the Logical Screen Descriptor, a Global Color
+    /// Table and the GIF Trailer. Such a Data Stream would be used to
+    /// load a decoder with a Global Color Table, in preparation for
+    /// subsequent Data Streams without a color table at all." §11 also
+    /// recommends a decoder "save the last Global Color Table used
+    /// until another Global Color Table is encountered", so a later
+    /// Data Stream with no table of its own renders against the table a
+    /// palette-loader stream installed.
+    ///
+    /// This query returns `true` only when a §18 Global Color Table is
+    /// present *and* the stream has no §20 Image and no §25 Plain Text
+    /// Extension (§24 Comment / §26 Application Extension blocks are
+    /// §12 "transparent" and do not disqualify the loader shape). The
+    /// strict [`crate::decode`] entry point rejects an image-less
+    /// stream, so this shape arises from [`crate::decode_lenient`] or
+    /// from a freshly-built [`GifImage`]; the query lets a multi-stream
+    /// consumer recognise a table-install stream before discarding it
+    /// as "frameless".
+    pub fn is_palette_loader_stream(&self) -> bool {
+        self.global_palette.is_some() && self.graphic_rendering_block_count() == 0
     }
 
     /// Decode the §18.c.viii Pixel Aspect Ratio field into the
@@ -4212,5 +4349,98 @@ mod tests {
         assert_eq!(paired_gce, Some(gce));
         let delay = img.frame_delays().next().unwrap();
         assert_eq!(delay, Duration::from_millis(130));
+    }
+
+    fn pt_block() -> Block {
+        plain_text_block(8, 8, 8, 8, b"hi".to_vec())
+    }
+
+    fn app_block() -> Block {
+        Block::Application(Application {
+            identifier: *b"NETSCAPE",
+            auth_code: *b"2.0",
+            data: vec![0x01, 0x00, 0x00],
+        })
+    }
+
+    /// §12 classification: §20 Image and §25 Plain Text are
+    /// Graphic-Rendering; §24 Comment and §26 Application are
+    /// Special-Purpose.
+    #[test]
+    fn block_class_matches_section_12_taxonomy() {
+        assert_eq!(
+            Block::Image(frame_with(None)).class(),
+            BlockClass::GraphicRendering
+        );
+        assert_eq!(pt_block().class(), BlockClass::GraphicRendering);
+        assert_eq!(
+            Block::Comment(b"c".to_vec()).class(),
+            BlockClass::SpecialPurpose
+        );
+        assert_eq!(app_block().class(), BlockClass::SpecialPurpose);
+
+        assert!(Block::Image(frame_with(None)).is_graphic_rendering());
+        assert!(pt_block().is_graphic_rendering());
+        assert!(!Block::Image(frame_with(None)).is_special_purpose());
+
+        assert!(Block::Comment(b"c".to_vec()).is_special_purpose());
+        assert!(app_block().is_special_purpose());
+        assert!(!app_block().is_graphic_rendering());
+    }
+
+    /// §12 stream-level rollups: graphic-rendering counts §20 + §25,
+    /// special-purpose counts §24 + §26.
+    #[test]
+    fn block_class_rollups_partition_the_stream() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),
+                pt_block(),
+                Block::Comment(b"hello".to_vec()),
+                app_block(),
+            ],
+        );
+        // §20 Image + §25 Plain Text are graphic-rendering...
+        assert_eq!(img.graphic_rendering_block_count(), 2);
+        // ...while frame_count is §20 Images only.
+        assert_eq!(img.frame_count(), 1);
+        // §24 Comment + §26 Application are special-purpose.
+        assert_eq!(img.special_purpose_block_count(), 2);
+        // Every block is partitioned into exactly one of the two
+        // surfaced classes (no free-standing Control block exists).
+        assert_eq!(
+            img.graphic_rendering_block_count() + img.special_purpose_block_count(),
+            img.blocks.len()
+        );
+    }
+
+    /// §11 palette-loader: a GCT-bearing stream with no
+    /// graphic-rendering block is a table-install Data Stream;
+    /// §12-transparent Comment / Application blocks do not disqualify
+    /// it.
+    #[test]
+    fn palette_loader_stream_section_11() {
+        // GCT + Trailer only (no blocks) — the canonical §11 loader.
+        let loader = base_image(Some(pal3()), vec![]);
+        assert!(loader.is_palette_loader_stream());
+
+        // GCT + only special-purpose blocks — still a loader (§12
+        // "transparent to the decoding process").
+        let loader_with_meta = base_image(
+            Some(pal3()),
+            vec![Block::Comment(b"x".to_vec()), app_block()],
+        );
+        assert!(loader_with_meta.is_palette_loader_stream());
+
+        // A graphic-rendering block disqualifies it.
+        let with_image = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(!with_image.is_palette_loader_stream());
+        let with_text = base_image(Some(pal3()), vec![pt_block()]);
+        assert!(!with_text.is_palette_loader_stream());
+
+        // No GCT — not a loader even with zero frames.
+        let no_gct = base_image(None, vec![]);
+        assert!(!no_gct.is_palette_loader_stream());
     }
 }

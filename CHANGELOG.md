@@ -25,6 +25,27 @@
 
 ### Added
 
+- §12 "Blocks, Extensions and Scope" classification + §11 palette-loader
+  recognition. `Block::class()` returns the §12 `BlockClass`
+  (`GraphicRendering` for §20 Image / §25 Plain Text, `SpecialPurpose`
+  for §24 Comment / §26 Application; `Control` modelled for completeness
+  — Header / §18 LSD / §23 GCE / §27 Trailer are structural fields or
+  attached, never free-standing `Block`s). `Block::is_graphic_rendering()`
+  and `is_special_purpose()` are the boolean forms;
+  `GifImage::graphic_rendering_block_count()` (§20 + §25) and
+  `special_purpose_block_count()` (§24 + §26) are the stream-level
+  rollups, partitioning the block list exactly (no §12 Control block is
+  ever a list entry). `GifImage::is_palette_loader_stream()` recognises
+  the §11 "About Color Tables" table-install shape — a §18 Global Color
+  Table present with no graphic-rendering block (§12-transparent Comment
+  / Application blocks do not disqualify it), the "Header, Logical Screen
+  Descriptor, a Global Color Table and the GIF Trailer" stream §11
+  describes for loading a decoder with a palette ahead of subsequent
+  tableless Data Streams. `BlockClass` is re-exported at the crate root.
+  New `image` unit tests pin the §12 taxonomy, the rollup partition, and
+  the §11 loader recognition (GCT-only, GCT+metadata-only,
+  image/plain-text disqualification, no-GCT negative).
+
 - `fuzz/fuzz_targets/lzw.rs` — dedicated Appendix F LZW codec fuzz
   harness (round 318, depth-mode fuzz). The decoder-facing harnesses
   (`decode`, `decode_panic_free`, `decode_lenient_panic_free`,

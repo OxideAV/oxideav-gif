@@ -97,6 +97,27 @@ Implements every block type defined by the CompuServe specifications:
   query so a consumer can validate a decoded or freshly-built stream
   before attempting to render. Streams with no graphic-rendering block
   conform vacuously, matching the shape of `all_frames_interlaced()`.
+- §12 "Blocks, Extensions and Scope" classification. `Block::class()`
+  returns the §12 `BlockClass` for a block — `GraphicRendering` for a
+  §20 Image or §25 Plain Text (labels `0x00..=0x7F` excl. §27 Trailer),
+  `SpecialPurpose` for a §24 Comment or §26 Application (labels
+  `0xFA..=0xFF`), with the `Control` variant modelled for completeness
+  (Header / §18 LSD / §23 GCE / §27 Trailer are structural fields or
+  attached, never free-standing `Block`s). `Block::is_graphic_rendering()`
+  / `is_special_purpose()` are the boolean forms;
+  `GifImage::graphic_rendering_block_count()` (§20 + §25, unlike
+  `frame_count()`'s §20-only count) and `special_purpose_block_count()`
+  (§24 + §26) are the stream-level rollups — every block partitions into
+  exactly one of the two, since no §12 Control block is ever a list
+  entry. §11 "About Color Tables" palette-loader recognition:
+  `GifImage::is_palette_loader_stream()` is `true` for the §11
+  table-install shape (a §18 Global Color Table present with **no**
+  graphic-rendering block — §12-transparent Comment / Application blocks
+  do not disqualify it), the "Header, Logical Screen Descriptor, a
+  Global Color Table and the GIF Trailer" stream §11 describes for
+  loading a decoder with a palette ahead of subsequent tableless Data
+  Streams. The strict `decode` entry point rejects an image-less stream,
+  so this arises from `decode_lenient` or a freshly-built `GifImage`.
 - Variable-Length-Code LZW compression (Appendix F). The codec pair
   ships in two flavours: the stateless `lzw::encode` / `lzw::decode`
   free functions for one-shot calls, and `lzw::LzwEncoder` which
