@@ -189,7 +189,18 @@ Implements every block type defined by the CompuServe specifications:
   whether every §25.c grid is an integer number of character cells
   across and down — both surface §25.e *recommendations* as boolean
   queries so a strict authoring pipeline can gate on them, while the
-  encoder itself never enforces a recommendation.
+  encoder itself never enforces a recommendation. The `PlainText`
+  grid-geometry accessors decode the §25.a cell layout: `grid_columns()`
+  / `grid_rows()` floor the §25.c Text Grid Width/Height by the
+  Character Cell Width/Height (§25.a "fractional cells must be
+  discarded"; `0` on a zero cell dimension), `grid_cell_count()` is
+  their product, and `rendered_char_count()` =
+  `min(text.len(), grid_cell_count())` is the §25.a "rendered until the
+  end of data is reached or the character grid is filled" draw count.
+  `text_overflows_grid()` and `has_empty_cells()` name the over- and
+  under-fill edges, and `GifImage::all_plain_texts_fit_grid()` rolls the
+  overflow query up to the stream so a re-encoding pipeline can confirm
+  no Plain Text data is silently dropped before round-tripping.
 - Application Extension (§26), with namespace classification.
   `app_ext::ApplicationKind` classifies an Application block by its
   §26.c.iv / §26.c.v identifier + authentication-code key into the five

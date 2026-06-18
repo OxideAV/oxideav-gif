@@ -25,6 +25,18 @@
 
 ### Added
 
+- §25 Plain Text Extension grid-geometry accessors on `PlainText`.
+  `grid_columns()` / `grid_rows()` decode the §25.c Text Grid
+  Width/Height against the Character Cell Width/Height into whole-cell
+  counts (floor; §25.a "fractional cells must be discarded", and `0`
+  when the cell dimension is `0`); `grid_cell_count()` is their product.
+  `rendered_char_count()` is `min(text.len(), grid_cell_count())` — the
+  §25.a "rendered until the end of data is reached or the character grid
+  is filled" draw count — with `text_overflows_grid()` and
+  `has_empty_cells()` as the over/under-fill edge queries.
+  `GifImage::all_plain_texts_fit_grid()` is the stream-level rollup
+  confirming no block drops textual data off the bottom/right of its
+  grid.
 - §26 Application Extension namespace classification. The new
   `app_ext::ApplicationKind` enum classifies an `Application` block by
   its §26.c.iv / §26.c.v identifier + authentication-code key into the

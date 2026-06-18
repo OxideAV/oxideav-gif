@@ -155,6 +155,97 @@ pub struct PlainText {
     pub text: Vec<u8>,
 }
 
+impl PlainText {
+    /// Number of whole character cells that span the text grid
+    /// horizontally — the §25.a "Character Grid contains an integral
+    /// number of cells" column count.
+    ///
+    /// §25.a: "in the case that the cell dimensions do not allow for an
+    /// integral number, fractional cells must be discarded". This is
+    /// therefore the floor of `width / cell_width` (the §25.c.vi Text
+    /// Grid Width divided by the §25.c.viii Character Cell Width); the
+    /// partial cell at the right edge, if any, is dropped. Returns `0`
+    /// when `cell_width` is `0` (the §25 grid layout is undefined — no
+    /// cell can be laid out, so the grid holds no columns).
+    pub fn grid_columns(&self) -> u16 {
+        if self.cell_width == 0 {
+            0
+        } else {
+            self.width / self.cell_width as u16
+        }
+    }
+
+    /// Number of whole character cells that span the text grid
+    /// vertically — the §25.a row count, the floor of `height /
+    /// cell_height` (the §25.c.vii Text Grid Height divided by the
+    /// §25.c.ix Character Cell Height) with the partial cell at the
+    /// bottom edge discarded per §25.a. Returns `0` when `cell_height`
+    /// is `0`.
+    pub fn grid_rows(&self) -> u16 {
+        if self.cell_height == 0 {
+            0
+        } else {
+            self.height / self.cell_height as u16
+        }
+    }
+
+    /// Total number of character cells the §25 grid holds — the
+    /// §25.a "integral number of cells", `grid_columns() *
+    /// grid_rows()`.
+    ///
+    /// This is the upper bound on how many §25.c.xii Plain Text Data
+    /// bytes a §25.a-conforming renderer draws: "Text data is rendered
+    /// until the end of data is reached or the character grid is
+    /// filled." A grid with a zero §25.c.viii/ix cell dimension holds
+    /// no cells and returns `0`. The count is computed in `u32` so a
+    /// full `65535 / 1`-cell grid in each axis cannot overflow.
+    pub fn grid_cell_count(&self) -> u32 {
+        self.grid_columns() as u32 * self.grid_rows() as u32
+    }
+
+    /// Number of §25.c.xii Plain Text Data bytes a §25.a-conforming
+    /// renderer actually draws — `min(text.len(), grid_cell_count())`.
+    ///
+    /// §25.a: "The data characters are taken sequentially from the data
+    /// portion of the block and rendered within a cell … Text data is
+    /// rendered until the end of data is reached or the character grid
+    /// is filled." One character per cell, so once every cell holds a
+    /// character the remaining bytes are not rendered. When the text is
+    /// shorter than the grid, every byte is drawn and the trailing
+    /// cells stay empty (see [`Self::has_empty_cells`]).
+    pub fn rendered_char_count(&self) -> u32 {
+        let cells = self.grid_cell_count();
+        let len = self.text.len() as u64;
+        len.min(cells as u64) as u32
+    }
+
+    /// `true` when the §25.c.xii Plain Text Data carries more bytes
+    /// than the grid has cells, so a §25.a-conforming renderer leaves
+    /// the trailing bytes undrawn ("rendered until … the character grid
+    /// is filled").
+    ///
+    /// The undrawn tail is `text.len() - grid_cell_count()` bytes long.
+    /// A grid with a zero cell dimension holds no cells, so any
+    /// non-empty text overflows it.
+    pub fn text_overflows_grid(&self) -> bool {
+        self.text.len() as u64 > self.grid_cell_count() as u64
+    }
+
+    /// `true` when the §25 grid has cells that no §25.c.xii character
+    /// fills — `grid_cell_count() > text.len()`, the converse edge of
+    /// [`Self::text_overflows_grid`].
+    ///
+    /// §25.a renders "until the end of data is reached", so when the
+    /// text underfills the grid the remaining cells are left to the
+    /// renderer's background treatment (§25.c.xi Text Background Color
+    /// Index). An exactly-filled grid (`text.len() == grid_cell_count`)
+    /// has neither empty cells nor overflow; both this and
+    /// [`Self::text_overflows_grid`] are then `false`.
+    pub fn has_empty_cells(&self) -> bool {
+        (self.grid_cell_count() as u64) > self.text.len() as u64
+    }
+}
+
 /// Application Extension (§26).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Application {
@@ -816,6 +907,21 @@ impl GifImage {
                 && pt.width % pt.cell_width as u16 == 0
                 && pt.height % pt.cell_height as u16 == 0
         })
+    }
+
+    /// `true` when no §25 Plain Text Extension in the stream overflows
+    /// its grid — every block's §25.c.xii Plain Text Data fits within
+    /// its [`PlainText::grid_cell_count`], so a §25.a-conforming
+    /// renderer draws every byte ("rendered until the end of data is
+    /// reached or the character grid is filled" never short-circuits on
+    /// the grid-filled clause).
+    ///
+    /// Streams with no Plain Text Extensions trivially conform. This is
+    /// the stream-level rollup of [`PlainText::text_overflows_grid`] for
+    /// a re-encoding pipeline that wants to confirm no textual data is
+    /// silently dropped before round-tripping a Plain Text block.
+    pub fn all_plain_texts_fit_grid(&self) -> bool {
+        self.plain_texts().all(|(pt, _)| !pt.text_overflows_grid())
     }
 
     /// Yield each §20 Image / §25 Plain Text graphic-rendering block's
@@ -4490,5 +4596,96 @@ mod tests {
         // No GCT — not a loader even with zero frames.
         let no_gct = base_image(None, vec![]);
         assert!(!no_gct.is_palette_loader_stream());
+    }
+
+    fn pt(width: u16, height: u16, cell_width: u8, cell_height: u8, text: &[u8]) -> PlainText {
+        match plain_text_block(width, height, cell_width, cell_height, text.to_vec()) {
+            Block::PlainText { params, .. } => params,
+            _ => unreachable!(),
+        }
+    }
+
+    /// §25.a grid geometry: integral cells, fractional discarded.
+    #[test]
+    fn plain_text_grid_geometry_section_25a() {
+        // 24x16 grid, 8x8 cells → 3 columns x 2 rows = 6 cells.
+        let p = pt(24, 16, 8, 8, b"abcdef");
+        assert_eq!(p.grid_columns(), 3);
+        assert_eq!(p.grid_rows(), 2);
+        assert_eq!(p.grid_cell_count(), 6);
+
+        // §25.a "fractional cells must be discarded": 25/8 = 3 columns,
+        // not 3.125; 17/8 = 2 rows.
+        let frac = pt(25, 17, 8, 8, b"");
+        assert_eq!(frac.grid_columns(), 3);
+        assert_eq!(frac.grid_rows(), 2);
+        assert_eq!(frac.grid_cell_count(), 6);
+
+        // Zero cell dimension → undefined layout → no cells.
+        let zero_w = pt(24, 16, 0, 8, b"x");
+        assert_eq!(zero_w.grid_columns(), 0);
+        assert_eq!(zero_w.grid_cell_count(), 0);
+        let zero_h = pt(24, 16, 8, 0, b"x");
+        assert_eq!(zero_h.grid_rows(), 0);
+        assert_eq!(zero_h.grid_cell_count(), 0);
+    }
+
+    /// §25.a "rendered until the end of data is reached or the
+    /// character grid is filled".
+    #[test]
+    fn plain_text_rendered_char_count_section_25a() {
+        // 6 cells, 4 chars → all 4 drawn, 2 cells empty.
+        let under = pt(24, 16, 8, 8, b"abcd");
+        assert_eq!(under.rendered_char_count(), 4);
+        assert!(!under.text_overflows_grid());
+        assert!(under.has_empty_cells());
+
+        // 6 cells, exactly 6 chars → all drawn, no empty cells, no overflow.
+        let exact = pt(24, 16, 8, 8, b"abcdef");
+        assert_eq!(exact.rendered_char_count(), 6);
+        assert!(!exact.text_overflows_grid());
+        assert!(!exact.has_empty_cells());
+
+        // 6 cells, 9 chars → only 6 drawn, 3 overflow.
+        let over = pt(24, 16, 8, 8, b"abcdefghi");
+        assert_eq!(over.rendered_char_count(), 6);
+        assert!(over.text_overflows_grid());
+        assert!(!over.has_empty_cells());
+
+        // Zero-cell grid: any non-empty text overflows; empty text neither.
+        let zero = pt(24, 16, 0, 8, b"x");
+        assert_eq!(zero.rendered_char_count(), 0);
+        assert!(zero.text_overflows_grid());
+        let zero_empty = pt(24, 16, 0, 8, b"");
+        assert!(!zero_empty.text_overflows_grid());
+        assert!(!zero_empty.has_empty_cells());
+    }
+
+    /// Stream-level rollup of §25.a overflow.
+    #[test]
+    fn all_plain_texts_fit_grid_rollup() {
+        // No Plain Text blocks → trivially conforms.
+        let none = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert!(none.all_plain_texts_fit_grid());
+
+        // Every block fits.
+        let fits = base_image(
+            Some(pal3()),
+            vec![
+                plain_text_block(24, 16, 8, 8, b"abcd".to_vec()),
+                plain_text_block(8, 8, 8, 8, b"x".to_vec()),
+            ],
+        );
+        assert!(fits.all_plain_texts_fit_grid());
+
+        // One block overflows → whole stream fails.
+        let overflows = base_image(
+            Some(pal3()),
+            vec![
+                plain_text_block(24, 16, 8, 8, b"abcd".to_vec()),
+                plain_text_block(8, 8, 8, 8, b"toolong".to_vec()),
+            ],
+        );
+        assert!(!overflows.all_plain_texts_fit_grid());
     }
 }
