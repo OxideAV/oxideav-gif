@@ -425,6 +425,100 @@ impl ExifMetadata {
     }
 }
 
+/// Classification of a §26 Application Extension by its 8-byte
+/// identifier + 3-byte authentication code (§26.c.iv / §26.c.v).
+///
+/// The CompuServe GIF89a spec defines no concrete application
+/// extensions — every block is opaque to a strict-spec decoder. This
+/// enum names the five ecosystem-defined shapes that achieved
+/// cross-decoder de-facto interoperability (the ones with typed views
+/// in this module) and folds everything else into [`Self::Unknown`].
+///
+/// It is a *classification by namespace*, not a payload parse: a
+/// [`Self::Netscape`] block is one whose identifier+auth code match the
+/// NETSCAPE2.0 namespace, regardless of which sub-blocks the payload
+/// actually carries (a NETSCAPE2.0 block with no recognised sub-block
+/// is still classified `Netscape`). Use [`LoopControl::from_application`]
+/// et al. when the *payload* matters.
+///
+/// Matching follows each typed view's own rule:
+///
+/// * NETSCAPE2.0 / ANIMEXTS1.0 / XMP / ICC — both the identifier **and**
+///   the authentication code must match (the auth code is part of the
+///   §26 namespace key for these).
+/// * EXIF — identifier-only, matching [`ExifMetadata::from_application`].
+///   Real-world EXIF producers pin only the first auth byte at `0xFF`
+///   and pad the remaining two arbitrarily, so the auth code is not part
+///   of the EXIF match key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ApplicationKind {
+    /// NETSCAPE2.0 (`b"NETSCAPE"` + `b"2.0"`) — animation looping /
+    /// buffering. See [`LoopControl`].
+    Netscape,
+    /// ANIMEXTS1.0 (`b"ANIMEXTS"` + `b"1.0"`) — legacy looping. See
+    /// [`AnimextsLoopControl`].
+    Animexts,
+    /// Adobe XMP packet (`b"XMP Data"` + `b"XMP"`). See [`XmpPacket`].
+    Xmp,
+    /// ICC colour profile (`b"ICCRGBG1"` + `b"012"`). See [`IccProfile`].
+    Icc,
+    /// EXIF metadata (`b"Exif    "`, identifier-only). See
+    /// [`ExifMetadata`].
+    Exif,
+    /// Any Application Extension whose identifier+auth code does not
+    /// match one of the recognised ecosystem namespaces above. The raw
+    /// [`Application`] is still preserved in
+    /// [`crate::GifImage::blocks`] for byte-stable round-trip.
+    Unknown,
+}
+
+impl ApplicationKind {
+    /// Classify an [`Application`] block by its §26 namespace key.
+    ///
+    /// Returns the matching recognised [`ApplicationKind`], or
+    /// [`ApplicationKind::Unknown`] when the identifier+auth code is not
+    /// one of the five ecosystem-defined shapes. See the type-level docs
+    /// for the per-kind matching rule (auth-code-sensitive for all but
+    /// EXIF).
+    pub fn classify(app: &Application) -> Self {
+        if &app.identifier == NETSCAPE_IDENTIFIER && &app.auth_code == NETSCAPE_AUTH_CODE {
+            ApplicationKind::Netscape
+        } else if &app.identifier == ANIMEXTS_IDENTIFIER && &app.auth_code == ANIMEXTS_AUTH_CODE {
+            ApplicationKind::Animexts
+        } else if &app.identifier == XMP_IDENTIFIER && &app.auth_code == XMP_AUTH_CODE {
+            ApplicationKind::Xmp
+        } else if &app.identifier == ICC_IDENTIFIER && &app.auth_code == ICC_AUTH_CODE {
+            ApplicationKind::Icc
+        } else if &app.identifier == EXIF_IDENTIFIER {
+            ApplicationKind::Exif
+        } else {
+            ApplicationKind::Unknown
+        }
+    }
+
+    /// `true` for every variant except [`ApplicationKind::Unknown`] —
+    /// i.e. this crate ships a typed view for the block's namespace.
+    pub fn is_recognized(self) -> bool {
+        !matches!(self, ApplicationKind::Unknown)
+    }
+}
+
+impl Application {
+    /// Classify this §26 Application Extension by its namespace key —
+    /// shorthand for [`ApplicationKind::classify`].
+    pub fn kind(&self) -> ApplicationKind {
+        ApplicationKind::classify(self)
+    }
+
+    /// `true` when this block's identifier+auth code matches one of the
+    /// five ecosystem-defined namespaces this crate ships a typed view
+    /// for (NETSCAPE2.0 / ANIMEXTS1.0 / XMP / ICC / EXIF) — shorthand
+    /// for `self.kind().is_recognized()`.
+    pub fn is_recognized(&self) -> bool {
+        self.kind().is_recognized()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,5 +910,64 @@ mod tests {
         };
         let parsed = ExifMetadata::from_application(&app).unwrap();
         assert!(parsed.bytes.is_empty());
+    }
+
+    fn app(identifier: &[u8; 8], auth_code: &[u8; 3]) -> Application {
+        Application {
+            identifier: *identifier,
+            auth_code: *auth_code,
+            data: vec![],
+        }
+    }
+
+    #[test]
+    fn classify_recognises_every_known_namespace() {
+        assert_eq!(
+            app(NETSCAPE_IDENTIFIER, NETSCAPE_AUTH_CODE).kind(),
+            ApplicationKind::Netscape
+        );
+        assert_eq!(
+            app(ANIMEXTS_IDENTIFIER, ANIMEXTS_AUTH_CODE).kind(),
+            ApplicationKind::Animexts
+        );
+        assert_eq!(
+            app(XMP_IDENTIFIER, XMP_AUTH_CODE).kind(),
+            ApplicationKind::Xmp
+        );
+        assert_eq!(
+            app(ICC_IDENTIFIER, ICC_AUTH_CODE).kind(),
+            ApplicationKind::Icc
+        );
+        // EXIF matches on identifier only — any auth code classifies.
+        assert_eq!(
+            app(EXIF_IDENTIFIER, b"\xFF\x12\x34").kind(),
+            ApplicationKind::Exif
+        );
+        assert!(app(NETSCAPE_IDENTIFIER, NETSCAPE_AUTH_CODE).is_recognized());
+        assert!(app(EXIF_IDENTIFIER, b"\xFF\x00\x00").is_recognized());
+    }
+
+    #[test]
+    fn classify_unknown_namespace() {
+        // Right NETSCAPE identifier but wrong auth code → not Netscape.
+        let wrong_auth = app(NETSCAPE_IDENTIFIER, b"9.9");
+        assert_eq!(wrong_auth.kind(), ApplicationKind::Unknown);
+        assert!(!wrong_auth.is_recognized());
+        // A totally vendor-private namespace.
+        let private = app(b"PRIVATE!", b"xyz");
+        assert_eq!(private.kind(), ApplicationKind::Unknown);
+        assert!(!private.is_recognized());
+    }
+
+    #[test]
+    fn classify_is_namespace_not_payload() {
+        // A NETSCAPE2.0 block with no recognised sub-block payload is
+        // still classified Netscape — classification is by namespace
+        // key, not by what the payload parses to.
+        let empty_netscape = app(NETSCAPE_IDENTIFIER, NETSCAPE_AUTH_CODE);
+        assert!(LoopControl::from_application(&empty_netscape)
+            .and_then(|lc| lc.loop_count)
+            .is_none());
+        assert_eq!(empty_netscape.kind(), ApplicationKind::Netscape);
     }
 }

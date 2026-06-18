@@ -684,6 +684,54 @@ impl GifImage {
         })
     }
 
+    /// Iterate every §26 Application Extension paired with its
+    /// [`crate::app_ext::ApplicationKind`] classification, in source
+    /// order.
+    ///
+    /// The classification is by §26.c.iv / §26.c.v namespace key
+    /// (identifier + auth code), not by payload — see
+    /// [`crate::app_ext::ApplicationKind`] for the per-kind matching
+    /// rule. A block whose namespace this crate ships no typed view for
+    /// classifies as [`crate::app_ext::ApplicationKind::Unknown`].
+    pub fn application_kinds(
+        &self,
+    ) -> impl Iterator<Item = (&Application, crate::app_ext::ApplicationKind)> {
+        self.application_extensions().map(|app| (app, app.kind()))
+    }
+
+    /// Iterate every §26 Application Extension whose namespace this
+    /// crate does **not** ship a typed view for — i.e. those that
+    /// classify as [`crate::app_ext::ApplicationKind::Unknown`].
+    ///
+    /// A consumer building a re-encoding pipeline can use this to decide
+    /// which application extensions it understands versus which are
+    /// vendor-private blobs to preserve verbatim (they stay in
+    /// [`Self::blocks`] for byte-stable round-trip regardless). The
+    /// recognised counterpart is reached via [`Self::application_kinds`].
+    pub fn unrecognized_application_extensions(&self) -> impl Iterator<Item = &Application> {
+        self.application_extensions()
+            .filter(|app| !app.is_recognized())
+    }
+
+    /// Find the first §26 Application Extension whose identifier and
+    /// authentication code match the given §26.c.iv / §26.c.v namespace
+    /// key, in source order.
+    ///
+    /// Matches on the full namespace key (both identifier *and* auth
+    /// code) — the general lookup that does not special-case any
+    /// ecosystem extension's auth-code conventions. For the EXIF
+    /// identifier-only match see [`Self::exif`]; for the typed
+    /// loop-count / XMP / ICC views see [`Self::loop_count`] /
+    /// [`Self::xmp_packet`] / [`Self::icc_profile`].
+    pub fn find_application(
+        &self,
+        identifier: &[u8; 8],
+        auth_code: &[u8; 3],
+    ) -> Option<&Application> {
+        self.application_extensions()
+            .find(|app| &app.identifier == identifier && &app.auth_code == auth_code)
+    }
+
     /// Iterate every §25 Plain Text Extension block paired with its
     /// attached §23 Graphic Control Extension, in source order.
     ///

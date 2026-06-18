@@ -25,6 +25,27 @@
 
 ### Added
 
+- §26 Application Extension namespace classification. The new
+  `app_ext::ApplicationKind` enum classifies an `Application` block by
+  its §26.c.iv / §26.c.v identifier + authentication-code key into the
+  five recognised ecosystem namespaces (`Netscape`, `Animexts`, `Xmp`,
+  `Icc`, `Exif`) or `Unknown`, following each typed view's own matching
+  rule (auth-code-sensitive for all but EXIF, which matches on
+  identifier only). `ApplicationKind::classify()` / `is_recognized()`
+  are the core entry points; `Application::kind()` /
+  `Application::is_recognized()` are the per-block shorthands. Stream
+  rollups on `GifImage`: `application_kinds()` pairs every §26 block
+  with its classification in source order,
+  `unrecognized_application_extensions()` filters to the vendor-private
+  (`Unknown`) blocks a re-encoding pipeline must preserve verbatim, and
+  `find_application(identifier, auth_code)` is the general full-key
+  lookup (distinct from the EXIF identifier-only `exif()` and the typed
+  `loop_count()` / `xmp_packet()` / `icc_profile()` views). Classification
+  is by namespace, not payload, so a NETSCAPE2.0 block with no recognised
+  sub-block still classifies `Netscape`. New `app_ext` unit tests pin
+  every-known-namespace, wrong-auth-code → `Unknown`, namespace-not-payload;
+  a new `app_ext_roundtrip` integration test confirms classification +
+  lookup survive encode → decode.
 - §12 "Blocks, Extensions and Scope" classification + §11 palette-loader
   recognition. `Block::class()` returns the §12 `BlockClass`
   (`GraphicRendering` for §20 Image / §25 Plain Text, `SpecialPurpose`

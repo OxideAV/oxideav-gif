@@ -272,3 +272,61 @@ fn netscape_block_emitted_at_correct_byte_layout() {
         "encoded NETSCAPE2.0 block must match the documented 19-byte layout"
     );
 }
+
+#[test]
+fn application_kind_classification_and_lookup_survive_roundtrip() {
+    use oxideav_gif::app_ext::ApplicationKind;
+
+    // A stream carrying a recognised NETSCAPE2.0 block, a recognised
+    // XMP block, and a vendor-private (unknown) application extension.
+    let netscape = LoopControl {
+        loop_count: Some(3),
+        buffer_size: None,
+    }
+    .to_application();
+    let xmp = XmpPacket {
+        bytes: b"<x:xmpmeta/>".to_vec(),
+    }
+    .to_application();
+    let private = Block::Application(oxideav_gif::Application {
+        identifier: *b"PRIVATE!",
+        auth_code: *b"xyz",
+        data: vec![1, 2, 3],
+    });
+
+    let img = three_frame_gif(vec![
+        Block::Application(netscape),
+        Block::Application(xmp),
+        private,
+    ]);
+    let decoded = decode(&encode(&img).unwrap()).unwrap();
+
+    // application_kinds yields each block paired with its namespace
+    // classification, in source order.
+    let kinds: Vec<ApplicationKind> = decoded.application_kinds().map(|(_, k)| k).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ApplicationKind::Netscape,
+            ApplicationKind::Xmp,
+            ApplicationKind::Unknown,
+        ]
+    );
+
+    // unrecognized_application_extensions surfaces only the private one.
+    let unknown: Vec<&oxideav_gif::Application> =
+        decoded.unrecognized_application_extensions().collect();
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(&unknown[0].identifier, b"PRIVATE!");
+    assert_eq!(unknown[0].data, vec![1, 2, 3]);
+
+    // find_application matches on the full namespace key.
+    assert!(decoded.find_application(b"PRIVATE!", b"xyz").is_some());
+    assert!(decoded.find_application(b"PRIVATE!", b"zzz").is_none());
+    assert_eq!(
+        decoded
+            .find_application(b"NETSCAPE", b"2.0")
+            .map(|a| a.kind()),
+        Some(ApplicationKind::Netscape)
+    );
+}

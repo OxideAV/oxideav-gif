@@ -124,6 +124,7 @@ pub mod playback;
 #[cfg(feature = "registry")]
 pub mod registry;
 
+pub use app_ext::ApplicationKind;
 pub use builder::AnimationBuilder;
 pub use compose::{compose, ComposedFrame, RgbaCanvas};
 pub use decoder::{decode, decode_first_frame, decode_lenient};

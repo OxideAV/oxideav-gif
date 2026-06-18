@@ -190,7 +190,20 @@ Implements every block type defined by the CompuServe specifications:
   across and down — both surface §25.e *recommendations* as boolean
   queries so a strict authoring pipeline can gate on them, while the
   encoder itself never enforces a recommendation.
-- Application Extension (§26)
+- Application Extension (§26), with namespace classification.
+  `app_ext::ApplicationKind` classifies an Application block by its
+  §26.c.iv / §26.c.v identifier + authentication-code key into the five
+  recognised ecosystem namespaces (NETSCAPE2.0 / ANIMEXTS1.0 / XMP / ICC
+  / EXIF) or `Unknown`, following each typed view's matching rule
+  (auth-code-sensitive for all but EXIF, which matches identifier-only).
+  `Application::kind()` / `is_recognized()` are the per-block shorthands;
+  `GifImage::application_kinds()` pairs every §26 block with its
+  classification in source order, `unrecognized_application_extensions()`
+  filters to the vendor-private blocks a re-encoding pipeline must
+  preserve verbatim, and `find_application(identifier, auth_code)` is the
+  general full-key lookup. Classification is by namespace, not payload, so
+  a NETSCAPE2.0 block carrying no recognised sub-block still classifies
+  `Netscape`.
 - Multi-frame compositing onto the §18 Logical Screen using the §23
   disposal-method state machine. `compose()` returns the eager
   `Vec<ComposedFrame>`; `Playback::frames()` is the lazy iterator
