@@ -113,6 +113,7 @@
 pub mod app_ext;
 pub mod builder;
 pub mod compose;
+pub mod conformance;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
@@ -127,6 +128,7 @@ pub mod registry;
 pub use app_ext::ApplicationKind;
 pub use builder::AnimationBuilder;
 pub use compose::{compose, ComposedFrame, RgbaCanvas};
+pub use conformance::{ConformanceIssue, ConformanceReport, ConformanceRule, ConformanceSeverity};
 pub use decoder::{decode, decode_first_frame, decode_lenient};
 pub use encoder::{encode, encode_with_options, EncodeOptions, LzwStrategy};
 pub use error::{Error, Result};

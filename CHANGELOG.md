@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- Non-fatal conformance reporting: `GifImage::conformance_report()`
+  walks an in-memory image against the Appendix-B grammar and the
+  surrounding §7–§26 field rules and returns a `ConformanceReport` —
+  the diagnostic counterpart to `encode`'s fatal validation. It is a
+  *superset* of the encoder's checks: alongside the §7 version, §19/§21
+  colour-table-size, and §20/§22 indices-length rules `encode` also
+  rejects, it surfaces the placement / range / recommendation
+  departures the encoder *tolerates* — §20.a images escaping the
+  Logical Screen, §18.c.vii Background Color Index past the GCT,
+  §22/Appendix-F pixel indices past the active palette (one issue per
+  frame, not per pixel), §23.c.viii Transparent Color Index past the
+  palette, §25.c.x/xi Plain Text fg/bg indices past the active palette
+  (and the no-active-table case), and the §23.e.ii User-Input-without-
+  Delay *recommendation*. Each `ConformanceIssue` carries a
+  machine-comparable `ConformanceRule`, a `ConformanceSeverity`
+  (`Error` for spec *requirements*, `Recommendation` for spec
+  *recommendations*), the offending `block_index` (or `None` for a
+  Logical-Screen-Descriptor / Global-Color-Table stream-level issue),
+  and a spec-cited `detail` string. `ConformanceReport` exposes
+  `is_clean()` / `has_errors()` / `errors()` / `recommendations()` /
+  `count(severity)` so a strict validator can gate on errors while a
+  lint surfaces both tiers. `ConformanceIssue`, `ConformanceReport`,
+  `ConformanceRule`, and `ConformanceSeverity` are re-exported at the
+  crate root. New `conformance` unit tests pin every rule on hand-built
+  images; a new `conformance_report` integration test pins the two
+  cross-cutting properties — decoder/builder output reports no errors,
+  and the report agrees with `encode` on the rules they share while
+  reaching beyond it on placement / range / recommendation departures.
+
 ### Changed
 
 - `app_ext::LoopControl::from_application` and
