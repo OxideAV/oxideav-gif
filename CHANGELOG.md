@@ -32,6 +32,20 @@
   cross-cutting properties — decoder/builder output reports no errors,
   and the report agrees with `encode` on the rules they share while
   reaching beyond it on placement / range / recommendation departures.
+- `GifImage::validate_strict()` hard-gate convenience over the
+  diagnostic report: returns `Ok(())` when no `ConformanceSeverity::Error`
+  is found (recommendation-level departures tolerated), else
+  `Error::InvalidInput` carrying every error issue one-per-line. Because
+  the report is a superset of `encode`'s fatal checks,
+  `validate_strict().is_ok()` implies `encode` accepts the image but not
+  conversely. `Display` impls on `ConformanceSeverity`,
+  `ConformanceIssue` (`error [block 2]: §20.a: …`), and
+  `ConformanceReport` (one issue per line; `conformant: no issues` when
+  clean) make the report log/surface-ready. New unit tests pin the
+  Display shapes, the recommendation-tolerant strict pass, and the
+  all-errors-collected strict failure; a new `conformance_report`
+  integration test gates `validate_strict` end-to-end through decode +
+  mutation.
 
 ### Changed
 

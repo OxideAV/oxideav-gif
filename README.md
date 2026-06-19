@@ -347,6 +347,31 @@ Implements every block type defined by the CompuServe specifications:
   `upgrade_version_if_needed()` bumps the declared version to that
   minimum in one call (it never *down*grades — a caller's explicit
   choice of `Gif89a` for a 87a-compatible payload is preserved).
+- Non-fatal conformance reporting. `GifImage::conformance_report()`
+  walks an in-memory image against the Appendix-B grammar and the
+  §7–§26 field rules and returns a `ConformanceReport` — the diagnostic
+  counterpart to `encode`'s fatal validation, and a *superset* of it.
+  Alongside the §7 version, §19/§21 colour-table-size, and §20/§22
+  indices-length rules `encode` also rejects, the report surfaces the
+  placement / range / recommendation departures the encoder tolerates:
+  §20.a images escaping the Logical Screen, §18.c.vii Background Color
+  Index past the Global Color Table, §22/Appendix-F pixel indices past
+  the active palette (one issue per frame, not per pixel), §23.c.viii
+  Transparent Color Index past the palette, §25.c.x/xi Plain Text fg/bg
+  indices past the active palette (and the no-active-table case), and
+  the §23.e.ii User-Input-without-Delay *recommendation*. Each
+  `ConformanceIssue` carries a machine-comparable `ConformanceRule`, a
+  `ConformanceSeverity` (`Error` for spec requirements, `Recommendation`
+  for spec recommendations), the offending `block_index` (or `None` for
+  a Logical-Screen-Descriptor / Global-Color-Table stream-level issue),
+  and a spec-cited `detail`; `ConformanceReport` exposes `is_clean()` /
+  `has_errors()` / `errors()` / `recommendations()` / `count(severity)`
+  and a one-issue-per-line `Display`. `GifImage::validate_strict()` is
+  the hard-gate convenience: `Ok(())` when no error-level issue is found
+  (recommendations tolerated), else an `Error::InvalidInput` listing
+  every error. Because the report is a superset of the encoder's checks,
+  `validate_strict().is_ok()` implies `encode` accepts the image but not
+  conversely.
 
 ## Fuzzing
 

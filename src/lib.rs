@@ -99,6 +99,26 @@
 //!
 //! [`Application`]: crate::Application
 //!
+//! ## Conformance reporting
+//!
+//! [`encode`] fatally rejects the small set of departures that make a
+//! stream un-encodable (§7 version mismatch, §19/§21 colour-table size,
+//! §20/§22 indices length). [`GifImage::conformance_report`] is the
+//! complementary *non-fatal* diagnostic surface: it walks an in-memory
+//! image against the Appendix-B grammar and the §7–§26 field rules and
+//! returns a [`ConformanceReport`] of every departure — a *superset* of
+//! the encoder's checks that additionally surfaces the placement /
+//! range / recommendation issues the encoder tolerates (§20.a images
+//! escaping the Logical Screen, §18.c.vii / §22 / §23.c.viii / §25
+//! index references past the active palette, the §23.e.ii
+//! User-Input-without-Delay recommendation). Each [`ConformanceIssue`]
+//! carries a [`ConformanceRule`], a [`ConformanceSeverity`]
+//! (`Error` for requirements, `Recommendation` for recommendations), an
+//! offending `block_index`, and a spec-cited `detail`.
+//! [`GifImage::validate_strict`] is the hard-gate convenience that turns
+//! the error-level issues into a single [`Error::InvalidInput`] while
+//! tolerating recommendations.
+//!
 //! ## Standalone vs registry-integrated
 //!
 //! With the default `registry` Cargo feature on, the crate exposes

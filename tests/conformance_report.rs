@@ -252,3 +252,33 @@ fn plain_text_index_bounds() {
         .errors()
         .any(|i| i.rule == ConformanceRule::PlainTextIndexRange));
 }
+
+/// `validate_strict` end-to-end: a decoded, well-formed stream gates
+/// `Ok`, and a hand-broken image gates `Err` whose message renders the
+/// spec-cited issues.
+#[test]
+fn validate_strict_through_decode_and_mutation() {
+    let img = builder_animation();
+    let bytes = encode(&img).unwrap();
+    let decoded = decode(&bytes).unwrap();
+    assert!(
+        decoded.validate_strict().is_ok(),
+        "a decoded well-formed stream must validate strictly"
+    );
+
+    // Break a frame so it escapes the screen, then confirm the strict
+    // gate rejects with a §20.a-cited message.
+    let mut broken = decoded;
+    let img_idx = broken
+        .blocks
+        .iter()
+        .position(|b| matches!(b, Block::Image(_)))
+        .unwrap();
+    if let Block::Image(f) = &mut broken.blocks[img_idx] {
+        f.width = 99; // overruns the 2-px screen
+    }
+    let err = broken
+        .validate_strict()
+        .expect_err("escaping frame rejected");
+    assert!(format!("{err}").contains("§20.a"));
+}

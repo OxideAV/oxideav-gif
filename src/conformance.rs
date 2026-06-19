@@ -53,6 +53,7 @@
 //!   active colour table.
 
 use crate::image::{Block, GifImage, Rgb};
+use core::fmt;
 
 /// How seriously a [`ConformanceIssue`] departs from the spec.
 ///
@@ -128,6 +129,26 @@ pub struct ConformanceIssue {
     pub detail: String,
 }
 
+impl fmt::Display for ConformanceSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConformanceSeverity::Error => f.write_str("error"),
+            ConformanceSeverity::Recommendation => f.write_str("recommendation"),
+        }
+    }
+}
+
+impl fmt::Display for ConformanceIssue {
+    /// Renders as `error [block 2]: §20.a: …` (or `error: …` for a
+    /// stream-level issue with no block index).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.block_index {
+            Some(idx) => write!(f, "{} [block {idx}]: {}", self.severity, self.detail),
+            None => write!(f, "{}: {}", self.severity, self.detail),
+        }
+    }
+}
+
 /// The full set of conformance departures for a [`GifImage`], in the
 /// order they were discovered (stream-level first, then per-block in
 /// source order).
@@ -191,6 +212,23 @@ impl ConformanceReport {
             block_index,
             detail,
         });
+    }
+}
+
+impl fmt::Display for ConformanceReport {
+    /// One issue per line, in discovery order. A clean report renders as
+    /// the single line `conformant: no issues`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.issues.is_empty() {
+            return f.write_str("conformant: no issues");
+        }
+        for (i, issue) in self.issues.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{issue}")?;
+        }
+        Ok(())
     }
 }
 
@@ -400,6 +438,55 @@ impl GifImage {
         }
 
         report
+    }
+
+    /// Gate on the *error*-level conformance issues: returns `Ok(())`
+    /// when [`Self::conformance_report`] finds no
+    /// [`ConformanceSeverity::Error`], else [`Error::InvalidInput`]
+    /// carrying every error issue (one per line, recommendations
+    /// excluded).
+    ///
+    /// This is the hard-gate convenience over the diagnostic
+    /// [`Self::conformance_report`]: a caller that wants "reject this
+    /// image if it is not spec-conformant, but tolerate
+    /// recommendation-level departures" calls this; a caller that wants
+    /// the full structured report (including recommendations and the
+    /// per-issue `block_index` / `rule`) calls `conformance_report`
+    /// directly.
+    ///
+    /// Note this is a *superset* of [`crate::encode`]'s fatal checks —
+    /// it also rejects §20.a placement / §22 pixel-range / §23.c.viii
+    /// transparent-index departures that `encode` itself tolerates — so
+    /// `validate_strict().is_ok()` implies `encode` accepts the image,
+    /// but not conversely.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use oxideav_gif::AnimationBuilder;
+    /// use oxideav_gif::{DisposalMethod, Rgb};
+    ///
+    /// let palette = vec![Rgb::new(0xFF, 0, 0), Rgb::new(0, 0xFF, 0)];
+    /// let img = AnimationBuilder::new(2, 2, palette)
+    ///     .add_full_frame(vec![0, 1, 0, 1], 10, DisposalMethod::None)
+    ///     .unwrap()
+    ///     .build()
+    ///     .unwrap();
+    /// assert!(img.validate_strict().is_ok());
+    /// ```
+    pub fn validate_strict(&self) -> crate::error::Result<()> {
+        let report = self.conformance_report();
+        if !report.has_errors() {
+            return Ok(());
+        }
+        let mut msg = String::new();
+        for (i, issue) in report.errors().enumerate() {
+            if i > 0 {
+                msg.push('\n');
+            }
+            msg.push_str(&issue.to_string());
+        }
+        Err(crate::error::Error::InvalidInput(msg))
     }
 }
 
@@ -808,5 +895,75 @@ mod tests {
             }));
         let report = img.conformance_report();
         assert!(report.is_clean(), "issues: {:?}", report.issues());
+    }
+
+    #[test]
+    fn clean_report_displays_as_conformant() {
+        let report = clean_image().conformance_report();
+        assert_eq!(report.to_string(), "conformant: no issues");
+    }
+
+    #[test]
+    fn issue_display_includes_severity_and_block() {
+        let mut img = clean_image();
+        if let Block::Image(f) = &mut img.blocks[0] {
+            f.left = 1; // §20.a frame escape on block 0
+        }
+        let report = img.conformance_report();
+        let rendered = report.to_string();
+        assert!(rendered.starts_with("error [block 0]: §20.a"), "{rendered}");
+
+        // A stream-level issue renders without a block tag.
+        let mut img2 = clean_image();
+        img2.color_resolution = 8;
+        let report2 = img2.conformance_report();
+        let issue = &report2.issues()[0];
+        assert!(issue.to_string().starts_with("error: §18.c.iv"));
+    }
+
+    #[test]
+    fn validate_strict_ok_on_clean_image() {
+        assert!(clean_image().validate_strict().is_ok());
+    }
+
+    #[test]
+    fn validate_strict_passes_recommendation_only_image() {
+        // §23.e.ii is the only departure; validate_strict tolerates
+        // recommendation-level issues.
+        let mut img = clean_image();
+        if let Block::Image(f) = &mut img.blocks[0] {
+            f.graphic_control = Some(GraphicControl {
+                disposal: DisposalMethod::None,
+                user_input: true,
+                transparent_index: None,
+                delay_centis: 0,
+            });
+        }
+        let report = img.conformance_report();
+        assert_eq!(report.count(ConformanceSeverity::Recommendation), 1);
+        assert!(!report.has_errors());
+        assert!(
+            img.validate_strict().is_ok(),
+            "validate_strict must tolerate recommendation-only reports"
+        );
+    }
+
+    #[test]
+    fn validate_strict_err_collects_every_error() {
+        let mut img = clean_image();
+        // Two independent errors: bad colour resolution + frame escape.
+        img.color_resolution = 8;
+        if let Block::Image(f) = &mut img.blocks[0] {
+            f.left = 5;
+        }
+        let err = img.validate_strict().expect_err("two errors present");
+        let crate::error::Error::InvalidInput(msg) = err else {
+            panic!("expected InvalidInput");
+        };
+        assert!(msg.contains("§18.c.iv"));
+        assert!(msg.contains("§20.a"));
+        assert_eq!(msg.lines().count(), 2, "one line per error: {msg}");
+        // Recommendations are excluded from the strict-gate message.
+        assert!(!msg.contains("§23.e.ii"));
     }
 }
