@@ -142,6 +142,7 @@ pub mod image;
 pub mod interlace;
 pub mod lzw;
 pub mod playback;
+pub mod quantize;
 #[cfg(feature = "registry")]
 pub mod registry;
 
@@ -157,6 +158,7 @@ pub use image::{
     Rgb, Version,
 };
 pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};
+pub use quantize::{quantize_rgb, quantize_rgba, Quantized};
 
 // Registry-gated public surface. The `__oxideav_entry` re-export is
 // load-bearing: `oxideav-meta`'s build-script-generated `register_all`
