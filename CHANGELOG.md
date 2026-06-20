@@ -4,6 +4,15 @@
 
 ### Added
 
+- The `encode` fuzz harness now exercises the truecolor quantiser paths.
+  Alongside the `AnimationBuilder` → `encode` pipeline it synthesises small
+  (≤ 32×32) RGBA frames from the fuzz bytes and drives
+  `quantize_rgba_with_options` + `quantize_frames_shared` under both
+  `Dither::None` and `Dither::FloydSteinberg`, plus the
+  `from_rgba_frame_with_options` / `from_rgba_frames_shared_palette`
+  constructors through `encode` → `decode`, asserting in-palette-range
+  indices and decoder acceptance. Clears 30 K+ runs crash-free.
+
 - Shared-palette multi-frame quantisation. `quantize::quantize_frames_shared`
   pools every frame's opaque pixels and runs a single median cut over the
   union, returning a `SharedQuantized { palette, frame_indices,

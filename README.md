@@ -340,7 +340,21 @@ Implements every block type defined by the CompuServe specifications:
   §23.c.viii Transparency Index (sub-threshold-alpha pixels route to one
   reserved palette slot returned as `Quantized::transparent_index`);
   `quantize_rgb` is the no-alpha entry point; `nearest_index` maps a
-  colour to an existing palette for shared-palette compositing.
+  colour to an existing palette for shared-palette compositing. The §22
+  index plane is the per-pixel nearest-entry argmin over the selected
+  palette — after each median-cut box is averaged to one entry, every
+  pixel is remapped to its true nearest entry rather than keeping the box
+  it was partitioned into, so a colour near a box boundary never carries a
+  strictly-worse assignment (exact-colour inputs stay byte-stable).
+  `QuantizeOptions { max_colors, dither }` adds a `Dither` choice:
+  `Dither::FloydSteinberg` diffuses each pixel's quantisation error onto
+  its not-yet-visited neighbours (7/16 east, 3/16 south-west, 5/16 south,
+  1/16 south-east) so a coarse-palette gradient breaks into a stippled mix
+  that averages back to the source over a small neighbourhood — palette
+  selection is unchanged, only the index-plane assignment; transparent
+  pixels neither receive nor propagate error. `quantize_rgb_with_options`
+  / `quantize_rgba_with_options` are the option-taking entry points (the
+  bare functions keep the flat nearest-entry default).
   `GifImage::from_rgba_frame` wraps a single frame into a §18 Logical
   Screen with a §19 Global Color Table (attaching a §23 GCE carrying the
   reserved transparency index when the frame has transparent pixels,
@@ -348,10 +362,17 @@ Implements every block type defined by the CompuServe specifications:
   multi-frame animation, each frame quantised to its own §21 Local Color
   Table and carrying a §23 GCE with its §23.c.vii delay + §23.c.iv
   disposal, with `loop_count` threading the NETSCAPE2.0 §26 looping
-  Application Extension. The registry `GifEncoder` routes through this:
-  a fully-opaque ≤256-colour frame keeps its exact palette (lossless),
-  and a >256-colour or transparent frame is quantised instead of
-  rejected.
+  Application Extension; `from_rgba_frame_with_options` /
+  `from_rgba_frames_with_options` thread a `QuantizeOptions` (dither) into
+  those paths. `from_rgba_frames_shared_palette` is the one-palette
+  variant: `quantize::quantize_frames_shared` pools every frame's opaque
+  pixels into a single median cut and installs the result as one §18
+  Global Color Table (no per-frame §21 LCTs), reserving one shared
+  §23.c.viii Transparency Index across the animation — smaller output than
+  N independent tables, with no inter-frame palette flicker. The registry
+  `GifEncoder` routes through this: a fully-opaque ≤256-colour frame keeps
+  its exact palette (lossless), and a >256-colour or transparent frame is
+  quantised instead of rejected.
 - `decode_first_frame` cover-frame fast-path that short-circuits at
   the first image-bearing block and skips the per-block dispatch
   for everything that follows. Useful when you only need a static
@@ -425,8 +446,14 @@ panic-freedom on arbitrary bytes:
   → `compose` → `Playback::frames` / `looping_frames` on the result.
   Reaches encoder configurations the decoder-output-only harness
   can't construct (sub-screen placements, mismatched palette sizes,
-  multi-frame disposal sequences). Caps screen at 256×256 and frame
-  count at 16.
+  multi-frame disposal sequences). Also synthesises small (≤ 32×32) RGBA
+  frames from the fuzz bytes and drives the truecolor quantiser paths —
+  `quantize_rgba_with_options` and `quantize_frames_shared` under both
+  `Dither::None` and `Dither::FloydSteinberg`, plus the
+  `from_rgba_frame_with_options` / `from_rgba_frames_shared_palette`
+  constructors through `encode` → `decode` — asserting the index plane
+  stays in palette range and the decoder accepts every encoded stream.
+  Caps screen at 256×256 and frame count at 16.
 - `plain_text` — dedicated §25 Plain Text Extension
   harness. `AnimationBuilder` exposes image frames only, and the
   decoder-side harnesses can only emit a `Block::PlainText` when the

@@ -29,7 +29,8 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
     compose, decode, decode_first_frame, decode_lenient, encode, image::Rgb, playback::Playback,
-    AnimationBuilder, DisposalMethod,
+    quantize_frames_shared, quantize_rgba_with_options, AnimationBuilder, DisposalMethod, Dither,
+    GifImage, QuantizeOptions,
 };
 
 // Cap downstream work on suspiciously large screens so the harness
@@ -223,4 +224,61 @@ fuzz_target!(|data: &[u8]| {
     let pb = Playback::new(&decoded);
     for _ in pb.frames().take(MAX_PLAYBACK_FRAMES) {}
     for _ in pb.looping_frames().take(MAX_PLAYBACK_FRAMES) {}
+
+    // Truecolor quantiser paths. Synthesise small RGBA frames from the
+    // fuzz bytes and drive every option-taking quantiser entry point —
+    // the dither index-plane assignment, the shared-palette pooling, and
+    // the three RGBA constructors — so panics in the new colour-reduction
+    // code surface here. The geometry is capped tiny (≤ 32×32) so the
+    // diffusion/pooling work stays bounded per iteration.
+    let qw = 1 + (data[0] as usize % 32);
+    let qh = 1 + (data[1] as usize % 32);
+    let qpx = qw * qh;
+    // Build two RGBA frames by tiling the fuzz input across the grid.
+    let frame_a: Vec<u8> = (0..qpx * 4).map(|i| data[i % data.len()]).collect();
+    let frame_b: Vec<u8> = (0..qpx * 4)
+        .map(|i| data[(i + 1) % data.len()] ^ 0x5a)
+        .collect();
+    let max_colors = 1 + (data[2] as usize % 256);
+
+    for dither in [Dither::None, Dither::FloydSteinberg] {
+        let opts = QuantizeOptions::with_max_colors(max_colors).dither(dither);
+
+        // Per-frame quantiser: index plane must stay in palette range.
+        if let Ok(q) = quantize_rgba_with_options(&frame_a, qw, qh, opts) {
+            assert!(q.indices.iter().all(|&i| (i as usize) < q.palette.len()));
+        }
+
+        // Shared-palette pooling over both frames.
+        if let Ok(s) = quantize_frames_shared(&[&frame_a, &frame_b], qw, qh, opts) {
+            for plane in &s.frame_indices {
+                assert!(plane.iter().all(|&i| (i as usize) < s.palette.len()));
+            }
+        }
+
+        // Constructors → encode → decode round-trip. Each must produce a
+        // stream the decoder accepts.
+        if qw <= u16::MAX as usize && qh <= u16::MAX as usize {
+            let (cw, ch) = (qw as u16, qh as u16);
+            if let Ok(img) = GifImage::from_rgba_frame_with_options(&frame_a, cw, ch, opts) {
+                if let Ok(b) = encode(&img) {
+                    assert!(decode(&b).is_ok(), "dithered still rejected by decoder");
+                }
+            }
+            let frames = [
+                (&frame_a[..], 7u16, DisposalMethod::None),
+                (&frame_b[..], 7u16, DisposalMethod::Keep),
+            ];
+            if let Ok(img) =
+                GifImage::from_rgba_frames_shared_palette(&frames, cw, ch, opts, Some(0))
+            {
+                if let Ok(b) = encode(&img) {
+                    assert!(
+                        decode(&b).is_ok(),
+                        "shared-palette animation rejected by decoder"
+                    );
+                }
+            }
+        }
+    }
 });
