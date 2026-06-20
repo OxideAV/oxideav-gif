@@ -491,6 +491,21 @@ pub struct GifImage {
     pub blocks: Vec<Block>,
 }
 
+/// §18.c.iv Color Resolution byte for a palette of `palette_len`
+/// entries: the bits-per-primary-colour minus one, where bits is the
+/// smallest `b` in `1..=8` with `2^b >= palette_len`. A 2-entry palette
+/// gives `0` (1 bit per primary), a 256-entry palette gives `7` (8 bits).
+/// An empty palette is treated as 1 entry → `0`.
+fn palette_color_resolution(palette_len: usize) -> u8 {
+    let len = palette_len.max(1);
+    // bits = ceil(log2(len)), clamped to 1..=8.
+    let mut bits = 1u8;
+    while (1usize << bits) < len && bits < 8 {
+        bits += 1;
+    }
+    bits - 1
+}
+
 impl GifImage {
     /// Iterate the image-bearing blocks.
     pub fn frames(&self) -> impl Iterator<Item = &Frame> {
@@ -1326,6 +1341,176 @@ impl GifImage {
 }
 
 impl GifImage {
+    /// Build a single-image §18 Logical Screen from one truecolor RGBA
+    /// frame, quantising it to a §19 Global Color Table + §22 index
+    /// plane with [`crate::quantize::quantize_rgba`].
+    ///
+    /// `rgba` is `width * height` 4-byte `[R, G, B, A]` pixels, row-major
+    /// top-to-bottom. The frame is reduced to at most `max_colors`
+    /// palette entries (clamped to `1..=256`). If any pixel is
+    /// transparent (alpha below
+    /// [`crate::quantize::ALPHA_OPAQUE_THRESHOLD`]) a §23 Graphic Control
+    /// Extension is attached carrying the §23.c.viii Transparency Index
+    /// the quantiser reserved, so the resulting stream renders the
+    /// transparency through [`crate::compose`] / [`crate::encode`]
+    /// unchanged. A fully-opaque frame attaches no GCE and stays a valid
+    /// GIF87a-compatible payload (the returned version is 87a unless a
+    /// GCE was needed for transparency).
+    ///
+    /// The returned image is ready for [`crate::encode`]; a build →
+    /// encode → decode round-trip reproduces the quantised palette +
+    /// indices exactly.
+    ///
+    /// # Errors
+    ///
+    /// * `width` or `height` is `0` or exceeds `65535`.
+    /// * `rgba.len()` is not exactly `width * height * 4`
+    ///   (surfaced by the quantiser).
+    pub fn from_rgba_frame(
+        rgba: &[u8],
+        width: u16,
+        height: u16,
+        max_colors: usize,
+    ) -> crate::error::Result<GifImage> {
+        if width == 0 || height == 0 {
+            return Err(crate::error::Error::InvalidInput(
+                "from_rgba_frame: width/height must be non-zero".into(),
+            ));
+        }
+        let q = crate::quantize::quantize_rgba(rgba, width as usize, height as usize, max_colors)?;
+        let graphic_control = q.transparent_index.map(|ti| GraphicControl {
+            disposal: DisposalMethod::None,
+            user_input: false,
+            transparent_index: Some(ti),
+            delay_centis: 0,
+        });
+        let version = if graphic_control.is_some() {
+            Version::Gif89a
+        } else {
+            Version::Gif87a
+        };
+        let color_resolution = palette_color_resolution(q.palette.len());
+        Ok(GifImage {
+            version,
+            screen_width: width,
+            screen_height: height,
+            color_resolution,
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(q.palette),
+            blocks: vec![Block::Image(Frame {
+                left: 0,
+                top: 0,
+                width,
+                height,
+                local_palette: None,
+                palette_sorted: false,
+                interlaced: false,
+                indices: q.indices,
+                graphic_control,
+            })],
+        })
+    }
+
+    /// Build an animated §18 Logical Screen from a sequence of truecolor
+    /// RGBA frames, each the full `width * height` screen, quantising
+    /// every frame independently to its own §21 Local Color Table.
+    ///
+    /// `frames` is a slice of `(rgba, delay_centis, disposal)` tuples in
+    /// playback order: `rgba` is the frame's `width * height` RGBA pixel
+    /// buffer, `delay_centis` is the §23.c.vii hundredths-of-a-second
+    /// inter-frame delay, and `disposal` is the §23.c.iv Disposal Method.
+    /// Each frame is reduced to at most `max_colors` entries with
+    /// [`crate::quantize::quantize_rgba`]; because the frames may differ
+    /// in colour content, each carries its own §21 Local Color Table
+    /// rather than sharing a single §19 Global Color Table (a caller that
+    /// knows the frames share a palette can fold them together afterwards
+    /// with [`Self::optimize_color_tables`]).
+    ///
+    /// Every frame attaches a §23 Graphic Control Extension carrying its
+    /// delay, disposal, and — when the frame had transparent pixels — the
+    /// §23.c.viii Transparency Index the quantiser reserved. `loop_count`
+    /// selects the NETSCAPE2.0 looping behaviour: `None` plays one pass,
+    /// `Some(0)` loops forever, `Some(n)` plays `n + 1` total passes
+    /// (the de-facto convention in
+    /// `docs/image/gif/netscape2.0-loop-extension.md`); a looping value
+    /// emits a §26 NETSCAPE2.0 Application Extension ahead of the frames.
+    /// The returned image is always GIF89a (it carries §23 GCEs) and is
+    /// ready for [`crate::encode`].
+    ///
+    /// # Errors
+    ///
+    /// * `width` or `height` is `0` or exceeds `65535`.
+    /// * `frames` is empty.
+    /// * Any frame's `rgba.len()` is not exactly `width * height * 4`.
+    pub fn from_rgba_frames(
+        frames: &[(&[u8], u16, DisposalMethod)],
+        width: u16,
+        height: u16,
+        max_colors: usize,
+        loop_count: Option<u16>,
+    ) -> crate::error::Result<GifImage> {
+        if width == 0 || height == 0 {
+            return Err(crate::error::Error::InvalidInput(
+                "from_rgba_frames: width/height must be non-zero".into(),
+            ));
+        }
+        if frames.is_empty() {
+            return Err(crate::error::Error::InvalidInput(
+                "from_rgba_frames: at least one frame is required".into(),
+            ));
+        }
+
+        let mut blocks: Vec<Block> = Vec::with_capacity(frames.len() + 1);
+
+        // §26 NETSCAPE2.0 Application Extension for the looping cases —
+        // emitted ahead of the frames per the de-facto convention.
+        if let Some(n) = loop_count {
+            let loop_ctl = crate::app_ext::LoopControl {
+                loop_count: Some(n),
+                buffer_size: None,
+            };
+            blocks.push(Block::Application(loop_ctl.to_application()));
+        }
+
+        let mut max_palette_len = 1usize;
+        for &(rgba, delay_centis, disposal) in frames {
+            let q =
+                crate::quantize::quantize_rgba(rgba, width as usize, height as usize, max_colors)?;
+            max_palette_len = max_palette_len.max(q.palette.len());
+            let graphic_control = Some(GraphicControl {
+                disposal,
+                user_input: false,
+                transparent_index: q.transparent_index,
+                delay_centis,
+            });
+            blocks.push(Block::Image(Frame {
+                left: 0,
+                top: 0,
+                width,
+                height,
+                local_palette: Some(q.palette),
+                palette_sorted: false,
+                interlaced: false,
+                indices: q.indices,
+                graphic_control,
+            }));
+        }
+
+        Ok(GifImage {
+            version: Version::Gif89a,
+            screen_width: width,
+            screen_height: height,
+            color_resolution: palette_color_resolution(max_palette_len),
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: None,
+            blocks,
+        })
+    }
+
     /// Bump [`GifImage::version`] up to [`Self::required_version`] when
     /// the current declared version is too low to cover the blocks in
     /// this stream. Returns `true` when a bump actually happened.
@@ -4687,5 +4872,145 @@ mod tests {
             ],
         );
         assert!(!overflows.all_plain_texts_fit_grid());
+    }
+
+    // ---- truecolor RGBA → GifImage constructors ----
+
+    #[test]
+    fn palette_color_resolution_table() {
+        // bits-per-primary minus one for representative palette sizes.
+        assert_eq!(palette_color_resolution(0), 0); // empty → 1 entry → 0
+        assert_eq!(palette_color_resolution(1), 0);
+        assert_eq!(palette_color_resolution(2), 0); // 1 bit
+        assert_eq!(palette_color_resolution(3), 1); // 2 bits
+        assert_eq!(palette_color_resolution(4), 1);
+        assert_eq!(palette_color_resolution(5), 2); // 3 bits
+        assert_eq!(palette_color_resolution(16), 3);
+        assert_eq!(palette_color_resolution(17), 4);
+        assert_eq!(palette_color_resolution(256), 7); // 8 bits
+    }
+
+    #[test]
+    fn from_rgba_frame_opaque_solid_is_gif87a_no_gce() {
+        // 3x2 solid magenta, fully opaque.
+        let mut rgba = Vec::new();
+        for _ in 0..6 {
+            rgba.extend_from_slice(&[200, 0, 200, 255]);
+        }
+        let img = GifImage::from_rgba_frame(&rgba, 3, 2, 256).unwrap();
+        assert_eq!(img.version, Version::Gif87a);
+        assert_eq!(img.screen_width, 3);
+        assert_eq!(img.screen_height, 2);
+        assert_eq!(img.frame_count(), 1);
+        let frame = img.frames().next().unwrap();
+        assert!(frame.graphic_control.is_none());
+        assert_eq!(frame.indices.len(), 6);
+        // Single colour → 1-entry palette, every index 0.
+        assert_eq!(img.global_palette.as_ref().unwrap().len(), 1);
+        assert!(frame.indices.iter().all(|&i| i == 0));
+    }
+
+    #[test]
+    fn from_rgba_frame_transparent_attaches_gce_with_index() {
+        // 2x1: one opaque red, one transparent.
+        let rgba = vec![255, 0, 0, 255, 9, 9, 9, 0];
+        let img = GifImage::from_rgba_frame(&rgba, 2, 1, 256).unwrap();
+        assert_eq!(img.version, Version::Gif89a);
+        let frame = img.frames().next().unwrap();
+        let gce = frame.graphic_control.expect("transparency → GCE");
+        let ti = gce
+            .transparent_index
+            .expect("GCE carries transparent index");
+        // The transparent pixel maps to the reserved index.
+        assert_eq!(frame.indices[1], ti);
+        // has_transparency rolls this up.
+        assert!(img.has_transparency());
+    }
+
+    #[test]
+    fn from_rgba_frame_rejects_zero_dimensions() {
+        assert!(GifImage::from_rgba_frame(&[], 0, 1, 256).is_err());
+        assert!(GifImage::from_rgba_frame(&[], 1, 0, 256).is_err());
+    }
+
+    #[test]
+    fn from_rgba_frame_round_trips_through_encode_decode() {
+        // 4x4 two-colour checkerboard, opaque.
+        let mut rgba = Vec::new();
+        for y in 0..4 {
+            for x in 0..4 {
+                if (x + y) % 2 == 0 {
+                    rgba.extend_from_slice(&[255, 255, 255, 255]);
+                } else {
+                    rgba.extend_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+        let img = GifImage::from_rgba_frame(&rgba, 4, 4, 256).unwrap();
+        let bytes = crate::encode(&img).unwrap();
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.screen_width, 4);
+        assert_eq!(back.screen_height, 4);
+        assert_eq!(back.frame_count(), 1);
+        // The decoded indices + palette reproduce the original colours.
+        let frame = back.frames().next().unwrap();
+        let pal = back.global_palette.as_ref().unwrap();
+        for (i, idx) in frame.indices.iter().enumerate() {
+            let c = pal[*idx as usize];
+            let expected = if (i % 4 + i / 4) % 2 == 0 {
+                [255, 255, 255]
+            } else {
+                [0, 0, 0]
+            };
+            assert_eq!([c.r, c.g, c.b], expected, "pixel {i}");
+        }
+    }
+
+    #[test]
+    fn from_rgba_frames_builds_animation_with_local_palettes() {
+        // Two 2x2 frames, distinct solid colours → distinct LCTs.
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(4);
+        let blue: Vec<u8> = [0, 0, 255, 255].repeat(4);
+        let frames: Vec<(&[u8], u16, DisposalMethod)> = vec![
+            (&red, 10, DisposalMethod::None),
+            (&blue, 20, DisposalMethod::Keep),
+        ];
+        let img = GifImage::from_rgba_frames(&frames, 2, 2, 256, Some(0)).unwrap();
+        assert_eq!(img.version, Version::Gif89a);
+        assert!(img.global_palette.is_none());
+        assert_eq!(img.frame_count(), 2);
+        // Forever-loop emits a NETSCAPE block; loop_count reflects it.
+        assert_eq!(img.loop_count(), Some(0));
+        // Each frame carries its own LCT + GCE with the requested delay.
+        let mut iter = img.frames();
+        let f0 = iter.next().unwrap();
+        let f1 = iter.next().unwrap();
+        assert!(f0.local_palette.is_some());
+        assert!(f1.local_palette.is_some());
+        assert_eq!(f0.graphic_control.unwrap().delay_centis, 10);
+        assert_eq!(f1.graphic_control.unwrap().delay_centis, 20);
+        assert_eq!(f1.graphic_control.unwrap().disposal, DisposalMethod::Keep);
+    }
+
+    #[test]
+    fn from_rgba_frames_rejects_empty_and_zero_dims() {
+        let empty: Vec<(&[u8], u16, DisposalMethod)> = vec![];
+        assert!(GifImage::from_rgba_frames(&empty, 2, 2, 256, None).is_err());
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(4);
+        let frames: Vec<(&[u8], u16, DisposalMethod)> = vec![(&red, 0, DisposalMethod::None)];
+        assert!(GifImage::from_rgba_frames(&frames, 0, 2, 256, None).is_err());
+    }
+
+    #[test]
+    fn from_rgba_frames_play_once_emits_no_netscape_block() {
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(4);
+        let frames: Vec<(&[u8], u16, DisposalMethod)> = vec![(&red, 5, DisposalMethod::None)];
+        let img = GifImage::from_rgba_frames(&frames, 2, 2, 256, None).unwrap();
+        // No NETSCAPE Application Extension when loop_count is None.
+        assert!(img
+            .blocks
+            .iter()
+            .all(|b| !matches!(b, Block::Application(_))));
+        assert_eq!(img.loop_count(), None);
     }
 }
