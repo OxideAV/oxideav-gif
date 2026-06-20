@@ -1372,12 +1372,42 @@ impl GifImage {
         height: u16,
         max_colors: usize,
     ) -> crate::error::Result<GifImage> {
+        Self::from_rgba_frame_with_options(
+            rgba,
+            width,
+            height,
+            crate::quantize::QuantizeOptions::with_max_colors(max_colors),
+        )
+    }
+
+    /// [`Self::from_rgba_frame`] with explicit
+    /// [`crate::quantize::QuantizeOptions`], so a caller can request
+    /// Floyd–Steinberg dithering ([`crate::quantize::Dither::FloydSteinberg`])
+    /// instead of the flat nearest-entry index plane. The palette is still
+    /// chosen by median cut; only the §22 index-plane assignment changes.
+    ///
+    /// # Errors
+    ///
+    /// * `width` or `height` is `0`.
+    /// * `rgba.len()` is not exactly `width * height * 4`
+    ///   (surfaced by the quantiser).
+    pub fn from_rgba_frame_with_options(
+        rgba: &[u8],
+        width: u16,
+        height: u16,
+        opts: crate::quantize::QuantizeOptions,
+    ) -> crate::error::Result<GifImage> {
         if width == 0 || height == 0 {
             return Err(crate::error::Error::InvalidInput(
                 "from_rgba_frame: width/height must be non-zero".into(),
             ));
         }
-        let q = crate::quantize::quantize_rgba(rgba, width as usize, height as usize, max_colors)?;
+        let q = crate::quantize::quantize_rgba_with_options(
+            rgba,
+            width as usize,
+            height as usize,
+            opts,
+        )?;
         let graphic_control = q.transparent_index.map(|ti| GraphicControl {
             disposal: DisposalMethod::None,
             user_input: false,
@@ -1451,6 +1481,30 @@ impl GifImage {
         max_colors: usize,
         loop_count: Option<u16>,
     ) -> crate::error::Result<GifImage> {
+        Self::from_rgba_frames_with_options(
+            frames,
+            width,
+            height,
+            crate::quantize::QuantizeOptions::with_max_colors(max_colors),
+            loop_count,
+        )
+    }
+
+    /// [`Self::from_rgba_frames`] with explicit
+    /// [`crate::quantize::QuantizeOptions`], applying the same dither
+    /// choice to every frame. Each frame is still quantised independently
+    /// to its own §21 Local Color Table.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_rgba_frames`].
+    pub fn from_rgba_frames_with_options(
+        frames: &[(&[u8], u16, DisposalMethod)],
+        width: u16,
+        height: u16,
+        opts: crate::quantize::QuantizeOptions,
+        loop_count: Option<u16>,
+    ) -> crate::error::Result<GifImage> {
         if width == 0 || height == 0 {
             return Err(crate::error::Error::InvalidInput(
                 "from_rgba_frames: width/height must be non-zero".into(),
@@ -1476,8 +1530,12 @@ impl GifImage {
 
         let mut max_palette_len = 1usize;
         for &(rgba, delay_centis, disposal) in frames {
-            let q =
-                crate::quantize::quantize_rgba(rgba, width as usize, height as usize, max_colors)?;
+            let q = crate::quantize::quantize_rgba_with_options(
+                rgba,
+                width as usize,
+                height as usize,
+                opts,
+            )?;
             max_palette_len = max_palette_len.max(q.palette.len());
             let graphic_control = Some(GraphicControl {
                 disposal,

@@ -41,6 +41,65 @@ pub const ALPHA_OPAQUE_THRESHOLD: u8 = 128;
 /// Largest colour table a §19 / §21 GIF palette can hold (`2^(7+1)`).
 pub const MAX_PALETTE: usize = 256;
 
+/// Index-plane assignment strategy used once the palette is selected.
+///
+/// Palette *selection* (median cut) is identical for every variant — the
+/// dither only changes how each pixel is mapped onto the chosen palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dither {
+    /// Map each pixel to its single nearest palette entry. Deterministic,
+    /// no spatial coupling — the index-plane argmin over the palette.
+    #[default]
+    None,
+    /// Floyd–Steinberg error diffusion: quantisation error at each pixel
+    /// is pushed onto its not-yet-visited neighbours (7/16 right, 3/16
+    /// down-left, 5/16 down, 1/16 down-right), so a smooth gradient that
+    /// would band under a coarse palette breaks into a stippled mix of
+    /// the two nearest entries that averages to the source colour. A
+    /// general image-processing technique; the GIF spec only constrains
+    /// the ≤256-entry/index-plane output shape, which is unchanged.
+    FloydSteinberg,
+}
+
+/// Tuning knobs for the quantiser entry points that take options.
+///
+/// Constructed with [`Default`] (`max_colors = 256`, no dither) and
+/// adjusted field-by-field, or via the small builder helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuantizeOptions {
+    /// Maximum palette size, clamped to `1..=256` at use. When the frame
+    /// carries transparent pixels one slot is reserved, so the opaque
+    /// colours receive `max_colors - 1` entries.
+    pub max_colors: usize,
+    /// Index-plane assignment strategy ([`Dither::None`] by default).
+    pub dither: Dither,
+}
+
+impl Default for QuantizeOptions {
+    fn default() -> Self {
+        Self {
+            max_colors: MAX_PALETTE,
+            dither: Dither::None,
+        }
+    }
+}
+
+impl QuantizeOptions {
+    /// Options with the given colour budget and no dithering.
+    pub fn with_max_colors(max_colors: usize) -> Self {
+        Self {
+            max_colors,
+            dither: Dither::None,
+        }
+    }
+
+    /// Set the dither strategy, returning the updated options.
+    pub fn dither(mut self, dither: Dither) -> Self {
+        self.dither = dither;
+        self
+    }
+}
+
 /// Result of quantising an RGBA frame: a §19/§21 palette, a §22 index
 /// plane (`width * height` entries, row-major top-to-bottom), and the
 /// reserved §23.c.viii Transparency Index when the input carried any
@@ -84,6 +143,36 @@ pub fn quantize_rgba(
     height: usize,
     max_colors: usize,
 ) -> Result<Quantized> {
+    quantize_rgba_with_options(
+        rgba,
+        width,
+        height,
+        QuantizeOptions::with_max_colors(max_colors),
+    )
+}
+
+/// Quantise an RGBA pixel buffer with explicit [`QuantizeOptions`],
+/// selecting between the flat nearest-entry index plane and Floyd–
+/// Steinberg error diffusion.
+///
+/// Identical to [`quantize_rgba`] when `opts.dither` is [`Dither::None`].
+/// Under [`Dither::FloydSteinberg`] the *palette* is still chosen by
+/// median cut over the opaque pixels, but the index plane is produced by
+/// diffusing each pixel's quantisation error onto its neighbours, which
+/// trades flat banding for a stippled approximation that averages to the
+/// source colour. Transparent pixels neither receive nor propagate error
+/// (they are never displayed) — diffusion simply skips them.
+///
+/// # Errors
+///
+/// * `rgba.len()` is not exactly `width * height * 4`.
+/// * `width * height` overflows `usize`.
+pub fn quantize_rgba_with_options(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    opts: QuantizeOptions,
+) -> Result<Quantized> {
     let pixel_count = width
         .checked_mul(height)
         .ok_or_else(|| Error::InvalidInput("quantize: width*height overflow".into()))?;
@@ -95,7 +184,7 @@ pub fn quantize_rgba(
         )));
     }
 
-    let budget = max_colors.clamp(1, MAX_PALETTE);
+    let budget = opts.max_colors.clamp(1, MAX_PALETTE);
 
     // Split pixels into opaque (quantised on RGB) and transparent (one
     // shared reserved slot). Collect the opaque samples for median cut;
@@ -133,21 +222,44 @@ pub fn quantize_rgba(
         None
     };
 
-    // Stitch the per-pixel index plane: transparent pixels take the
-    // reserved slot, opaque pixels take their median-cut assignment.
-    let mut indices = Vec::with_capacity(pixel_count);
-    let mut opaque_iter = opaque_lookup.into_iter();
-    for &transparent in &is_transparent {
-        if transparent {
-            indices.push(transparent_index.expect("any_transparent implies Some"));
-        } else {
-            indices.push(
-                opaque_iter
-                    .next()
-                    .expect("one lookup entry per opaque pixel"),
-            );
+    let indices = match opts.dither {
+        Dither::None => {
+            // Stitch the per-pixel index plane: transparent pixels take
+            // the reserved slot, opaque pixels take their nearest-entry
+            // assignment from median cut.
+            let mut indices = Vec::with_capacity(pixel_count);
+            let mut opaque_iter = opaque_lookup.into_iter();
+            for &transparent in &is_transparent {
+                if transparent {
+                    indices.push(transparent_index.expect("any_transparent implies Some"));
+                } else {
+                    indices.push(
+                        opaque_iter
+                            .next()
+                            .expect("one lookup entry per opaque pixel"),
+                    );
+                }
+            }
+            indices
         }
-    }
+        Dither::FloydSteinberg => {
+            // Error diffusion runs over the full spatial grid so it can
+            // reach each pixel's right/below neighbours. The opaque-pixel
+            // search palette excludes the reserved transparent slot (a
+            // transparent entry must never be chosen for an opaque pixel),
+            // so dither against the leading `opaque_len` entries.
+            let opaque_len = palette.len() - usize::from(any_transparent);
+            let samples: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+            dither_samples_floyd_steinberg(
+                &samples,
+                width,
+                height,
+                &palette[..opaque_len],
+                &is_transparent,
+                transparent_index,
+            )
+        }
+    };
 
     Ok(Quantized {
         palette,
@@ -172,6 +284,30 @@ pub fn quantize_rgb(
     height: usize,
     max_colors: usize,
 ) -> Result<Quantized> {
+    quantize_rgb_with_options(
+        rgb,
+        width,
+        height,
+        QuantizeOptions::with_max_colors(max_colors),
+    )
+}
+
+/// Quantise an opaque RGB pixel buffer with explicit [`QuantizeOptions`].
+///
+/// Identical to [`quantize_rgb`] when `opts.dither` is [`Dither::None`].
+/// Under [`Dither::FloydSteinberg`] the palette is selected by median cut
+/// and the index plane is produced by error diffusion over the grid.
+///
+/// # Errors
+///
+/// * `rgb.len()` is not exactly `width * height * 3`.
+/// * `width * height` overflows `usize`.
+pub fn quantize_rgb_with_options(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    opts: QuantizeOptions,
+) -> Result<Quantized> {
     let pixel_count = width
         .checked_mul(height)
         .ok_or_else(|| Error::InvalidInput("quantize: width*height overflow".into()))?;
@@ -182,9 +318,18 @@ pub fn quantize_rgb(
             pixel_count * 3
         )));
     }
-    let budget = max_colors.clamp(1, MAX_PALETTE);
+    let budget = opts.max_colors.clamp(1, MAX_PALETTE);
     let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
-    let (palette, indices) = median_cut(&samples, budget);
+    let (palette, lookup) = median_cut(&samples, budget);
+    let indices = match opts.dither {
+        Dither::None => lookup,
+        Dither::FloydSteinberg => {
+            // No transparency: every pixel is opaque, the full palette is
+            // the opaque-search palette, and the mask is all-false.
+            let opaque = vec![false; pixel_count];
+            dither_samples_floyd_steinberg(&samples, width, height, &palette, &opaque, None)
+        }
+    };
     Ok(Quantized {
         palette,
         indices,
@@ -355,6 +500,102 @@ fn remap_to_nearest(samples: &[[u8; 3]], palette: &[Rgb]) -> Vec<u8> {
         .iter()
         .map(|&[r, g, b]| nearest_index(palette, Rgb::new(r, g, b)))
         .collect()
+}
+
+/// Produce a §22 index plane by Floyd–Steinberg error diffusion.
+///
+/// `samples` is the full `width * height` grid of source RGB colours
+/// (transparent pixels carry an arbitrary colour, masked out by
+/// `is_transparent`). `palette` is the *opaque* search palette — the
+/// reserved transparent slot, if any, is excluded so error diffusion can
+/// never select it for an opaque pixel; `transparent_index` is the index
+/// transparent pixels emit instead.
+///
+/// Error is carried in a per-channel `i32` working buffer so accumulated
+/// diffusion can exceed the `0..=255` range before it is re-clamped at
+/// the nearest-entry search. The kernel pushes the quantisation error of
+/// each pixel onto its not-yet-visited neighbours — 7/16 east, 3/16
+/// south-west, 5/16 south, 1/16 south-east — left-to-right, top-to-bottom.
+/// Transparent pixels neither receive nor emit error (they are never
+/// displayed): incoming error to a transparent cell is dropped and no
+/// error is diffused out of one.
+fn dither_samples_floyd_steinberg(
+    samples: &[[u8; 3]],
+    width: usize,
+    height: usize,
+    palette: &[Rgb],
+    is_transparent: &[bool],
+    transparent_index: Option<u8>,
+) -> Vec<u8> {
+    let pixel_count = width * height;
+    let mut indices = vec![0u8; pixel_count];
+    // Two rows of accumulated error (current + next), each [r, g, b] in
+    // i32 so over/undershoot can build up across pixels before clamping.
+    let mut cur_err = vec![[0i32; 3]; width];
+    let mut next_err = vec![[0i32; 3]; width];
+
+    // An empty (degenerate) palette has no valid opaque index; every
+    // opaque pixel falls back to 0, matching `nearest_index`'s contract.
+    let search = if palette.is_empty() {
+        &[Rgb::new(0, 0, 0)][..]
+    } else {
+        palette
+    };
+
+    for y in 0..height {
+        // Reset the next-row accumulator before this row diffuses into it.
+        for e in next_err.iter_mut() {
+            *e = [0; 3];
+        }
+        for x in 0..width {
+            let p = y * width + x;
+            if is_transparent[p] {
+                indices[p] = transparent_index.expect("transparent pixel needs reserved index");
+                // No error in or out of a never-displayed pixel.
+                continue;
+            }
+            // Source colour + the error diffused into this cell, clamped
+            // back to the displayable range for the nearest-entry search.
+            let [sr, sg, sb] = samples[p];
+            let want = [
+                (sr as i32 + cur_err[x][0]).clamp(0, 255),
+                (sg as i32 + cur_err[x][1]).clamp(0, 255),
+                (sb as i32 + cur_err[x][2]).clamp(0, 255),
+            ];
+            let idx = nearest_index(
+                search,
+                Rgb::new(want[0] as u8, want[1] as u8, want[2] as u8),
+            );
+            indices[p] = idx;
+            let chosen = search[idx as usize];
+            // Quantisation error = what we wanted minus what we picked.
+            let err = [
+                want[0] - chosen.r as i32,
+                want[1] - chosen.g as i32,
+                want[2] - chosen.b as i32,
+            ];
+            // Diffuse: 7/16 east, 3/16 south-west, 5/16 south, 1/16 SE.
+            for c in 0..3 {
+                let e = err[c];
+                if x + 1 < width {
+                    cur_err[x + 1][c] += e * 7 / 16;
+                }
+                if y + 1 < height {
+                    if x > 0 {
+                        next_err[x - 1][c] += e * 3 / 16;
+                    }
+                    next_err[x][c] += e * 5 / 16;
+                    if x + 1 < width {
+                        next_err[x + 1][c] += e / 16;
+                    }
+                }
+            }
+        }
+        // The row we just diffused into becomes the current row.
+        core::mem::swap(&mut cur_err, &mut next_err);
+    }
+
+    indices
 }
 
 /// Map a single RGB colour to the nearest entry of an existing palette
@@ -583,5 +824,205 @@ mod tests {
         let q = quantize_rgba(&rgba, 5, 1, 3).unwrap();
         assert!(q.palette.len() <= 3);
         assert!(q.transparent_index.is_some());
+    }
+
+    // ----- Floyd–Steinberg dithering -----
+
+    #[test]
+    fn dither_none_matches_plain_entry_point() {
+        // The options entry point with Dither::None must be byte-identical
+        // to the bare quantize_rgb / quantize_rgba.
+        let rgb: Vec<u8> = (0..48u8).collect(); // 16 px (4x4) of varied colour
+        let plain = quantize_rgb(&rgb, 4, 4, 8).unwrap();
+        let opt =
+            quantize_rgb_with_options(&rgb, 4, 4, QuantizeOptions::with_max_colors(8)).unwrap();
+        assert_eq!(plain, opt);
+
+        let rgba: Vec<u8> = (0..64u8).collect(); // 16 px (4x4) RGBA
+        let plain = quantize_rgba(&rgba, 4, 4, 8).unwrap();
+        let opt =
+            quantize_rgba_with_options(&rgba, 4, 4, QuantizeOptions::with_max_colors(8)).unwrap();
+        assert_eq!(plain, opt);
+    }
+
+    #[test]
+    fn dither_indices_stay_in_palette_range() {
+        // 8x8 horizontal grey ramp, budget 4, dithered.
+        let mut rgb = Vec::new();
+        for _y in 0..8 {
+            for x in 0..8u8 {
+                let v = x * 36; // 0..252
+                rgb.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let opts = QuantizeOptions::with_max_colors(4).dither(Dither::FloydSteinberg);
+        let q = quantize_rgb_with_options(&rgb, 8, 8, opts).unwrap();
+        assert_eq!(q.indices.len(), 64);
+        assert!(q.indices.iter().all(|&i| (i as usize) < q.palette.len()));
+    }
+
+    #[test]
+    fn dither_solid_image_is_flat() {
+        // A solid image has zero quantisation error, so dithering changes
+        // nothing — every pixel still maps to the one palette entry.
+        let rgb = vec![64u8; 3 * 16]; // 4x4 solid
+        let opts = QuantizeOptions::with_max_colors(8).dither(Dither::FloydSteinberg);
+        let q = quantize_rgb_with_options(&rgb, 4, 4, opts).unwrap();
+        assert_eq!(q.palette.len(), 1);
+        assert!(q.indices.iter().all(|&i| i == 0));
+    }
+
+    #[test]
+    fn dither_breaks_banding_into_a_mix() {
+        // A smooth ramp quantised to 2 colours: flat assignment splits it
+        // into two solid bands (each index appears in a contiguous block);
+        // dithering interleaves the two indices to approximate midtones, so
+        // a row that is a single flat index under no-dither becomes a mix.
+        let mut rgb = Vec::new();
+        for x in 0..16u8 {
+            let v = x * 17; // 0..255 ramp
+            rgb.extend_from_slice(&[v, v, v]);
+        }
+        let flat = quantize_rgb(&rgb, 16, 1, 2).unwrap();
+        let dithered = quantize_rgb_with_options(
+            &rgb,
+            16,
+            1,
+            QuantizeOptions::with_max_colors(2).dither(Dither::FloydSteinberg),
+        )
+        .unwrap();
+        // Both use a 2-entry palette.
+        assert_eq!(flat.palette.len(), 2);
+        assert_eq!(dithered.palette.len(), 2);
+        // The dithered plane must not be a simple monotone threshold split:
+        // somewhere a higher-value pixel takes the dark index or vice versa,
+        // which a flat nearest-entry split never does.
+        let flat_transitions = transition_count(&flat.indices);
+        let dith_transitions = transition_count(&dithered.indices);
+        assert!(
+            dith_transitions > flat_transitions,
+            "dithering should add index transitions (flat {flat_transitions}, dithered {dith_transitions})"
+        );
+    }
+
+    fn transition_count(indices: &[u8]) -> usize {
+        indices.windows(2).filter(|w| w[0] != w[1]).count()
+    }
+
+    /// Mean squared error of the *block-averaged* reconstruction: average
+    /// every `block × block` tile of the reconstructed (palette[index])
+    /// image and of the source, then compare. Error diffusion is designed
+    /// to make the *local average* of the stippled output track the source
+    /// — pointwise error can rise while the block average improves, which
+    /// is exactly the perceptual win dithering buys.
+    fn block_mean_sq_error(
+        src: &[[u8; 3]],
+        palette: &[Rgb],
+        indices: &[u8],
+        width: usize,
+        height: usize,
+        block: usize,
+    ) -> f64 {
+        let mut total = 0.0f64;
+        let mut tiles = 0u64;
+        let mut by = 0;
+        while by < height {
+            let mut bx = 0;
+            while bx < width {
+                let (mut ssr, mut ssg, mut ssb) = (0i64, 0i64, 0i64);
+                let (mut rsr, mut rsg, mut rsb) = (0i64, 0i64, 0i64);
+                let mut n = 0i64;
+                for y in by..(by + block).min(height) {
+                    for x in bx..(bx + block).min(width) {
+                        let p = y * width + x;
+                        let [r, g, b] = src[p];
+                        ssr += r as i64;
+                        ssg += g as i64;
+                        ssb += b as i64;
+                        let c = palette[indices[p] as usize];
+                        rsr += c.r as i64;
+                        rsg += c.g as i64;
+                        rsb += c.b as i64;
+                        n += 1;
+                    }
+                }
+                let n = n as f64;
+                let dr = (ssr - rsr) as f64 / n;
+                let dg = (ssg - rsg) as f64 / n;
+                let db = (ssb - rsb) as f64 / n;
+                total += dr * dr + dg * dg + db * db;
+                tiles += 1;
+                bx += block;
+            }
+            by += block;
+        }
+        total / tiles as f64
+    }
+
+    #[test]
+    fn dither_reduces_block_average_error_on_a_gradient() {
+        // 32x32 diagonal RGB gradient quantised to 8 colours. Error
+        // diffusion lowers the *block-averaged* error versus the flat
+        // nearest-entry plane: the stippled mix of palette entries averages
+        // back to the source over a small neighbourhood, where the flat
+        // plane bands into solid blocks that miss the midtones entirely.
+        let w = 32usize;
+        let h = 32usize;
+        let mut src = Vec::with_capacity(w * h);
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                let r = (x * 8) as u8;
+                let g = (y * 8) as u8;
+                let b = ((x + y) * 4) as u8;
+                src.push([r, g, b]);
+                rgb.extend_from_slice(&[r, g, b]);
+            }
+        }
+        let flat = quantize_rgb(&rgb, w, h, 8).unwrap();
+        let dithered = quantize_rgb_with_options(
+            &rgb,
+            w,
+            h,
+            QuantizeOptions::with_max_colors(8).dither(Dither::FloydSteinberg),
+        )
+        .unwrap();
+        let flat_err = block_mean_sq_error(&src, &flat.palette, &flat.indices, w, h, 4);
+        let dith_err = block_mean_sq_error(&src, &dithered.palette, &dithered.indices, w, h, 4);
+        assert!(
+            dith_err < flat_err,
+            "dither block-avg error {dith_err:.1} not below flat {flat_err:.1}"
+        );
+    }
+
+    #[test]
+    fn dither_routes_transparent_pixels_and_excludes_their_slot() {
+        // A grid with transparent pixels: the dithered plane must still
+        // send every transparent pixel to the reserved index, and no
+        // opaque pixel may land on that reserved slot.
+        let w = 4usize;
+        let h = 4usize;
+        let mut rgba = Vec::new();
+        for i in 0..(w * h) {
+            if i % 5 == 0 {
+                rgba.extend_from_slice(&[9, 9, 9, 0]); // transparent
+            } else {
+                let v = (i * 13) as u8;
+                rgba.extend_from_slice(&[v, 255 - v, v / 2, 255]);
+            }
+        }
+        let opts = QuantizeOptions::with_max_colors(8).dither(Dither::FloydSteinberg);
+        let q = quantize_rgba_with_options(&rgba, w, h, opts).unwrap();
+        let ti = q.transparent_index.expect("has transparent pixels");
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            if px[3] < ALPHA_OPAQUE_THRESHOLD {
+                assert_eq!(
+                    q.indices[i], ti,
+                    "transparent pixel {i} not on reserved slot"
+                );
+            } else {
+                assert_ne!(q.indices[i], ti, "opaque pixel {i} landed on reserved slot");
+            }
+        }
     }
 }

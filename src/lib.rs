@@ -158,7 +158,10 @@ pub use image::{
     Rgb, Version,
 };
 pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};
-pub use quantize::{quantize_rgb, quantize_rgba, Quantized};
+pub use quantize::{
+    quantize_rgb, quantize_rgb_with_options, quantize_rgba, quantize_rgba_with_options, Dither,
+    QuantizeOptions, Quantized,
+};
 
 // Registry-gated public surface. The `__oxideav_entry` re-export is
 // load-bearing: `oxideav-meta`'s build-script-generated `register_all`

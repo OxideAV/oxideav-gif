@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Floyd–Steinberg error-diffusion dithering for the truecolor encode
+  path. The `quantize` module gains a `Dither` strategy enum
+  (`None` / `FloydSteinberg`) and a `QuantizeOptions { max_colors,
+  dither }` bundle, plus `quantize_rgb_with_options` /
+  `quantize_rgba_with_options` entry points. Palette *selection* is still
+  median cut; the dither only changes the §22 index-plane assignment,
+  diffusing each pixel's quantisation error onto its not-yet-visited
+  neighbours (7/16 east, 3/16 south-west, 5/16 south, 1/16 south-east) so
+  a smooth gradient that would band under a coarse palette breaks into a
+  stippled mix of the two nearest entries that averages back to the source
+  colour over a small neighbourhood. A general image-processing technique;
+  the GIF spec only constrains the ≤256-entry / index-plane output shape,
+  which is unchanged. Transparent pixels neither receive nor propagate
+  error (they are never displayed). `GifImage::from_rgba_frame_with_options`
+  / `from_rgba_frames_with_options` expose the choice at the constructor
+  level. The bare `quantize_*` / `from_rgba_*` functions keep the flat
+  nearest-entry default, so existing callers are unaffected. 7 new
+  `quantize` unit tests (dither-none-equals-plain, in-range indices,
+  solid-image no-op, banding broken into a mix, block-averaged error
+  reduction on a gradient, transparent-slot exclusion) + 2
+  `tests/quantize_animation.rs` integration tests (dithered still and
+  dithered animation round-trip + compose/Playback parity).
+
 ### Changed
 
 - Quantiser index-plane assignment is now nearest-entry rather than

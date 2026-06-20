@@ -194,3 +194,68 @@ fn quantizer_keeps_a_repeated_palette_foldable_into_a_global_table() {
     let composed = compose(&decoded).unwrap();
     assert_eq!(composed.len(), 2);
 }
+
+#[test]
+fn dithered_still_round_trips_to_a_decodable_gif() {
+    // A 24x24 smooth diagonal gradient quantised to 8 colours with
+    // Floyd–Steinberg dithering. The dithered index plane must still
+    // encode + decode + compose to a valid in-range RGBA canvas.
+    use oxideav_gif::{Dither, QuantizeOptions};
+    let (w, h) = (24usize, 24usize);
+    let mut rgba = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let r = (x * 10) as u8;
+            let g = (y * 10) as u8;
+            let b = ((x + y) * 5) as u8;
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    let opts = QuantizeOptions::with_max_colors(8).dither(Dither::FloydSteinberg);
+    let img = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, opts).unwrap();
+    // Median cut keeps at most 8 entries; dithering only stipples between
+    // them, so the palette stays within budget.
+    let frame = img.frames().next().unwrap();
+    let pal = img.global_palette.as_ref().unwrap();
+    assert!(pal.len() <= 8);
+    assert!(frame.indices.iter().all(|&i| (i as usize) < pal.len()));
+
+    let bytes = encode(&img).unwrap();
+    let decoded = decode(&bytes).unwrap();
+    let composed = compose(&decoded).unwrap();
+    assert_eq!(composed.len(), 1);
+    let canvas = &composed[0].canvas;
+    assert_eq!(canvas.width as usize, w);
+    assert_eq!(canvas.height as usize, h);
+    // Every composed pixel must be one of the (opaque) palette entries.
+    for px in canvas.pixels.chunks_exact(4) {
+        assert_eq!(px[3], 255);
+        let c = Rgb::new(px[0], px[1], px[2]);
+        assert!(pal.contains(&c), "composed colour {c:?} not in palette");
+    }
+}
+
+#[test]
+fn dithered_animation_round_trips_and_composes() {
+    use oxideav_gif::{Dither, QuantizeOptions};
+    let (w, h) = (8u16, 8u16);
+    let f0 = solid(w as usize, h as usize, 200, 30, 30, 255);
+    let f1 = solid(w as usize, h as usize, 30, 200, 30, 255);
+    let frames = [
+        (&f0[..], 10u16, DisposalMethod::None),
+        (&f1[..], 10u16, DisposalMethod::None),
+    ];
+    let opts = QuantizeOptions::with_max_colors(16).dither(Dither::FloydSteinberg);
+    let img = GifImage::from_rgba_frames_with_options(&frames, w, h, opts, Some(0)).unwrap();
+    let bytes = encode(&img).unwrap();
+    let decoded = decode(&bytes).unwrap();
+    let eager = compose(&decoded).unwrap();
+    assert_eq!(eager.len(), 2);
+    // Lazy Playback parity with eager compose.
+    let play = Playback::new(&decoded);
+    let lazy: Vec<_> = play.frames().collect::<Result<_, _>>().unwrap();
+    assert_eq!(lazy.len(), 2);
+    for (l, e) in lazy.iter().zip(&eager) {
+        assert_eq!(l.canvas.pixels, e.canvas.pixels);
+    }
+}
