@@ -162,12 +162,15 @@ fn canvas_to_videoframe(canvas: &RgbaCanvas, pts: i64) -> CoreFrame {
 /// `send_frame` and emits a single-frame GIF byte stream per
 /// `receive_packet`.
 ///
-/// The encoder builds a per-frame palette by scanning the input pixels
-/// and quantising to a 256-entry colour table (drop the alpha channel —
-/// GIF has no per-pixel alpha, only a single transparent index). If the
-/// input contains more than 256 distinct colours the encoder errors out
-/// rather than perform lossy quantisation; callers that want lossy
-/// behaviour should pre-quantise before submitting.
+/// The encoder builds a per-frame §19 colour table from the input
+/// pixels. A fully-opaque frame using ≤256 distinct RGB triplets keeps
+/// its exact colours (lossless); a frame with more than 256 colours is
+/// reduced to a 256-entry palette with the median-cut quantiser
+/// ([`crate::quantize`]). GIF has no per-pixel alpha — only one
+/// §23.c.viii Transparency Index — so transparent pixels (alpha below
+/// [`crate::quantize::ALPHA_OPAQUE_THRESHOLD`]) route to a single
+/// reserved palette slot and the frame gains a §23 Graphic Control
+/// Extension marking that slot transparent.
 pub struct GifEncoder {
     output_params: CodecParameters,
     pending: std::collections::VecDeque<Packet>,
@@ -214,8 +217,18 @@ impl Encoder for GifEncoder {
             .first()
             .ok_or_else(|| CoreError::invalid("gif encoder: video frame has no planes"))?;
 
-        let (palette, indices) =
+        let (palette, indices, transparent_index) =
             build_palette_and_indices(&plane.data, plane.stride, width as usize, height as usize)?;
+
+        // Attach a §23 Graphic Control Extension only when the frame
+        // carried transparency, so a fully-opaque single-colour-clean
+        // input stays a minimal GIF89a image with no GCE.
+        let graphic_control = transparent_index.map(|ti| crate::image::GraphicControl {
+            disposal: crate::image::DisposalMethod::None,
+            user_input: false,
+            transparent_index: Some(ti),
+            delay_centis: 0,
+        });
 
         let image = GifImage {
             version: Version::Gif89a,
@@ -235,7 +248,7 @@ impl Encoder for GifEncoder {
                 palette_sorted: false,
                 interlaced: false,
                 indices,
-                graphic_control: None,
+                graphic_control,
             })],
         };
 
@@ -256,18 +269,29 @@ impl Encoder for GifEncoder {
     }
 }
 
-/// Quantise an RGBA frame into a GIF palette + index plane.
+/// Quantise an RGBA frame into a GIF palette + index plane, plus the
+/// §23.c.viii Transparency Index when the frame carried any transparent
+/// pixel.
 ///
-/// Drops the alpha channel — GIF only supports a single transparent
-/// colour index, not per-pixel alpha — and errors out if the frame
-/// uses more than 256 distinct RGB triplets. Callers wanting lossy
-/// quantisation should pre-process before submitting to the encoder.
+/// Two paths, picked automatically:
+///
+/// * **Lossless** — when the frame is fully opaque and uses ≤256
+///   distinct RGB triplets, the exact set of colours becomes the
+///   palette and every pixel keeps its precise colour. This keeps a
+///   palette-clean input byte-stable through the encoder, with no
+///   quantisation error.
+/// * **Median cut** — when the frame uses more than 256 distinct
+///   colours, or carries transparent pixels (GIF has no per-pixel
+///   alpha; only one §23.c.viii Transparency Index), the frame is
+///   reduced with [`crate::quantize::quantize_rgba`] to a conformant
+///   ≤256-entry §19 palette. Transparent pixels route to one reserved
+///   slot returned as the third tuple element.
 fn build_palette_and_indices(
     rgba: &[u8],
     stride: usize,
     width: usize,
     height: usize,
-) -> CoreResult<(Vec<Rgb>, Vec<u8>)> {
+) -> CoreResult<(Vec<Rgb>, Vec<u8>, Option<u8>)> {
     let row_bytes = width
         .checked_mul(4)
         .ok_or_else(|| CoreError::invalid("gif encoder: row size overflow"))?;
@@ -284,30 +308,48 @@ fn build_palette_and_indices(
             "gif encoder: plane data shorter than width*height*4",
         ));
     }
+
+    // Repack to a tight (no-stride) RGBA buffer and decide whether the
+    // lossless exact-palette path is reachable: fully opaque + ≤256
+    // distinct colours.
     let pixel_count = width * height;
+    let mut tight = Vec::with_capacity(pixel_count * 4);
     let mut indices = Vec::with_capacity(pixel_count);
     let mut palette: Vec<Rgb> = Vec::new();
+    let mut exact_ok = true;
+    let mut any_transparent = false;
     for y in 0..height {
         let row = &rgba[y * stride..y * stride + row_bytes];
         for x in 0..width {
             let p = &row[x * 4..x * 4 + 4];
-            let rgb = Rgb::new(p[0], p[1], p[2]);
-            let idx = match palette.iter().position(|c| *c == rgb) {
-                Some(i) => i,
-                None => {
-                    if palette.len() == 256 {
-                        return Err(CoreError::invalid(
-                            "gif encoder: input has more than 256 distinct colours; pre-quantise before submitting",
-                        ));
+            tight.extend_from_slice(p);
+            if p[3] < crate::quantize::ALPHA_OPAQUE_THRESHOLD {
+                any_transparent = true;
+                exact_ok = false;
+            }
+            if exact_ok {
+                let rgb = Rgb::new(p[0], p[1], p[2]);
+                match palette.iter().position(|c| *c == rgb) {
+                    Some(i) => indices.push(i as u8),
+                    None if palette.len() < 256 => {
+                        palette.push(rgb);
+                        indices.push((palette.len() - 1) as u8);
                     }
-                    palette.push(rgb);
-                    palette.len() - 1
+                    None => exact_ok = false,
                 }
-            };
-            indices.push(idx as u8);
+            }
         }
     }
-    Ok((palette, indices))
+
+    if exact_ok && !any_transparent {
+        // Lossless: exact palette + indices, no transparency.
+        return Ok((palette, indices, None));
+    }
+
+    // Lossy fallback: median-cut quantiser over the tight RGBA buffer.
+    let q = crate::quantize::quantize_rgba(&tight, width, height, crate::quantize::MAX_PALETTE)
+        .map_err(|e| CoreError::invalid(format!("gif encoder: {e}")))?;
+    Ok((q.palette, q.indices, q.transparent_index))
 }
 
 #[cfg(test)]
@@ -393,9 +435,11 @@ mod tests {
     }
 
     #[test]
-    fn encoder_rejects_more_than_256_colours() {
-        // Build a 17×16 = 272-pixel image where every pixel has a
-        // unique RGB triplet → > 256 colours.
+    fn encoder_quantises_more_than_256_colours() {
+        // 17×16 = 272 pixels, every one a unique RGB triplet → > 256
+        // colours. The encoder used to reject this; it now reduces it
+        // to a conformant ≤256-entry §19 palette via median cut and
+        // produces a decodable stream.
         let w = 17usize;
         let h = 16usize;
         let mut rgba = Vec::with_capacity(w * h * 4);
@@ -419,6 +463,48 @@ mod tests {
                 data: rgba,
             }],
         });
-        assert!(enc.send_frame(&frame).is_err());
+        enc.send_frame(&frame).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        assert!(pkt.data.starts_with(b"GIF"));
+        // The produced stream decodes, and its §19 palette is within
+        // the 256-entry limit.
+        let decoded = crate::decode(&pkt.data).unwrap();
+        let pal = decoded.global_palette.as_ref().unwrap();
+        assert!(pal.len() <= 256);
+        assert_eq!(decoded.screen_width as usize, w);
+        assert_eq!(decoded.screen_height as usize, h);
+    }
+
+    #[test]
+    fn encoder_marks_transparency_with_gce() {
+        // 2×1: one opaque red pixel + one fully-transparent pixel.
+        let w = 2usize;
+        let h = 1usize;
+        let rgba = vec![255, 0, 0, 255, 9, 9, 9, 0];
+        let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        params.width = Some(w as u32);
+        params.height = Some(h as u32);
+        params.pixel_format = Some(PixelFormat::Rgba);
+        let mut enc = make_encoder(&params).unwrap();
+        let frame = CoreFrame::Video(VideoFrame {
+            pts: Some(0),
+            planes: vec![VideoPlane {
+                stride: w * 4,
+                data: rgba,
+            }],
+        });
+        enc.send_frame(&frame).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        let decoded = crate::decode(&pkt.data).unwrap();
+        // The frame carries a §23 GCE with a §23.c.viii Transparency
+        // Index, and the transparent pixel decodes to alpha 0 through
+        // the compositor.
+        assert!(decoded.has_transparency());
+        let composed = crate::compose(&decoded).unwrap();
+        let canvas = &composed[0].canvas;
+        // Pixel 1 (the transparent one) composites to fully transparent.
+        assert_eq!(canvas.pixels[7], 0, "transparent pixel alpha");
+        // Pixel 0 (opaque red) stays opaque.
+        assert_eq!(canvas.pixels[3], 0xFF, "opaque pixel alpha");
     }
 }

@@ -328,6 +328,30 @@ Implements every block type defined by the CompuServe specifications:
   eligibility plus a randomized compose-equivalence property, and the
   `decode` fuzz harness asserts `compose(before) == compose(after)` on
   every decodable fuzz input.
+- Truecolor RGBA → GIF encode path (`quantize` module +
+  `GifImage::from_rgba_frame` / `from_rgba_frames`). A GIF cannot carry
+  truecolor — §19/§21 cap a colour table at 256 entries and §22 stores
+  one palette index per pixel — so an encoder fed arbitrary 24-bit RGB
+  has to pick a representative palette and map every pixel to it. The
+  `quantize` module does that with **median cut** (a general,
+  format-independent technique; the spec's only stake is the
+  ≤256-entry/index-plane output shape): `quantize_rgba` reduces an RGBA
+  buffer, folding GIF's lack of per-pixel alpha down to the single
+  §23.c.viii Transparency Index (sub-threshold-alpha pixels route to one
+  reserved palette slot returned as `Quantized::transparent_index`);
+  `quantize_rgb` is the no-alpha entry point; `nearest_index` maps a
+  colour to an existing palette for shared-palette compositing.
+  `GifImage::from_rgba_frame` wraps a single frame into a §18 Logical
+  Screen with a §19 Global Color Table (attaching a §23 GCE carrying the
+  reserved transparency index when the frame has transparent pixels,
+  staying GIF87a when fully opaque); `from_rgba_frames` builds a
+  multi-frame animation, each frame quantised to its own §21 Local Color
+  Table and carrying a §23 GCE with its §23.c.vii delay + §23.c.iv
+  disposal, with `loop_count` threading the NETSCAPE2.0 §26 looping
+  Application Extension. The registry `GifEncoder` routes through this:
+  a fully-opaque ≤256-colour frame keeps its exact palette (lossless),
+  and a >256-colour or transparent frame is quantised instead of
+  rejected.
 - `decode_first_frame` cover-frame fast-path that short-circuits at
   the first image-bearing block and skips the per-block dispatch
   for everything that follows. Useful when you only need a static

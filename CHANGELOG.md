@@ -4,6 +4,34 @@
 
 ### Added
 
+- Truecolor RGBA → GIF encode path. A new `quantize` module reduces
+  arbitrary 24-bit RGB to a conformant ≤256-entry §19/§21 colour table +
+  §22 index plane using **median cut** (a general, format-independent
+  quantiser — the GIF spec only constrains the ≤256-entry/index-plane
+  output shape). `quantize::quantize_rgba` folds GIF's lack of per-pixel
+  alpha down to the single §23.c.viii Transparency Index (sub-threshold-
+  alpha pixels route to one reserved slot returned as
+  `Quantized::transparent_index`); `quantize::quantize_rgb` is the
+  no-alpha entry point; `quantize::nearest_index` maps a colour to an
+  existing palette. Two public `GifImage` constructors layer on top:
+  `from_rgba_frame` builds a single-image §18 Logical Screen with a §19
+  Global Color Table (attaching a §23 GCE with the reserved transparency
+  index when needed, staying GIF87a when fully opaque), and
+  `from_rgba_frames` builds a multi-frame animation — each frame
+  quantised to its own §21 Local Color Table, each carrying a §23 GCE
+  with its §23.c.vii delay + §23.c.iv disposal, and `loop_count`
+  threading the NETSCAPE2.0 §26 looping Application Extension. The
+  registry `GifEncoder` now uses this path: a fully-opaque ≤256-colour
+  frame keeps its exact palette (lossless), a >256-colour or transparent
+  frame is quantised instead of rejected (previously the encoder errored
+  on any input with more than 256 distinct colours). 24 new tests (11
+  `quantize` unit + 8 `image` constructor unit + 3 `registry` unit re-
+  pinned/added + 5 `tests/quantize_animation.rs` integration: single
+  truecolor still lossless round-trip, high-colour median-cut within the
+  §19 limit, multi-frame R→G→B animation compose + lazy-Playback parity,
+  animated transparency show-through, and repeated-palette hoist into a
+  GCT).
+
 - Non-fatal conformance reporting: `GifImage::conformance_report()`
   walks an in-memory image against the Appendix-B grammar and the
   surrounding §7–§26 field rules and returns a `ConformanceReport` —
