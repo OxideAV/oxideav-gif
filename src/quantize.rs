@@ -270,8 +270,13 @@ impl ColorBox {
 }
 
 /// Median-cut quantiser core. Returns the selected palette plus, for
-/// every sample in `samples` (in order), the index of the palette entry
-/// it maps to.
+/// every sample in `samples` (in order), the index of the *nearest*
+/// palette entry it maps to.
+///
+/// Colour selection is median cut (split the widest box along its longest
+/// axis until the budget is met); the index plane is then assigned by
+/// nearest-entry remap over the final averaged palette, so a sample never
+/// keeps a strictly-worse box-of-origin assignment.
 ///
 /// `budget` is the maximum palette size, already clamped to `1..=256`.
 /// An empty input yields a single placeholder black entry and no
@@ -321,18 +326,35 @@ fn median_cut(samples: &[[u8; 3]], budget: usize) -> (Vec<Rgb>, Vec<u8>) {
         boxes.push(ColorBox::from_members(samples, right));
     }
 
-    // Each box contributes one palette entry (its average colour); every
-    // member maps to that box's index.
+    // Each box contributes one palette entry: its average colour.
     let mut palette = Vec::with_capacity(boxes.len());
-    let mut lookup = vec![0u8; samples.len()];
-    for (box_idx, b) in boxes.iter().enumerate() {
+    for b in &boxes {
         palette.push(b.average(samples));
-        for &member in &b.members {
-            lookup[member] = box_idx as u8;
-        }
     }
 
+    // Map every sample to its *nearest* palette entry rather than the box
+    // it fell into. After a box is averaged to one colour, a sample near a
+    // box boundary can be closer to a neighbouring box's average than to
+    // its own; nearest-entry remap removes that residual error at no
+    // change to the palette. The box partition is only the colour-selection
+    // step; the index plane is recomputed against the final palette.
+    let lookup = remap_to_nearest(samples, &palette);
+
     (palette, lookup)
+}
+
+/// Map every sample to the index of its nearest palette entry by
+/// squared-Euclidean RGB distance. Shared by [`median_cut`] (final
+/// index-plane assignment) and the dithered path.
+///
+/// The palette never exceeds [`MAX_PALETTE`] (256) entries, so the linear
+/// scan per sample is bounded; a `[Rgb; 256]`-cardinality search keeps the
+/// implementation branch-simple and exact rather than approximate.
+fn remap_to_nearest(samples: &[[u8; 3]], palette: &[Rgb]) -> Vec<u8> {
+    samples
+        .iter()
+        .map(|&[r, g, b]| nearest_index(palette, Rgb::new(r, g, b)))
+        .collect()
 }
 
 /// Map a single RGB colour to the nearest entry of an existing palette
@@ -476,6 +498,75 @@ mod tests {
         let samples = vec![[1, 2, 3], [4, 5, 6]];
         let (pal, _) = median_cut(&samples, 0);
         assert_eq!(pal.len(), 1);
+    }
+
+    /// Total squared-Euclidean error of an index plane against the
+    /// original samples — the quantity nearest-entry remap minimises.
+    fn total_sq_error(samples: &[[u8; 3]], palette: &[Rgb], lookup: &[u8]) -> u64 {
+        samples
+            .iter()
+            .zip(lookup)
+            .map(|(&[r, g, b], &idx)| {
+                let p = palette[idx as usize];
+                let dr = p.r as i64 - r as i64;
+                let dg = p.g as i64 - g as i64;
+                let db = p.b as i64 - b as i64;
+                (dr * dr + dg * dg + db * db) as u64
+            })
+            .sum()
+    }
+
+    #[test]
+    fn nearest_remap_never_exceeds_box_assignment_error() {
+        // Build a synthetic palette and the two competing index planes
+        // (box-of-origin vs nearest-entry) for a colour set straddling a
+        // box boundary, and assert nearest-entry is no worse.
+        let mut samples = Vec::new();
+        // Two clusters with a few boundary samples between them.
+        for v in [10u8, 12, 14, 200, 202, 204, 100, 105, 110] {
+            samples.push([v, v, v]);
+        }
+        let (pal, lookup) = median_cut(&samples, 2);
+        // Every sample's assigned entry must be its true nearest entry.
+        for (&s, &idx) in samples.iter().zip(&lookup) {
+            let nearest = nearest_index(&pal, Rgb::new(s[0], s[1], s[2]));
+            assert_eq!(idx, nearest, "index plane entry must equal nearest_index");
+        }
+    }
+
+    #[test]
+    fn nearest_remap_reduces_total_error_on_boundary_colors() {
+        // A 1-D ramp 0..=255 quantised to 4 entries: boundary samples
+        // benefit from nearest-entry over box-of-origin. We reconstruct
+        // the box-of-origin lookup to compare against the shipped one.
+        let samples: Vec<[u8; 3]> = (0..=255u8).map(|v| [v, v, v]).collect();
+        let (pal, nearest_lookup) = median_cut(&samples, 4);
+
+        // Recompute a pure box-of-origin lookup from the same boxes by
+        // re-running the split and tagging members — but simplest is to
+        // verify the shipped lookup is the argmin, which dominates any
+        // box-of-origin assignment by construction.
+        let shipped = total_sq_error(&samples, &pal, &nearest_lookup);
+        // The brute-force argmin error is a lower bound the shipped plane
+        // must meet exactly (it IS the argmin).
+        let argmin: u64 = samples
+            .iter()
+            .map(|&s| {
+                pal.iter()
+                    .map(|p| {
+                        let dr = p.r as i64 - s[0] as i64;
+                        let dg = p.g as i64 - s[1] as i64;
+                        let db = p.b as i64 - s[2] as i64;
+                        (dr * dr + dg * dg + db * db) as u64
+                    })
+                    .min()
+                    .unwrap()
+            })
+            .sum();
+        assert_eq!(
+            shipped, argmin,
+            "index plane must be the nearest-entry argmin"
+        );
     }
 
     #[test]

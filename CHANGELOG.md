@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Quantiser index-plane assignment is now nearest-entry rather than
+  box-of-origin. After median cut averages each colour box to one palette
+  entry, the `quantize` module maps every sample to its true nearest
+  palette entry (squared-Euclidean RGB) instead of keeping the box it was
+  partitioned into. A sample near a box boundary can be closer to a
+  neighbouring box's average than to its own; the remap removes that
+  residual error at no change to the selected palette. Exact-colour inputs
+  (≤ budget distinct colours) are unaffected — each colour is still its
+  own box average — so the lossless round-trip path is byte-stable. The
+  index plane is now provably the per-pixel argmin over the final palette.
+
 ### Added
 
 - Truecolor RGBA → GIF encode path. A new `quantize` module reduces
