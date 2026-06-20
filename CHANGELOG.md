@@ -4,6 +4,24 @@
 
 ### Added
 
+- Shared-palette multi-frame quantisation. `quantize::quantize_frames_shared`
+  pools every frame's opaque pixels and runs a single median cut over the
+  union, returning a `SharedQuantized { palette, frame_indices,
+  transparent_index }` whose one palette every frame's §22 index plane
+  references. `GifImage::from_rgba_frames_shared_palette` builds the
+  animation around it: the shared palette is installed as one §18 Global
+  Color Table and no frame carries a §21 Local Color Table, so the encoded
+  stream is smaller (one table, not N) and a viewer never re-loads a
+  per-frame table between frames. A single §23.c.viii Transparency Index is
+  reserved across the whole animation when any frame has transparent
+  pixels; `opts.dither` applies per frame against the shared palette. The
+  per-frame-LCT `from_rgba_frames` path is unchanged. 5 new `quantize`
+  unit tests (empty/length-mismatch errors, union coverage, budget clamp
+  across the union, shared transparent slot) + 2
+  `tests/quantize_animation.rs` integration tests (one-GCT/no-LCT
+  round-trip + compose, and a size comparison proving the shared encode is
+  no larger than per-frame LCTs).
+
 - Floyd–Steinberg error-diffusion dithering for the truecolor encode
   path. The `quantize` module gains a `Dither` strategy enum
   (`None` / `FloydSteinberg`) and a `QuantizeOptions { max_colors,

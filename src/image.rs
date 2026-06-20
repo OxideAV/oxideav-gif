@@ -1569,6 +1569,98 @@ impl GifImage {
         })
     }
 
+    /// Build an animated §18 Logical Screen from a sequence of truecolor
+    /// RGBA frames sharing **one** §18 Global Color Table.
+    ///
+    /// Unlike [`Self::from_rgba_frames`] — which quantises each frame to
+    /// its own §21 Local Color Table — this pools every frame's opaque
+    /// pixels and runs a single median cut over the union, then maps every
+    /// frame's §22 index plane against that one shared palette (see
+    /// [`crate::quantize::quantize_frames_shared`]). The shared palette is
+    /// installed as the §18 Global Color Table and no frame carries an
+    /// LCT, so the encoded animation is smaller (one palette, not N) and a
+    /// viewer never re-loads a per-frame table between frames. When any
+    /// frame has transparent pixels one shared §23.c.viii Transparency
+    /// Index is reserved across the whole animation.
+    ///
+    /// `frames` is a slice of `(rgba, delay_centis, disposal)` tuples in
+    /// playback order; `loop_count` threads the NETSCAPE2.0 looping
+    /// behaviour exactly as in [`Self::from_rgba_frames`]. The returned
+    /// image is GIF89a and ready for [`crate::encode`].
+    ///
+    /// # Errors
+    ///
+    /// * `width` or `height` is `0`.
+    /// * `frames` is empty.
+    /// * Any frame's `rgba.len()` is not exactly `width * height * 4`.
+    pub fn from_rgba_frames_shared_palette(
+        frames: &[(&[u8], u16, DisposalMethod)],
+        width: u16,
+        height: u16,
+        opts: crate::quantize::QuantizeOptions,
+        loop_count: Option<u16>,
+    ) -> crate::error::Result<GifImage> {
+        if width == 0 || height == 0 {
+            return Err(crate::error::Error::InvalidInput(
+                "from_rgba_frames_shared_palette: width/height must be non-zero".into(),
+            ));
+        }
+        if frames.is_empty() {
+            return Err(crate::error::Error::InvalidInput(
+                "from_rgba_frames_shared_palette: at least one frame is required".into(),
+            ));
+        }
+
+        let buffers: Vec<&[u8]> = frames.iter().map(|&(rgba, _, _)| rgba).collect();
+        let shared = crate::quantize::quantize_frames_shared(
+            &buffers,
+            width as usize,
+            height as usize,
+            opts,
+        )?;
+
+        let mut blocks: Vec<Block> = Vec::with_capacity(frames.len() + 1);
+        if let Some(n) = loop_count {
+            let loop_ctl = crate::app_ext::LoopControl {
+                loop_count: Some(n),
+                buffer_size: None,
+            };
+            blocks.push(Block::Application(loop_ctl.to_application()));
+        }
+
+        for (&(_, delay_centis, disposal), indices) in frames.iter().zip(shared.frame_indices) {
+            let graphic_control = Some(GraphicControl {
+                disposal,
+                user_input: false,
+                transparent_index: shared.transparent_index,
+                delay_centis,
+            });
+            blocks.push(Block::Image(Frame {
+                left: 0,
+                top: 0,
+                width,
+                height,
+                local_palette: None,
+                palette_sorted: false,
+                interlaced: false,
+                indices,
+                graphic_control,
+            }));
+        }
+
+        Ok(GifImage {
+            version: Version::Gif89a,
+            screen_width: width,
+            screen_height: height,
+            color_resolution: palette_color_resolution(shared.palette.len()),
+            global_palette_sorted: false,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            global_palette: Some(shared.palette),
+            blocks,
+        })
+    }
+
     /// Bump [`GifImage::version`] up to [`Self::required_version`] when
     /// the current declared version is too low to cover the blocks in
     /// this stream. Returns `true` when a bump actually happened.

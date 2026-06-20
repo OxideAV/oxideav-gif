@@ -337,6 +337,148 @@ pub fn quantize_rgb_with_options(
     })
 }
 
+/// Result of quantising a sequence of frames against one shared palette.
+///
+/// Every frame's index plane references the same [`palette`], so the
+/// palette can live in a single §18 Global Color Table rather than a §21
+/// Local Color Table per frame — smaller output and no inter-frame palette
+/// flicker.
+///
+/// [`palette`]: SharedQuantized::palette
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedQuantized {
+    /// The one colour table shared by every frame — at most
+    /// [`MAX_PALETTE`] entries.
+    pub palette: Vec<Rgb>,
+    /// One index plane per input frame, in input order; each is
+    /// `width * height` entries referencing [`SharedQuantized::palette`].
+    pub frame_indices: Vec<Vec<u8>>,
+    /// `Some(i)` when *any* frame carried a transparent pixel; `i` is the
+    /// shared reserved slot, suitable for every frame's §23.c.viii
+    /// Transparency Index. `None` when every frame was fully opaque.
+    pub transparent_index: Option<u8>,
+}
+
+/// Quantise several equally-sized RGBA frames against **one** shared
+/// palette: pool every frame's opaque pixels, run a single median cut
+/// over the union, then assign each frame's index plane against that one
+/// palette.
+///
+/// This is the counterpart to calling [`quantize_rgba`] per frame (which
+/// gives each frame its own §21 Local Color Table). A shared palette lets
+/// the caller install one §18 Global Color Table for the whole animation
+/// and clears the per-frame palette overhead; it also removes the
+/// palette-flicker a viewer can show when adjacent frames carry
+/// independently-chosen tables. If *any* frame has a transparent pixel one
+/// slot of the budget is reserved across all frames.
+///
+/// `opts.dither` applies per frame against the shared palette.
+///
+/// # Errors
+///
+/// * `frames` is empty.
+/// * `width * height` overflows `usize`.
+/// * Any frame's length is not exactly `width * height * 4`.
+pub fn quantize_frames_shared(
+    frames: &[&[u8]],
+    width: usize,
+    height: usize,
+    opts: QuantizeOptions,
+) -> Result<SharedQuantized> {
+    if frames.is_empty() {
+        return Err(Error::InvalidInput(
+            "quantize_frames_shared: at least one frame is required".into(),
+        ));
+    }
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or_else(|| Error::InvalidInput("quantize: width*height overflow".into()))?;
+    for (f, frame) in frames.iter().enumerate() {
+        if frame.len() != pixel_count * 4 {
+            return Err(Error::InvalidInput(format!(
+                "quantize_frames_shared: frame {} length {} != width*height*4 ({})",
+                f,
+                frame.len(),
+                pixel_count * 4
+            )));
+        }
+    }
+
+    let budget = opts.max_colors.clamp(1, MAX_PALETTE);
+
+    // Per-frame transparency masks + the pooled opaque samples.
+    let mut masks: Vec<Vec<bool>> = Vec::with_capacity(frames.len());
+    let mut pooled: Vec<[u8; 3]> = Vec::new();
+    for frame in frames {
+        let mut mask = Vec::with_capacity(pixel_count);
+        for px in frame.chunks_exact(4) {
+            let transparent = px[3] < ALPHA_OPAQUE_THRESHOLD;
+            mask.push(transparent);
+            if !transparent {
+                pooled.push([px[0], px[1], px[2]]);
+            }
+        }
+        masks.push(mask);
+    }
+    let any_transparent = masks.iter().flatten().any(|&t| t);
+
+    let opaque_budget = if any_transparent {
+        budget.saturating_sub(1).max(1)
+    } else {
+        budget
+    };
+
+    // One median cut over the union of every frame's opaque pixels.
+    let (mut palette, _pooled_lookup) = median_cut(&pooled, opaque_budget);
+    let opaque_len = palette.len();
+
+    let transparent_index = if any_transparent {
+        let idx = palette.len() as u8;
+        palette.push(Rgb::new(0, 0, 0));
+        Some(idx)
+    } else {
+        None
+    };
+
+    // Assign each frame against the shared palette. The pooled lookup is
+    // discarded: a frame's pixels are remapped against the *final* shared
+    // palette (flat or dithered) so the per-frame plane is independent of
+    // the pooling order.
+    let opaque_palette = &palette[..opaque_len];
+    let mut frame_indices = Vec::with_capacity(frames.len());
+    for (frame, mask) in frames.iter().zip(&masks) {
+        let samples: Vec<[u8; 3]> = frame.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+        let plane = match opts.dither {
+            Dither::None => samples
+                .iter()
+                .zip(mask)
+                .map(|(&[r, g, b], &transparent)| {
+                    if transparent {
+                        transparent_index.expect("any_transparent implies Some")
+                    } else {
+                        nearest_index(opaque_palette, Rgb::new(r, g, b))
+                    }
+                })
+                .collect(),
+            Dither::FloydSteinberg => dither_samples_floyd_steinberg(
+                &samples,
+                width,
+                height,
+                opaque_palette,
+                mask,
+                transparent_index,
+            ),
+        };
+        frame_indices.push(plane);
+    }
+
+    Ok(SharedQuantized {
+        palette,
+        frame_indices,
+        transparent_index,
+    })
+}
+
 /// One axis-aligned colour box over a slice of the sample list.
 struct ColorBox {
     /// Indices into the shared sample array that fall in this box.
@@ -1022,6 +1164,97 @@ mod tests {
                 );
             } else {
                 assert_ne!(q.indices[i], ti, "opaque pixel {i} landed on reserved slot");
+            }
+        }
+    }
+
+    // ----- shared-palette multi-frame quantisation -----
+
+    #[test]
+    fn shared_empty_frames_errors() {
+        let r = quantize_frames_shared(&[], 2, 2, QuantizeOptions::default());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn shared_frame_length_mismatch_errors() {
+        let good = vec![0u8; 2 * 2 * 4];
+        let bad = vec![0u8; 7];
+        let r = quantize_frames_shared(&[&good, &bad], 2, 2, QuantizeOptions::default());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn shared_palette_covers_every_frames_colours() {
+        // Frame A is solid red, frame B is solid blue. With a budget of
+        // 256 the shared palette must contain both exactly, and each
+        // frame's plane resolves back to its own colour.
+        let red = [255u8, 0, 0, 255].repeat(4); // 2x2
+        let blue = [0u8, 0, 255, 255].repeat(4);
+        let s = quantize_frames_shared(&[&red, &blue], 2, 2, QuantizeOptions::with_max_colors(256))
+            .unwrap();
+        assert_eq!(s.frame_indices.len(), 2);
+        assert!(s.palette.contains(&Rgb::new(255, 0, 0)));
+        assert!(s.palette.contains(&Rgb::new(0, 0, 255)));
+        assert_eq!(s.transparent_index, None);
+        // Frame 0 resolves to red everywhere, frame 1 to blue.
+        for &i in &s.frame_indices[0] {
+            assert_eq!(s.palette[i as usize], Rgb::new(255, 0, 0));
+        }
+        for &i in &s.frame_indices[1] {
+            assert_eq!(s.palette[i as usize], Rgb::new(0, 0, 255));
+        }
+    }
+
+    #[test]
+    fn shared_budget_is_respected_across_the_union() {
+        // Two frames, each a distinct ramp; the pooled colour set exceeds
+        // the budget, so the shared palette must clamp to it.
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for x in 0..16u8 {
+            a.extend_from_slice(&[x * 16, 0, 0, 255]);
+            b.extend_from_slice(&[0, x * 16, 0, 255]);
+        }
+        let s =
+            quantize_frames_shared(&[&a, &b], 16, 1, QuantizeOptions::with_max_colors(8)).unwrap();
+        assert!(s.palette.len() <= 8);
+        for plane in &s.frame_indices {
+            assert!(plane.iter().all(|&i| (i as usize) < s.palette.len()));
+        }
+    }
+
+    #[test]
+    fn shared_reserves_one_transparent_slot_for_the_whole_animation() {
+        // Frame 0 fully opaque, frame 1 has a transparent pixel: one
+        // shared transparent index covers both, and only the transparent
+        // pixel uses it.
+        let opaque = [200u8, 50, 50, 255].repeat(4); // 2x2
+        let mut mixed = Vec::new();
+        for i in 0..4 {
+            if i == 1 {
+                mixed.extend_from_slice(&[0, 0, 0, 0]); // transparent
+            } else {
+                mixed.extend_from_slice(&[50, 50, 200, 255]);
+            }
+        }
+        let s = quantize_frames_shared(
+            &[&opaque, &mixed],
+            2,
+            2,
+            QuantizeOptions::with_max_colors(8),
+        )
+        .unwrap();
+        let ti = s
+            .transparent_index
+            .expect("animation has a transparent pixel");
+        // No pixel in the fully-opaque frame uses the transparent slot.
+        assert!(s.frame_indices[0].iter().all(|&i| i != ti));
+        // The transparent pixel in frame 1 uses it; the opaque ones don't.
+        assert_eq!(s.frame_indices[1][1], ti);
+        for (i, &idx) in s.frame_indices[1].iter().enumerate() {
+            if i != 1 {
+                assert_ne!(idx, ti);
             }
         }
     }

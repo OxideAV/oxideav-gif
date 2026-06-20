@@ -259,3 +259,90 @@ fn dithered_animation_round_trips_and_composes() {
         assert_eq!(l.canvas.pixels, e.canvas.pixels);
     }
 }
+
+#[test]
+fn shared_palette_animation_uses_one_gct_and_no_lcts() {
+    use oxideav_gif::QuantizeOptions;
+    // Three solid frames cycling R -> G -> B. A shared palette holds all
+    // three exactly (well under budget), installed as one Global Color
+    // Table with no per-frame Local Color Tables.
+    let (w, h) = (4u16, 4u16);
+    let red = solid(w as usize, h as usize, 255, 0, 0, 255);
+    let green = solid(w as usize, h as usize, 0, 255, 0, 255);
+    let blue = solid(w as usize, h as usize, 0, 0, 255, 255);
+    let frames = [
+        (&red[..], 10u16, DisposalMethod::Keep),
+        (&green[..], 10u16, DisposalMethod::Keep),
+        (&blue[..], 10u16, DisposalMethod::Keep),
+    ];
+    let img = GifImage::from_rgba_frames_shared_palette(
+        &frames,
+        w,
+        h,
+        QuantizeOptions::with_max_colors(256),
+        Some(0),
+    )
+    .unwrap();
+
+    // One GCT, no LCTs.
+    let gct = img
+        .global_palette
+        .as_ref()
+        .expect("shared palette in a GCT");
+    assert!(gct.contains(&Rgb::new(255, 0, 0)));
+    assert!(gct.contains(&Rgb::new(0, 255, 0)));
+    assert!(gct.contains(&Rgb::new(0, 0, 255)));
+    for f in img.frames() {
+        assert!(f.local_palette.is_none(), "no LCT under a shared palette");
+    }
+
+    // Round-trips, and each frame composes back to its source colour.
+    let bytes = encode(&img).unwrap();
+    let decoded = decode(&bytes).unwrap();
+    assert_eq!(decoded.frame_count(), 3);
+    let composed = compose(&decoded).unwrap();
+    assert_eq!(composed.len(), 3);
+    let expected = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+    for (f, frame) in composed.iter().enumerate() {
+        for px in frame.canvas.pixels.chunks_exact(4) {
+            assert_eq!([px[0], px[1], px[2]], expected[f], "frame {f}");
+            assert_eq!(px[3], 0xFF);
+        }
+    }
+}
+
+#[test]
+fn shared_palette_is_smaller_than_per_frame_lcts() {
+    use oxideav_gif::QuantizeOptions;
+    // Two frames sharing the same broad colour set. The shared-palette
+    // encode must be no larger than the per-frame-LCT encode (one table
+    // vs two), demonstrating the size win.
+    let (w, h) = (16u16, 16u16);
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            a.extend_from_slice(&[(x * 16) as u8, (y * 16) as u8, 0, 255]);
+            b.extend_from_slice(&[0, (x * 16) as u8, (y * 16) as u8, 255]);
+        }
+    }
+    let frames = [
+        (&a[..], 10u16, DisposalMethod::Keep),
+        (&b[..], 10u16, DisposalMethod::Keep),
+    ];
+    let opts = QuantizeOptions::with_max_colors(64);
+    let per_frame = GifImage::from_rgba_frames(&frames, w, h, 64, Some(0)).unwrap();
+    let shared = GifImage::from_rgba_frames_shared_palette(&frames, w, h, opts, Some(0)).unwrap();
+    let per_frame_bytes = encode(&per_frame).unwrap();
+    let shared_bytes = encode(&shared).unwrap();
+    assert!(
+        shared_bytes.len() <= per_frame_bytes.len(),
+        "shared {} should be <= per-frame {}",
+        shared_bytes.len(),
+        per_frame_bytes.len()
+    );
+    // And the shared one still decodes to two frames.
+    let decoded = decode(&shared_bytes).unwrap();
+    assert_eq!(decoded.frame_count(), 2);
+    assert!(decoded.global_palette.is_some());
+}
