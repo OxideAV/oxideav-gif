@@ -469,7 +469,9 @@ panic-freedom on arbitrary bytes:
   multi-frame disposal sequences). Also synthesises small (≤ 32×32) RGBA
   frames from the fuzz bytes and drives the truecolor quantiser paths —
   `quantize_rgba_with_options` and `quantize_frames_shared` under both
-  `Dither::None` and `Dither::FloydSteinberg`, plus the
+  `Dither::None` and `Dither::FloydSteinberg`, both `BoxPriority` rules
+  (`Extent` / `Population`), and a fuzz-derived Lloyd refinement count
+  (`palette_refine_iterations` 0..=4), plus the
   `from_rgba_frame_with_options` / `from_rgba_frames_shared_palette`
   constructors through `encode` → `decode` — asserting the index plane
   stays in palette range and the decoder accepts every encoded stream.
