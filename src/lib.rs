@@ -160,7 +160,7 @@ pub use image::{
 pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};
 pub use quantize::{
     quantize_frames_shared, quantize_rgb, quantize_rgb_with_options, quantize_rgba,
-    quantize_rgba_with_options, Dither, QuantizeOptions, Quantized, SharedQuantized,
+    quantize_rgba_with_options, BoxPriority, Dither, QuantizeOptions, Quantized, SharedQuantized,
 };
 
 // Registry-gated public surface. The `__oxideav_entry` re-export is

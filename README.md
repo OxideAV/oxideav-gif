@@ -354,7 +354,17 @@ Implements every block type defined by the CompuServe specifications:
   selection is unchanged, only the index-plane assignment; transparent
   pixels neither receive nor propagate error. `quantize_rgb_with_options`
   / `quantize_rgba_with_options` are the option-taking entry points (the
-  bare functions keep the flat nearest-entry default).
+  bare functions keep the flat nearest-entry default). `QuantizeOptions`
+  also carries a `BoxPriority` knob (`Extent` default / `Population`)
+  selecting *which* colour box median cut splits next: `Extent` splits the
+  box with the widest colour range (the historical, byte-stable rule, which
+  can over-spend the palette on wide-but-sparse outliers), while
+  `Population` splits the box maximising `population × longest_extent` so
+  densely-populated regions of colour space earn more entries — a textbook
+  population-weighted refinement that lowers total quantisation error on
+  skewed distributions. The two rules coincide on uniform-density and
+  exact-colour inputs (so the lossless path stays byte-stable); the default
+  stays `Extent`, opt in with `.box_priority(BoxPriority::Population)`.
   `GifImage::from_rgba_frame` wraps a single frame into a §18 Logical
   Screen with a §19 Global Color Table (attaching a §23 GCE carrying the
   reserved transparency index when the frame has transparent pixels,

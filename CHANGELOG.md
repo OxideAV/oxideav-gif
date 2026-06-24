@@ -4,6 +4,35 @@
 
 ### Added
 
+- Population-weighted median-cut box selection. The `quantize` module gains
+  a `BoxPriority` enum (`Extent` / `Population`) on `QuantizeOptions`,
+  choosing *which* colour box median cut splits next. The historical rule
+  (`Extent`, the default) splits the box with the widest single-channel
+  colour range regardless of how many pixels fall in it, so a wide-but-sparse
+  outlier cluster can claim a disproportionate share of the palette while a
+  tightly-packed, heavily-populated region is starved. `Population` splits the
+  box maximising `population × longest_extent`, so densely-populated regions
+  of colour space earn more entries — a textbook population-weighted
+  refinement of median cut (a general image-processing technique; the GIF spec
+  only constrains the ≤256-entry / index-plane output shape, unchanged). The
+  two rules coincide on uniform-density inputs (every colour appears once) and
+  on exact-colour inputs (≤ budget distinct colours, where every box is driven
+  to a single colour regardless of order), so the lossless round-trip path
+  stays byte-stable; they diverge — with `Population` lowering total
+  quantisation error — on population-skewed distributions. The default stays
+  `Extent` so the bare `quantize_*` / `from_rgba_*` entry points are
+  byte-identical to before; callers opt in via
+  `QuantizeOptions::box_priority(BoxPriority::Population)`, which threads
+  unchanged through `quantize_rgb_with_options` /
+  `quantize_rgba_with_options` / `quantize_frames_shared` and the
+  `from_rgba_*_with_options` constructors. `BoxPriority` is re-exported at the
+  crate root. 6 new `quantize` unit tests pin the default-is-extent contract,
+  the knob-actually-diverges property, the uniform-density and exact-colour
+  coincidences, the budget/range invariants under `Population`, and the
+  measured total-error reduction on a verified skewed two-cluster input
+  (303 239 → 194 672 squared error at a 5-colour budget). Total `quantize`
+  unit tests 24 → 30.
+
 - The `encode` fuzz harness now exercises the truecolor quantiser paths.
   Alongside the `AnimationBuilder` → `encode` pipeline it synthesises small
   (≤ 32×32) RGBA frames from the fuzz bytes and drives

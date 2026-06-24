@@ -61,10 +61,41 @@ pub enum Dither {
     FloydSteinberg,
 }
 
+/// Box-selection rule for the median-cut palette search.
+///
+/// Median cut repeatedly splits one box of the colour cube until the
+/// palette budget is met; this enum chooses *which* box is split next.
+/// Both rules select the same palette when every input colour has equal
+/// population (e.g. a perfectly uniform gradient) and are identical on an
+/// exact-colour input (≤ budget distinct colours), where every box is
+/// driven down to a single colour regardless of the order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxPriority {
+    /// Split the box with the largest single-channel colour *range*
+    /// (extent), ignoring how many pixels fall in it. The historical
+    /// rule; deterministic and cheap. A box covering a wide colour range
+    /// but holding only a handful of outlier pixels is split before a
+    /// tightly-clustered box holding most of the image, so sparse
+    /// outliers can claim a disproportionate share of the palette.
+    #[default]
+    Extent,
+    /// Split the box maximising `population × longest_extent`, so a
+    /// densely-populated region of colour space earns more palette
+    /// entries than a sparsely-populated one of the same width. A
+    /// textbook population-weighted refinement of median cut (a general
+    /// image-processing technique — the GIF spec only constrains the
+    /// ≤256-entry / index-plane output shape). On a typical photographic
+    /// frame it lowers total quantisation error versus [`BoxPriority::Extent`]
+    /// because the entries follow where the pixels actually are; on a
+    /// uniform-density input the two rules coincide.
+    Population,
+}
+
 /// Tuning knobs for the quantiser entry points that take options.
 ///
-/// Constructed with [`Default`] (`max_colors = 256`, no dither) and
-/// adjusted field-by-field, or via the small builder helpers.
+/// Constructed with [`Default`] (`max_colors = 256`, no dither,
+/// extent-priority box selection) and adjusted field-by-field, or via
+/// the small builder helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuantizeOptions {
     /// Maximum palette size, clamped to `1..=256` at use. When the frame
@@ -73,6 +104,10 @@ pub struct QuantizeOptions {
     pub max_colors: usize,
     /// Index-plane assignment strategy ([`Dither::None`] by default).
     pub dither: Dither,
+    /// Median-cut box-selection rule ([`BoxPriority::Extent`] by default,
+    /// preserving the byte-stable historical palette for the bare
+    /// `quantize_*` entry points).
+    pub box_priority: BoxPriority,
 }
 
 impl Default for QuantizeOptions {
@@ -80,6 +115,7 @@ impl Default for QuantizeOptions {
         Self {
             max_colors: MAX_PALETTE,
             dither: Dither::None,
+            box_priority: BoxPriority::Extent,
         }
     }
 }
@@ -90,12 +126,19 @@ impl QuantizeOptions {
         Self {
             max_colors,
             dither: Dither::None,
+            box_priority: BoxPriority::Extent,
         }
     }
 
     /// Set the dither strategy, returning the updated options.
     pub fn dither(mut self, dither: Dither) -> Self {
         self.dither = dither;
+        self
+    }
+
+    /// Set the median-cut box-selection rule, returning the updated options.
+    pub fn box_priority(mut self, box_priority: BoxPriority) -> Self {
+        self.box_priority = box_priority;
         self
     }
 }
@@ -209,7 +252,8 @@ pub fn quantize_rgba_with_options(
         budget
     };
 
-    let (mut palette, opaque_lookup) = median_cut(&opaque_samples, opaque_budget);
+    let (mut palette, opaque_lookup) =
+        median_cut_with_priority(&opaque_samples, opaque_budget, opts.box_priority);
 
     // Append the reserved transparent slot last so the opaque indices
     // computed above stay valid. Its RGB is arbitrary (a transparent
@@ -320,7 +364,7 @@ pub fn quantize_rgb_with_options(
     }
     let budget = opts.max_colors.clamp(1, MAX_PALETTE);
     let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
-    let (palette, lookup) = median_cut(&samples, budget);
+    let (palette, lookup) = median_cut_with_priority(&samples, budget, opts.box_priority);
     let indices = match opts.dither {
         Dither::None => lookup,
         Dither::FloydSteinberg => {
@@ -429,7 +473,8 @@ pub fn quantize_frames_shared(
     };
 
     // One median cut over the union of every frame's opaque pixels.
-    let (mut palette, _pooled_lookup) = median_cut(&pooled, opaque_budget);
+    let (mut palette, _pooled_lookup) =
+        median_cut_with_priority(&pooled, opaque_budget, opts.box_priority);
     let opaque_len = palette.len();
 
     let transparent_index = if any_transparent {
@@ -527,6 +572,23 @@ impl ColorBox {
         r.max(g).max(b)
     }
 
+    /// Box-selection key under a given [`BoxPriority`] — the larger the
+    /// key, the sooner the box is split. [`BoxPriority::Extent`] returns
+    /// the raw longest extent (matching the historical rule);
+    /// [`BoxPriority::Population`] returns `population × longest_extent` in
+    /// `u64` so a densely-populated box outranks a wide-but-sparse one of
+    /// the same colour range. A single-colour box (extent 0) keys to 0
+    /// under both rules and is filtered out before this is consulted.
+    fn split_priority(&self, priority: BoxPriority) -> u64 {
+        let extent = self.longest_extent() as u64;
+        match priority {
+            BoxPriority::Extent => extent,
+            // members.len() fits a usize; the product stays well within
+            // u64 (population ≤ width*height, extent ≤ 255).
+            BoxPriority::Population => self.members.len() as u64 * extent,
+        }
+    }
+
     /// 0 = red, 1 = green, 2 = blue — the channel with the widest extent.
     fn longest_axis(&self) -> usize {
         let r = (self.rmax - self.rmin) as u16;
@@ -560,15 +622,22 @@ impl ColorBox {
 /// every sample in `samples` (in order), the index of the *nearest*
 /// palette entry it maps to.
 ///
-/// Colour selection is median cut (split the widest box along its longest
-/// axis until the budget is met); the index plane is then assigned by
-/// nearest-entry remap over the final averaged palette, so a sample never
-/// keeps a strictly-worse box-of-origin assignment.
+/// Colour selection is median cut (repeatedly split one box along its
+/// longest axis until the budget is met); `priority` chooses which box is
+/// split next — the widest box ([`BoxPriority::Extent`]) or the box with
+/// the largest `population × longest_extent` ([`BoxPriority::Population`]).
+/// The index plane is then assigned by nearest-entry remap over the final
+/// averaged palette, so a sample never keeps a strictly-worse
+/// box-of-origin assignment.
 ///
 /// `budget` is the maximum palette size, already clamped to `1..=256`.
 /// An empty input yields a single placeholder black entry and no
 /// lookups (the caller has no opaque pixels to map).
-fn median_cut(samples: &[[u8; 3]], budget: usize) -> (Vec<Rgb>, Vec<u8>) {
+fn median_cut_with_priority(
+    samples: &[[u8; 3]],
+    budget: usize,
+    priority: BoxPriority,
+) -> (Vec<Rgb>, Vec<u8>) {
     if samples.is_empty() {
         // No opaque pixels: still hand back a one-entry palette so a
         // §22 index plane built against it is in range, even though no
@@ -579,7 +648,7 @@ fn median_cut(samples: &[[u8; 3]], budget: usize) -> (Vec<Rgb>, Vec<u8>) {
     let budget = budget.clamp(1, MAX_PALETTE);
 
     // Start with one box holding every sample, then repeatedly split the
-    // box with the largest extent until we hit the budget or no box can
+    // box the priority rule selects until we hit the budget or no box can
     // be split further (a box of identical colours has zero extent).
     let mut boxes = vec![ColorBox::from_members(
         samples,
@@ -587,12 +656,14 @@ fn median_cut(samples: &[[u8; 3]], budget: usize) -> (Vec<Rgb>, Vec<u8>) {
     )];
 
     while boxes.len() < budget {
-        // Pick the splittable box with the largest extent.
+        // Pick the splittable box the priority rule ranks highest. Only
+        // boxes that still hold >1 sample across >0 colour range can be
+        // split; a single-colour box has nothing left to give.
         let target = boxes
             .iter()
             .enumerate()
             .filter(|(_, b)| b.members.len() > 1 && b.longest_extent() > 0)
-            .max_by_key(|(_, b)| b.longest_extent())
+            .max_by_key(|(_, b)| b.split_priority(priority))
             .map(|(i, _)| i);
         let Some(idx) = target else {
             break; // every box is a single colour; nothing left to split
@@ -768,6 +839,11 @@ pub fn nearest_index(palette: &[Rgb], color: Rgb) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test shorthand: median cut with the default extent priority.
+    fn median_cut(samples: &[[u8; 3]], budget: usize) -> (Vec<Rgb>, Vec<u8>) {
+        median_cut_with_priority(samples, budget, BoxPriority::Extent)
+    }
 
     #[test]
     fn empty_input_yields_single_placeholder() {
@@ -1257,5 +1333,124 @@ mod tests {
                 assert_ne!(idx, ti);
             }
         }
+    }
+
+    // ----- population-weighted box priority -----
+
+    #[test]
+    fn box_priority_default_is_extent() {
+        // The defaults and the budget-only constructor both pick the
+        // historical extent rule, so the bare quantise_* entry points
+        // stay byte-stable.
+        assert_eq!(QuantizeOptions::default().box_priority, BoxPriority::Extent);
+        assert_eq!(
+            QuantizeOptions::with_max_colors(16).box_priority,
+            BoxPriority::Extent
+        );
+        assert_eq!(BoxPriority::default(), BoxPriority::Extent);
+    }
+
+    #[test]
+    fn box_priority_actually_changes_the_palette() {
+        // On a population-skewed multi-box input the two rules must select
+        // genuinely different palettes — proving the knob has effect rather
+        // than collapsing to the same selection. (When the palettes happen
+        // to coincide on uniform-density / exact-colour inputs, the
+        // dedicated coincidence tests cover that.)
+        let mut samples = Vec::new();
+        for k in 0..200u32 {
+            samples.push([0, (k % 201) as u8, 0]); // wide, many pixels
+        }
+        for k in 0..150u32 {
+            samples.push([0, 120 + (k % 6) as u8, 255]); // narrow, dense
+        }
+        let (pal_e, _) = median_cut_with_priority(&samples, 5, BoxPriority::Extent);
+        let (pal_p, _) = median_cut_with_priority(&samples, 5, BoxPriority::Population);
+        assert_ne!(
+            pal_e, pal_p,
+            "extent and population priority should diverge on a skewed input"
+        );
+    }
+
+    #[test]
+    fn priorities_coincide_on_exact_color_input() {
+        // ≤ budget distinct colours: median cut drives every box to a
+        // single colour regardless of the selection rule, so both rules
+        // round-trip every colour exactly (palette order may differ, but
+        // each colour maps to an entry equal to itself).
+        let samples = vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [40, 40, 40]];
+        for prio in [BoxPriority::Extent, BoxPriority::Population] {
+            let (pal, look) = median_cut_with_priority(&samples, 256, prio);
+            assert_eq!(pal.len(), 4, "{prio:?}");
+            for (s, &idx) in samples.iter().zip(&look) {
+                let e = pal[idx as usize];
+                assert_eq!([e.r, e.g, e.b], *s, "{prio:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn priorities_coincide_on_uniform_density_input() {
+        // Every colour appears exactly once (a 1-D ramp): population is
+        // constant, so population × extent ranks boxes identically to
+        // extent alone and the two rules select the same palette.
+        let samples: Vec<[u8; 3]> = (0..=255u8).map(|v| [v, v, v]).collect();
+        let (pal_e, look_e) = median_cut_with_priority(&samples, 5, BoxPriority::Extent);
+        let (pal_p, look_p) = median_cut_with_priority(&samples, 5, BoxPriority::Population);
+        assert_eq!(pal_e, pal_p);
+        assert_eq!(look_e, look_p);
+    }
+
+    #[test]
+    fn population_priority_lowers_error_on_a_skewed_distribution() {
+        // Two cleanly-separated colour groups of comparable pixel count
+        // but very different internal spread:
+        //  * group P — 200 px spread *wide* along green (0..200), blue 0;
+        //  * group Q — 150 px packed *narrow* along green (120..125), blue 255.
+        // After the first split isolates P from Q, the extent rule keeps
+        // re-splitting the wide group P (largest colour range) while the
+        // already-tight, heavily-populated group Q is collapsed to a single
+        // entry — so its 150 pixels all carry the averaging error. The
+        // population rule weights by `pixels × spread`, so it splits group P
+        // only until group Q's pixel mass outranks P's residual spread, then
+        // refines Q too. Total quantisation error is lower as a result.
+        let mut samples = Vec::new();
+        for k in 0..200u32 {
+            samples.push([0, (k % 201) as u8, 0]); // P: wide green ramp
+        }
+        for k in 0..150u32 {
+            samples.push([0, 120 + (k % 6) as u8, 255]); // Q: narrow, dense
+        }
+
+        let (pal_e, look_e) = median_cut_with_priority(&samples, 5, BoxPriority::Extent);
+        let (pal_p, look_p) = median_cut_with_priority(&samples, 5, BoxPriority::Population);
+        let err_e = total_sq_error(&samples, &pal_e, &look_e);
+        let err_p = total_sq_error(&samples, &pal_p, &look_p);
+        assert!(
+            err_p < err_e,
+            "population priority should reduce error: extent={err_e} population={err_p}"
+        );
+    }
+
+    #[test]
+    fn population_priority_respects_budget_and_range() {
+        // Sanity: the population rule still clamps to the budget and emits
+        // in-range indices on a many-colour input.
+        let mut rgb = Vec::new();
+        for r in 0..16u8 {
+            for g in 0..16u8 {
+                rgb.extend_from_slice(&[r * 17, g * 17, 0]);
+            }
+        }
+        let q = quantize_rgb_with_options(
+            &rgb,
+            16,
+            16,
+            QuantizeOptions::with_max_colors(8).box_priority(BoxPriority::Population),
+        )
+        .unwrap();
+        assert!(q.palette.len() <= 8);
+        assert!(q.indices.iter().all(|&i| (i as usize) < q.palette.len()));
+        assert_eq!(q.indices.len(), 256);
     }
 }
