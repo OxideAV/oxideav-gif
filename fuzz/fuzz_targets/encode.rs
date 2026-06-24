@@ -29,8 +29,8 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
     compose, decode, decode_first_frame, decode_lenient, encode, image::Rgb, playback::Playback,
-    quantize_frames_shared, quantize_rgba_with_options, AnimationBuilder, DisposalMethod, Dither,
-    GifImage, QuantizeOptions,
+    quantize_frames_shared, quantize_rgba_with_options, AnimationBuilder, BoxPriority,
+    DisposalMethod, Dither, GifImage, QuantizeOptions,
 };
 
 // Cap downstream work on suspiciously large screens so the harness
@@ -240,9 +240,22 @@ fuzz_target!(|data: &[u8]| {
         .map(|i| data[(i + 1) % data.len()] ^ 0x5a)
         .collect();
     let max_colors = 1 + (data[2] as usize % 256);
+    // Fuzz-derived box-selection rule and Lloyd-refinement count. The
+    // refinement loop is bounded so per-iteration work stays small even on a
+    // hostile count: cap at 4 rounds (the loop converges and stops early
+    // anyway, but the cap keeps the worst case cheap).
+    let priority = if data[3] & 1 == 0 {
+        BoxPriority::Extent
+    } else {
+        BoxPriority::Population
+    };
+    let refine = (data[3] >> 1) as usize % 5; // 0..=4
 
     for dither in [Dither::None, Dither::FloydSteinberg] {
-        let opts = QuantizeOptions::with_max_colors(max_colors).dither(dither);
+        let opts = QuantizeOptions::with_max_colors(max_colors)
+            .dither(dither)
+            .box_priority(priority)
+            .palette_refine_iterations(refine);
 
         // Per-frame quantiser: index plane must stay in palette range.
         if let Ok(q) = quantize_rgba_with_options(&frame_a, qw, qh, opts) {
