@@ -4,6 +4,34 @@
 
 ### Added
 
+- Lloyd (k-means) palette refinement for the truecolor quantiser. The
+  `quantize` module gains a `palette_refine_iterations` field on
+  `QuantizeOptions` (default `0` — no refinement). When non-zero, after
+  median cut selects the initial palette it is sharpened by up to that many
+  rounds of Lloyd relaxation: assign every sample to its nearest current
+  entry, then move each entry to the rounded centroid of the samples
+  assigned to it (the squared-error-minimising position for a fixed
+  assignment), so the total squared error is monotone non-increasing across
+  rounds and the loop stops early on convergence. An entry that captures no
+  samples is left in place. Lloyd's algorithm is textbook k-means (a general
+  image-processing technique; the GIF spec only constrains the ≤256-entry /
+  index-plane output shape, unchanged). Refinement leaves exact-colour inputs
+  (≤ budget distinct colours, where every entry is already its cluster's sole
+  member and Lloyd converges immediately) byte-stable, so the lossless
+  round-trip path is unaffected; on a structured field it cut total squared
+  error materially (5–12 % at a 16-colour budget on prototyped photographic
+  data). The default stays `0` so the bare `quantize_*` / `from_rgba_*` entry
+  points are byte-identical; callers opt in via
+  `QuantizeOptions::palette_refine_iterations(n)`, threaded unchanged through
+  `quantize_rgb_with_options` / `quantize_rgba_with_options` /
+  `quantize_frames_shared` and the `from_rgba_*_with_options` constructors. 7
+  new `quantize` unit tests pin the default-is-zero contract, the
+  zero-iterations-is-byte-identical guarantee, exact-colour byte-stability
+  under refinement, the measured total-error reduction, per-round monotone
+  non-increase, early convergence with a huge iteration count, and the
+  end-to-end threading through `quantize_rgb_with_options`. Total `quantize`
+  unit tests 30 → 37.
+
 - Population-weighted median-cut box selection. The `quantize` module gains
   a `BoxPriority` enum (`Extent` / `Population`) on `QuantizeOptions`,
   choosing *which* colour box median cut splits next. The historical rule

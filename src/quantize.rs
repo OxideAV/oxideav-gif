@@ -108,6 +108,13 @@ pub struct QuantizeOptions {
     /// preserving the byte-stable historical palette for the bare
     /// `quantize_*` entry points).
     pub box_priority: BoxPriority,
+    /// Number of Lloyd (k-means) relaxation rounds applied to sharpen the
+    /// median-cut palette toward a local optimum (`0` by default — no
+    /// refinement, so the bare `quantize_*` entry points stay byte-stable).
+    /// Each round can only lower the total squared error and the loop stops
+    /// early on convergence, so a small budget (4–8) captures most of the
+    /// gain; very large values cost time without further benefit.
+    pub palette_refine_iterations: usize,
 }
 
 impl Default for QuantizeOptions {
@@ -116,6 +123,7 @@ impl Default for QuantizeOptions {
             max_colors: MAX_PALETTE,
             dither: Dither::None,
             box_priority: BoxPriority::Extent,
+            palette_refine_iterations: 0,
         }
     }
 }
@@ -125,8 +133,7 @@ impl QuantizeOptions {
     pub fn with_max_colors(max_colors: usize) -> Self {
         Self {
             max_colors,
-            dither: Dither::None,
-            box_priority: BoxPriority::Extent,
+            ..Self::default()
         }
     }
 
@@ -139,6 +146,13 @@ impl QuantizeOptions {
     /// Set the median-cut box-selection rule, returning the updated options.
     pub fn box_priority(mut self, box_priority: BoxPriority) -> Self {
         self.box_priority = box_priority;
+        self
+    }
+
+    /// Set the number of Lloyd palette-refinement rounds, returning the
+    /// updated options.
+    pub fn palette_refine_iterations(mut self, iterations: usize) -> Self {
+        self.palette_refine_iterations = iterations;
         self
     }
 }
@@ -252,8 +266,12 @@ pub fn quantize_rgba_with_options(
         budget
     };
 
-    let (mut palette, opaque_lookup) =
-        median_cut_with_priority(&opaque_samples, opaque_budget, opts.box_priority);
+    let (mut palette, opaque_lookup) = median_cut_refined(
+        &opaque_samples,
+        opaque_budget,
+        opts.box_priority,
+        opts.palette_refine_iterations,
+    );
 
     // Append the reserved transparent slot last so the opaque indices
     // computed above stay valid. Its RGB is arbitrary (a transparent
@@ -364,7 +382,12 @@ pub fn quantize_rgb_with_options(
     }
     let budget = opts.max_colors.clamp(1, MAX_PALETTE);
     let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
-    let (palette, lookup) = median_cut_with_priority(&samples, budget, opts.box_priority);
+    let (palette, lookup) = median_cut_refined(
+        &samples,
+        budget,
+        opts.box_priority,
+        opts.palette_refine_iterations,
+    );
     let indices = match opts.dither {
         Dither::None => lookup,
         Dither::FloydSteinberg => {
@@ -473,8 +496,12 @@ pub fn quantize_frames_shared(
     };
 
     // One median cut over the union of every frame's opaque pixels.
-    let (mut palette, _pooled_lookup) =
-        median_cut_with_priority(&pooled, opaque_budget, opts.box_priority);
+    let (mut palette, _pooled_lookup) = median_cut_refined(
+        &pooled,
+        opaque_budget,
+        opts.box_priority,
+        opts.palette_refine_iterations,
+    );
     let opaque_len = palette.len();
 
     let transparent_index = if any_transparent {
@@ -618,25 +645,50 @@ impl ColorBox {
     }
 }
 
-/// Median-cut quantiser core. Returns the selected palette plus, for
-/// every sample in `samples` (in order), the index of the *nearest*
-/// palette entry it maps to.
+/// Median-cut quantiser core with no palette refinement — thin wrapper
+/// over [`median_cut_refined`] used by the tests and any caller that
+/// wants the plain median-cut palette.
+#[cfg(test)]
+fn median_cut_with_priority(
+    samples: &[[u8; 3]],
+    budget: usize,
+    priority: BoxPriority,
+) -> (Vec<Rgb>, Vec<u8>) {
+    median_cut_refined(samples, budget, priority, 0)
+}
+
+/// Median-cut quantiser core with optional Lloyd (k-means) palette
+/// refinement. Returns the selected palette plus, for every sample in
+/// `samples` (in order), the index of the *nearest* palette entry it maps
+/// to.
 ///
 /// Colour selection is median cut (repeatedly split one box along its
 /// longest axis until the budget is met); `priority` chooses which box is
 /// split next — the widest box ([`BoxPriority::Extent`]) or the box with
 /// the largest `population × longest_extent` ([`BoxPriority::Population`]).
-/// The index plane is then assigned by nearest-entry remap over the final
-/// averaged palette, so a sample never keeps a strictly-worse
-/// box-of-origin assignment.
+///
+/// When `refine_iters > 0`, the median-cut palette is then sharpened by up
+/// to that many rounds of Lloyd relaxation: assign every sample to its
+/// nearest current entry, then move each entry to the (rounded) centroid
+/// of the samples assigned to it. Each round can only lower — never raise
+/// — the total squared error, and the loop stops early once it converges
+/// (no entry moves). An entry that captures no samples keeps its previous
+/// position. This is textbook k-means refinement of a median-cut seed; the
+/// GIF spec only constrains the ≤256-entry / index-plane output shape,
+/// which is unchanged.
+///
+/// The index plane is finally assigned by nearest-entry remap over the
+/// refined palette, so a sample never keeps a strictly-worse box-of-origin
+/// assignment.
 ///
 /// `budget` is the maximum palette size, already clamped to `1..=256`.
 /// An empty input yields a single placeholder black entry and no
 /// lookups (the caller has no opaque pixels to map).
-fn median_cut_with_priority(
+fn median_cut_refined(
     samples: &[[u8; 3]],
     budget: usize,
     priority: BoxPriority,
+    refine_iters: usize,
 ) -> (Vec<Rgb>, Vec<u8>) {
     if samples.is_empty() {
         // No opaque pixels: still hand back a one-entry palette so a
@@ -690,6 +742,15 @@ fn median_cut_with_priority(
         palette.push(b.average(samples));
     }
 
+    // Optional Lloyd relaxation: sharpen the median-cut seed toward a
+    // local optimum. Each round re-assigns samples to their nearest entry
+    // and recentres each entry on its cluster's centroid, which is the
+    // squared-error-minimising move, so total error is monotone
+    // non-increasing across rounds.
+    if refine_iters > 0 {
+        refine_palette_lloyd(samples, &mut palette, refine_iters);
+    }
+
     // Map every sample to its *nearest* palette entry rather than the box
     // it fell into. After a box is averaged to one colour, a sample near a
     // box boundary can be closer to a neighbouring box's average than to
@@ -699,6 +760,60 @@ fn median_cut_with_priority(
     let lookup = remap_to_nearest(samples, &palette);
 
     (palette, lookup)
+}
+
+/// Lloyd (k-means) relaxation of a palette in place, run for at most
+/// `iters` rounds or until convergence (no entry moves), whichever is
+/// first. `samples` is the colour set the palette approximates; `palette`
+/// is the seed (typically a median-cut result) that is sharpened.
+///
+/// Each round assigns every sample to its nearest current entry, then
+/// moves each entry to the rounded centroid of the samples assigned to it
+/// — the squared-error-minimising position for a fixed assignment — so
+/// the total squared error is non-increasing. An entry that captures no
+/// samples is left where it is (its colour may still serve a later
+/// nearest-entry lookup). With an empty sample set the palette is
+/// untouched.
+fn refine_palette_lloyd(samples: &[[u8; 3]], palette: &mut [Rgb], iters: usize) {
+    if samples.is_empty() || palette.is_empty() {
+        return;
+    }
+    // Per-entry running totals (sum of each channel + count), reused each
+    // round to avoid reallocating.
+    let mut acc: Vec<[u64; 4]> = vec![[0; 4]; palette.len()];
+    for _ in 0..iters {
+        for a in acc.iter_mut() {
+            *a = [0; 4];
+        }
+        for &[r, g, b] in samples {
+            let j = nearest_index(palette, Rgb::new(r, g, b)) as usize;
+            acc[j][0] += r as u64;
+            acc[j][1] += g as u64;
+            acc[j][2] += b as u64;
+            acc[j][3] += 1;
+        }
+        let mut moved = false;
+        for (entry, a) in palette.iter_mut().zip(&acc) {
+            let n = a[3];
+            if n == 0 {
+                continue; // no samples chose this entry; leave it in place
+            }
+            // Rounded mean per channel (add half the count before dividing).
+            let half = n / 2;
+            let next = Rgb::new(
+                ((a[0] + half) / n) as u8,
+                ((a[1] + half) / n) as u8,
+                ((a[2] + half) / n) as u8,
+            );
+            if next != *entry {
+                *entry = next;
+                moved = true;
+            }
+        }
+        if !moved {
+            break; // converged: a further round would not change anything
+        }
+    }
 }
 
 /// Map every sample to the index of its nearest palette entry by
@@ -1430,6 +1545,122 @@ mod tests {
             err_p < err_e,
             "population priority should reduce error: extent={err_e} population={err_p}"
         );
+    }
+
+    // ----- Lloyd palette refinement -----
+
+    #[test]
+    fn refine_iterations_default_is_zero() {
+        assert_eq!(QuantizeOptions::default().palette_refine_iterations, 0);
+        assert_eq!(
+            QuantizeOptions::with_max_colors(16).palette_refine_iterations,
+            0
+        );
+    }
+
+    #[test]
+    fn zero_refine_iterations_is_byte_identical_to_plain_median_cut() {
+        // The default (0 rounds) path must reproduce the un-refined palette
+        // and lookup exactly, so the bare quantize_* entry points stay
+        // byte-stable.
+        let mut samples = Vec::new();
+        for r in 0..12u8 {
+            for g in 0..12u8 {
+                samples.push([r * 21, g * 21, (r.wrapping_mul(g)) % 200]);
+            }
+        }
+        let (pal_a, look_a) = median_cut_with_priority(&samples, 16, BoxPriority::Extent);
+        let (pal_b, look_b) = median_cut_refined(&samples, 16, BoxPriority::Extent, 0);
+        assert_eq!(pal_a, pal_b);
+        assert_eq!(look_a, look_b);
+    }
+
+    #[test]
+    fn refinement_keeps_exact_color_input_byte_stable() {
+        // ≤ budget distinct colours: every entry is already its cluster's
+        // sole member, so Lloyd converges immediately and the palette is
+        // unchanged. The lossless round-trip path must stay exact.
+        let samples = vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [30, 60, 90]];
+        let (pal_plain, look_plain) = median_cut_refined(&samples, 256, BoxPriority::Extent, 0);
+        let (pal_ref, look_ref) = median_cut_refined(&samples, 256, BoxPriority::Extent, 8);
+        assert_eq!(pal_plain, pal_ref);
+        assert_eq!(look_plain, look_ref);
+        // And every colour still reproduces itself.
+        for (s, &idx) in samples.iter().zip(&look_ref) {
+            let e = pal_ref[idx as usize];
+            assert_eq!([e.r, e.g, e.b], *s);
+        }
+    }
+
+    #[test]
+    fn refinement_lowers_total_error() {
+        // A 32x32 RGB field with structure: refinement should reduce the
+        // total squared error versus the plain median-cut seed.
+        let mut samples = Vec::new();
+        for y in 0..32u32 {
+            for x in 0..32u32 {
+                samples.push([(x * 8) as u8, (y * 8) as u8, ((x + y) * 4) as u8]);
+            }
+        }
+        let (pal0, look0) = median_cut_refined(&samples, 16, BoxPriority::Extent, 0);
+        let (pal8, look8) = median_cut_refined(&samples, 16, BoxPriority::Extent, 8);
+        let e0 = total_sq_error(&samples, &pal0, &look0);
+        let e8 = total_sq_error(&samples, &pal8, &look8);
+        assert!(
+            e8 < e0,
+            "refinement must lower error: seed={e0} refined={e8}"
+        );
+    }
+
+    #[test]
+    fn refinement_error_is_monotone_non_increasing_per_round() {
+        // Each additional Lloyd round can only lower (or hold) the total
+        // error — never raise it.
+        let mut samples = Vec::new();
+        for k in 0..900u32 {
+            samples.push([
+                (k * 7 % 256) as u8,
+                (k * 13 % 256) as u8,
+                (k * 29 % 256) as u8,
+            ]);
+        }
+        let mut prev = u64::MAX;
+        for iters in 0..6 {
+            let (pal, look) = median_cut_refined(&samples, 12, BoxPriority::Extent, iters);
+            let e = total_sq_error(&samples, &pal, &look);
+            assert!(
+                e <= prev,
+                "round {iters}: error {e} exceeded previous {prev}"
+            );
+            prev = e;
+        }
+    }
+
+    #[test]
+    fn refinement_converges_and_stops_early() {
+        // On an exact-colour input Lloyd converges on round 1; asking for a
+        // huge iteration count must still terminate quickly and match the
+        // 1-round result.
+        let samples = vec![[10, 20, 30], [200, 210, 220], [90, 90, 90]];
+        let (pal_1, _) = median_cut_refined(&samples, 256, BoxPriority::Extent, 1);
+        let (pal_big, _) = median_cut_refined(&samples, 256, BoxPriority::Extent, 100_000);
+        assert_eq!(pal_1, pal_big);
+    }
+
+    #[test]
+    fn refinement_threads_through_quantize_rgb_options() {
+        // End-to-end: the public option-taking entry point honours the
+        // refinement count and still emits an in-range index plane.
+        let mut rgb = Vec::new();
+        for y in 0..16u8 {
+            for x in 0..16u8 {
+                rgb.extend_from_slice(&[x * 16, y * 16, 0]);
+            }
+        }
+        let opts = QuantizeOptions::with_max_colors(8).palette_refine_iterations(6);
+        let q = quantize_rgb_with_options(&rgb, 16, 16, opts).unwrap();
+        assert!(q.palette.len() <= 8);
+        assert!(q.indices.iter().all(|&i| (i as usize) < q.palette.len()));
     }
 
     #[test]
