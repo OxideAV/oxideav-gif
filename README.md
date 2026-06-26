@@ -267,6 +267,25 @@ Implements every block type defined by the CompuServe specifications:
   per-GCE predicate it rolls up. When the stream-level query is `true`,
   `total_play_duration()` cannot bound the run and a renderer must be
   input-aware.
+- §23.c.vii presentation timeline + time-domain seek.
+  `presentation_timeline()` yields a `FramePresentation { start,
+  duration }` per graphic-rendering block, `start` being the running sum
+  of every earlier Delay Time ("the clock starts ticking immediately
+  after the graphic is rendered") and `duration` the block's own Delay
+  Time; the final entry's `start + duration` equals
+  `single_pass_duration()`. `frame_index_at(elapsed)` walks the half-open
+  `[start, start + duration)` intervals to the block visible at an offset
+  into one pass (skipping zero-Delay-Time blocks, the "do not wait"
+  reading), and `frame_index_at_global(global)` extends that across
+  NETSCAPE2.0 / ANIMEXTS1.0 loop repeats to a `(pass, frame_index)` pair —
+  `None` once a finite-loop run is exhausted.
+  `compose::compose_frame_at_global(image, global)` ties the seek to
+  pixels, returning a `SeekResult { canvas, pass, frame_index }` (the
+  composited canvas a scrubbing player blits without stepping every
+  intermediate frame). `frames_bounding_box()` is the §20.a union of every
+  placement rectangle (the smallest area the animation ever draws into),
+  and `frames_inhabit_subregion()` reports whether it leaves a croppable
+  margin inside the §18 Logical Screen.
 - Fluent animation assembly (`builder::AnimationBuilder`) — the
   encode-side counterpart to the timing accessors.
   `new(width, height, palette)` shares one §18 Global Color Table;
