@@ -4,6 +4,20 @@
 
 ### Added
 
+- Looping-aware seek `GifImage::frame_index_at_global(global)`. Maps a
+  *global* elapsed offset (measured across NETSCAPE2.0 / ANIMEXTS1.0 loop
+  repeats from the very start of playback) to the `(pass, frame_index)` pair
+  visible at that instant, reducing `global` modulo `single_pass_duration()`
+  and seeking within the pass with `frame_index_at`. `pass` is zero-based
+  (pass 0 = first playback, pass 1 = first repeat …); the reachable pass
+  count follows the de-facto *Looping* semantics (`loop_count`: no sub-block
+  → 1 pass, `Some(0)` → forever, `Some(n)` → `n + 1` passes), returning
+  `None` once a finite run is exhausted. A zero-total-duration stream has no
+  time axis, so only `global == 0` resolves (and only when a frame is
+  showable). 4 new `image` unit tests: finite-loop walk across passes with
+  the exhaustion boundary, infinite-loop reaching pass 50, single-pass
+  no-loop-block, and the zero-duration-stream case.
+
 - §23.c.vii presentation-timeline surface. `GifImage::presentation_timeline()`
   yields one `FramePresentation { start, duration }` per graphic-rendering
   block (§20 Image + §25 Plain Text) in source order, where `start` is the

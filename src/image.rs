@@ -2317,6 +2317,61 @@ impl GifImage {
         }
         None
     }
+
+    /// Looping-aware seek: map a *global* elapsed offset (measured from the
+    /// very start of playback, across NETSCAPE2.0 / ANIMEXTS1.0 loop
+    /// repeats) to the `(pass, frame_index)` pair visible at that instant,
+    /// or `None` once playback has finished (a finite-loop animation's
+    /// total run is exhausted) or for a stream with no graphic-rendering
+    /// blocks.
+    ///
+    /// `pass` is zero-based: pass `0` is the first playback, pass `1` the
+    /// first repeat, and so on. The number of passes follows the de-facto
+    /// *Looping* semantics ([`Self::loop_count`], documented in
+    /// `docs/image/gif/netscape2.0-loop-extension.md`): no *Looping*
+    /// sub-block → one pass; `Some(0)` → loop forever (every pass is
+    /// reachable); `Some(n)` → `n + 1` passes. `frame_index` is the same
+    /// zero-based graphic-rendering-block ordinal [`Self::frame_index_at`]
+    /// returns, found by reducing `global` modulo
+    /// [`Self::single_pass_duration`] and seeking within that pass.
+    ///
+    /// A still image / zero-total-duration stream (`single_pass_duration`
+    /// is zero) has no time axis to seek along: only `global == 0` on a
+    /// non-empty stream resolves, to `(0, 0)`. Otherwise the per-pass
+    /// modulo would divide by zero, so the query returns `None` for any
+    /// non-zero `global` there.
+    pub fn frame_index_at_global(&self, global: Duration) -> Option<(u64, usize)> {
+        let per_pass = self.single_pass_duration();
+        if per_pass.is_zero() {
+            // No time axis: a single instantaneous pass. Only the exact
+            // start resolves (to pass 0, frame 0), and only when there is a
+            // block to show; any non-zero offset is past the (empty) end.
+            return if global.is_zero() {
+                self.frame_index_at(Duration::ZERO).map(|i| (0, i))
+            } else {
+                None
+            };
+        }
+
+        let per_pass_nanos = per_pass.as_nanos();
+        let global_nanos = global.as_nanos();
+        let pass = (global_nanos / per_pass_nanos) as u64;
+
+        // Bound the pass count by the *Looping* semantics.
+        let pass_limit: Option<u64> = match self.loop_count() {
+            None => Some(1),
+            Some(0) => None, // forever
+            Some(n) => Some(n as u64 + 1),
+        };
+        if let Some(limit) = pass_limit {
+            if pass >= limit {
+                return None; // playback finished
+            }
+        }
+
+        let within = Duration::from_nanos((global_nanos % per_pass_nanos) as u64);
+        self.frame_index_at(within).map(|i| (pass, i))
+    }
 }
 
 /// One entry in a [`GifImage::presentation_timeline`]: the wall-clock
@@ -3703,6 +3758,99 @@ mod tests {
         let img = base_image(Some(pal3()), Vec::new());
         assert_eq!(img.presentation_timeline().count(), 0);
         assert_eq!(img.frame_index_at(Duration::ZERO), None);
+    }
+
+    /// `frame_index_at_global` maps a global offset across loop repeats to
+    /// `(pass, frame_index)`, honouring `Some(n)` -> `n + 1` passes and
+    /// returning `None` once the finite run is exhausted.
+    #[test]
+    fn frame_index_at_global_walks_finite_loops() {
+        // Two 100 ms frames -> 200 ms per pass; loop_count Some(2) -> 3 passes.
+        let mut blocks = vec![
+            Block::Image(frame_with_delay(10)),
+            Block::Image(frame_with_delay(10)),
+        ];
+        blocks.insert(0, netscape_loop(2));
+        let img = base_image(Some(pal3()), blocks);
+        assert_eq!(img.single_pass_duration(), Duration::from_millis(200));
+
+        // Pass 0.
+        assert_eq!(img.frame_index_at_global(Duration::ZERO), Some((0, 0)));
+        assert_eq!(
+            img.frame_index_at_global(Duration::from_millis(100)),
+            Some((0, 1))
+        );
+        // Pass 1 (first repeat) begins at 200 ms.
+        assert_eq!(
+            img.frame_index_at_global(Duration::from_millis(200)),
+            Some((1, 0))
+        );
+        assert_eq!(
+            img.frame_index_at_global(Duration::from_millis(350)),
+            Some((1, 1))
+        );
+        // Pass 2 (second repeat) at 400..600 ms.
+        assert_eq!(
+            img.frame_index_at_global(Duration::from_millis(500)),
+            Some((2, 1))
+        );
+        // 3 passes = 600 ms total -> exhausted.
+        assert_eq!(img.frame_index_at_global(Duration::from_millis(600)), None);
+        assert_eq!(img.frame_index_at_global(Duration::from_secs(10)), None);
+    }
+
+    /// `Some(0)` loops forever — every pass is reachable, so a large
+    /// global offset still resolves to the correct `(pass, frame_index)`.
+    #[test]
+    fn frame_index_at_global_infinite_loop_never_ends() {
+        let mut blocks = vec![
+            Block::Image(frame_with_delay(10)),
+            Block::Image(frame_with_delay(10)),
+        ];
+        blocks.insert(0, netscape_loop(0));
+        let img = base_image(Some(pal3()), blocks);
+        // 10 000 ms = 50 passes of 200 ms; within-pass 0 ms -> frame 0.
+        assert_eq!(
+            img.frame_index_at_global(Duration::from_millis(10_000)),
+            Some((50, 0))
+        );
+        // 10 100 ms -> pass 50, 100 ms into the pass -> frame 1.
+        assert_eq!(
+            img.frame_index_at_global(Duration::from_millis(10_100)),
+            Some((50, 1))
+        );
+    }
+
+    /// No *Looping* sub-block -> exactly one pass; the global seek matches
+    /// the single-pass `frame_index_at` for pass 0 and ends after one pass.
+    #[test]
+    fn frame_index_at_global_single_pass_without_loop_block() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(10)),
+                Block::Image(frame_with_delay(10)),
+            ],
+        );
+        assert_eq!(img.frame_index_at_global(Duration::ZERO), Some((0, 0)));
+        assert_eq!(
+            img.frame_index_at_global(Duration::from_millis(150)),
+            Some((0, 1))
+        );
+        // Past the single pass -> None (no repeat).
+        assert_eq!(img.frame_index_at_global(Duration::from_millis(200)), None);
+    }
+
+    /// A zero-total-duration stream has no time axis: only `global == 0`
+    /// resolves and only when a frame is showable; a frame whose Delay
+    /// Time is zero is not "visible at an instant", so it yields `None`.
+    #[test]
+    fn frame_index_at_global_zero_duration_stream() {
+        let img = base_image(Some(pal3()), vec![Block::Image(frame_with(None))]);
+        assert_eq!(img.single_pass_duration(), Duration::ZERO);
+        // Zero-duration block: frame_index_at(0) is None, so global is None.
+        assert_eq!(img.frame_index_at_global(Duration::ZERO), None);
+        assert_eq!(img.frame_index_at_global(Duration::from_millis(1)), None);
     }
 
     /// §18.c.vii — with a Global Color Table present and an in-range
