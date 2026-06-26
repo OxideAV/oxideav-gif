@@ -1012,6 +1012,78 @@ impl GifImage {
             .count()
     }
 
+    /// The union bounding box of every §20 Image / §25 Plain Text
+    /// graphic-rendering block's placement rectangle (§20.a / §25.a),
+    /// returned as `(left, top, width, height)` — the smallest rectangle
+    /// that contains every frame's drawn area across the whole animation.
+    ///
+    /// A partial-display or re-crop optimiser uses this to learn which
+    /// sub-region of the §18 Logical Screen the animation ever touches: a
+    /// stream whose frames all sit in one corner can be presented in a
+    /// smaller viewport than the full Logical Screen. Each rectangle's
+    /// right/bottom edge is widened to `u32` for the union maths so a
+    /// placement near the 65 535 coordinate ceiling cannot wrap; the
+    /// result is then narrowed back, which is always lossless because the
+    /// union never exceeds the bounding rectangles it was built from
+    /// (themselves `u16`-representable when in-bounds — an out-of-bounds
+    /// block can push an edge past `u16::MAX`, in which case it saturates
+    /// at `u16::MAX`, the conservative "covers everything representable"
+    /// reading).
+    ///
+    /// Returns `None` for a stream with no graphic-rendering blocks (there
+    /// is no drawn area to bound), and treats zero-extent blocks (a frame
+    /// with `width == 0` or `height == 0`) as contributing their origin
+    /// point but no area — they widen the box's origin coverage but not its
+    /// far edge beyond that point.
+    pub fn frames_bounding_box(&self) -> Option<(u16, u16, u16, u16)> {
+        let mut min_left = u32::MAX;
+        let mut min_top = u32::MAX;
+        let mut max_right = 0u32;
+        let mut max_bottom = 0u32;
+        let mut any = false;
+
+        for (l, t, w, h) in self.placement_rects() {
+            any = true;
+            let l = l as u32;
+            let t = t as u32;
+            let right = l + w as u32;
+            let bottom = t + h as u32;
+            min_left = min_left.min(l);
+            min_top = min_top.min(t);
+            max_right = max_right.max(right);
+            max_bottom = max_bottom.max(bottom);
+        }
+
+        if !any {
+            return None;
+        }
+
+        // max_right >= min_left and max_bottom >= min_top always hold (each
+        // far edge is >= its own origin, which is >= the running minimum).
+        let width = (max_right - min_left).min(u16::MAX as u32) as u16;
+        let height = (max_bottom - min_top).min(u16::MAX as u32) as u16;
+        Some((min_left as u16, min_top as u16, width, height))
+    }
+
+    /// `true` when the union [`Self::frames_bounding_box`] is strictly
+    /// smaller than the full §18 Logical Screen — i.e. the animation
+    /// leaves a margin a partial-display path could crop away. `false`
+    /// when the bounding box exactly fills (or, for an out-of-bounds
+    /// stream, meets/exceeds) the Logical Screen, and `false` for a stream
+    /// with no graphic-rendering blocks (nothing to crop).
+    pub fn frames_inhabit_subregion(&self) -> bool {
+        match self.frames_bounding_box() {
+            None => false,
+            Some((l, t, w, h)) => {
+                let covers_full = l == 0
+                    && t == 0
+                    && w as u32 >= self.screen_width as u32
+                    && h as u32 >= self.screen_height as u32;
+                !covers_full
+            }
+        }
+    }
+
     /// Iterate every §24 Comment Extension payload in source order.
     ///
     /// The CompuServe spec (§24.a) makes Comment Extensions OPTIONAL
@@ -5118,6 +5190,85 @@ mod tests {
         let img = screen_image(1, 1, vec![Block::Comment(b"only metadata".to_vec())]);
         assert!(img.all_blocks_fit_screen());
         assert_eq!(img.out_of_bounds_block_count(), 0);
+    }
+
+    /// `frames_bounding_box` is the union of every placement rectangle:
+    /// two corner frames yield the box spanning both.
+    #[test]
+    fn frames_bounding_box_unions_placement_rects() {
+        let img = screen_image(
+            32,
+            32,
+            vec![
+                placed_frame(2, 3, 4, 5),        // [2..6) x [3..8)
+                placed_plain_text(10, 1, 6, 20), // [10..16) x [1..21)
+            ],
+        );
+        // left = min(2,10)=2, top = min(3,1)=1,
+        // right = max(6,16)=16, bottom = max(8,21)=21.
+        assert_eq!(img.frames_bounding_box(), Some((2, 1, 14, 20)));
+    }
+
+    /// A single frame's bounding box is exactly its own placement.
+    #[test]
+    fn frames_bounding_box_single_frame() {
+        let img = screen_image(64, 64, vec![placed_frame(5, 7, 20, 9)]);
+        assert_eq!(img.frames_bounding_box(), Some((5, 7, 20, 9)));
+    }
+
+    /// No graphic-rendering block -> no drawn area to bound -> `None`.
+    #[test]
+    fn frames_bounding_box_none_without_frames() {
+        let img = screen_image(16, 16, vec![Block::Comment(b"meta".to_vec())]);
+        assert_eq!(img.frames_bounding_box(), None);
+        assert!(!img.frames_inhabit_subregion());
+    }
+
+    /// A far-edge sum near the `u16` ceiling must not wrap: a frame at
+    /// `left = 65_535` with `width = 1` has a right edge of 65_536; the
+    /// `u32` union maths keeps the *width* (`65_536 - 65_535 = 1`) exact
+    /// rather than wrapping the right edge to 0.
+    #[test]
+    fn frames_bounding_box_no_u16_wrap_at_ceiling() {
+        let img = screen_image(u16::MAX, u16::MAX, vec![placed_frame(u16::MAX, 0, 1, 1)]);
+        assert_eq!(img.frames_bounding_box(), Some((u16::MAX, 0, 1, 1)));
+    }
+
+    /// When the union *width* itself exceeds `u16::MAX` it saturates at
+    /// `u16::MAX` rather than wrapping — the conservative "covers
+    /// everything representable" reading. A frame spanning the origin to
+    /// the far ceiling produces a width of 65_536, which clamps to 65_535.
+    #[test]
+    fn frames_bounding_box_saturates_oversize_width() {
+        let img = screen_image(
+            u16::MAX,
+            u16::MAX,
+            vec![
+                placed_frame(0, 0, u16::MAX, 1),
+                placed_frame(u16::MAX, 0, 1, 1),
+            ],
+        );
+        // right edge = max(65_535, 65_536) = 65_536, left = 0 ->
+        // width 65_536 clamps to u16::MAX.
+        assert_eq!(img.frames_bounding_box(), Some((0, 0, u16::MAX, 1)));
+    }
+
+    /// `frames_inhabit_subregion` is `true` when the union leaves a margin
+    /// inside the Logical Screen, `false` when it fills the screen.
+    #[test]
+    fn frames_inhabit_subregion_detects_margin() {
+        // Frames fill the whole 16x16 screen -> no margin.
+        let full = screen_image(16, 16, vec![placed_frame(0, 0, 16, 16)]);
+        assert_eq!(full.frames_bounding_box(), Some((0, 0, 16, 16)));
+        assert!(!full.frames_inhabit_subregion());
+
+        // Frames sit in one corner -> a margin remains.
+        let corner = screen_image(16, 16, vec![placed_frame(0, 0, 8, 8)]);
+        assert!(corner.frames_inhabit_subregion());
+
+        // A frame offset from the origin also leaves a margin.
+        let offset = screen_image(16, 16, vec![placed_frame(4, 4, 8, 8)]);
+        assert!(offset.frames_inhabit_subregion());
     }
 
     /// The boolean and the count agree: `all_blocks_fit_screen()` is

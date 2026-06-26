@@ -4,6 +4,20 @@
 
 ### Added
 
+- §20.a / §25.a frame-union analysis. `GifImage::frames_bounding_box()`
+  returns the union `(left, top, width, height)` of every §20 Image / §25
+  Plain Text placement rectangle — the smallest rectangle the animation ever
+  draws into — or `None` for a stream with no graphic-rendering blocks. The
+  union maths widens each far edge to `u32` so a placement near the 65 535
+  coordinate ceiling cannot wrap, then narrows back, saturating an oversize
+  union *width*/*height* at `u16::MAX` (the conservative "covers everything
+  representable" reading). `GifImage::frames_inhabit_subregion()` reports
+  whether that box leaves a margin inside the §18 Logical Screen, the signal
+  a partial-display / re-crop path needs to present the animation in a
+  smaller viewport. 6 new `image` unit tests: two-corner union, single-frame
+  identity, no-frames `None`, the ceiling no-wrap case, the oversize-width
+  saturation, and the margin/full-screen subregion split.
+
 - `compose::compose_frame_at_global(image, global)` ties the time-domain seek
   to pixels: it resolves a global playback offset to `(pass, frame_index)`
   via `GifImage::frame_index_at_global` then returns the matching composited
