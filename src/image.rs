@@ -2255,6 +2255,83 @@ impl GifImage {
         let per_pass = self.single_pass_duration();
         Some(per_pass.saturating_mul(passes.try_into().unwrap_or(u32::MAX)))
     }
+
+    /// The single-pass *presentation timeline*: one [`FramePresentation`]
+    /// per graphic-rendering block (§20 Image **and** §25 Plain Text — both
+    /// are graphic-rendering blocks whose §23 scope a Graphic Control
+    /// Extension can modify per §23.d), in source order, with each block's
+    /// wall-clock `start` offset from the beginning of the pass and its
+    /// `duration` (the §23.c.vii Delay Time).
+    ///
+    /// §23.c.vii says "The clock starts ticking immediately after the
+    /// graphic is rendered", so block *k*'s presentation begins once every
+    /// earlier block's Delay Time has elapsed: `start[k]` is the running
+    /// sum of `duration[0..k]` and `duration[k]` is block *k*'s own Delay
+    /// Time (1 centisecond = 10 ms exactly, [`Duration::ZERO`] for a block
+    /// with no §23 GCE or a zero Delay Time, matching
+    /// [`Self::frame_delays`]). The final block's `start + duration` equals
+    /// [`Self::single_pass_duration`].
+    ///
+    /// This is the lookup spine a seeking player needs: given an elapsed
+    /// offset into a pass, [`Self::frame_index_at`] binary-walks this
+    /// timeline to the block visible at that instant without compositing
+    /// every intermediate canvas.
+    pub fn presentation_timeline(&self) -> impl Iterator<Item = FramePresentation> + '_ {
+        let mut start = Duration::ZERO;
+        self.frame_delays().map(move |duration| {
+            let this_start = start;
+            start = start.saturating_add(duration);
+            FramePresentation {
+                start: this_start,
+                duration,
+            }
+        })
+    }
+
+    /// Zero-based index (into the graphic-rendering-block sequence — the
+    /// same ordinal [`Self::presentation_timeline`] and
+    /// [`Self::frame_delays`] yield) of the block visible at `elapsed` into
+    /// a single pass, or `None` when `elapsed` is at or past
+    /// [`Self::single_pass_duration`] (the pass has finished) or the stream
+    /// has no graphic-rendering blocks.
+    ///
+    /// A block occupies the half-open interval `[start, start + duration)`
+    /// per §23.c.vii's "wait before continuing" — the next block does not
+    /// begin until this one's Delay Time has fully elapsed. A block with a
+    /// zero Delay Time occupies an *empty* interval, so it is never the
+    /// frame "visible at" any instant: it is rendered and immediately
+    /// superseded (the §23.c.vii "do not wait" reading). The query
+    /// therefore returns the first block whose half-open interval contains
+    /// `elapsed`, skipping over zero-duration blocks exactly as a player
+    /// stepping by wall-clock time would.
+    pub fn frame_index_at(&self, elapsed: Duration) -> Option<usize> {
+        let mut cursor = Duration::ZERO;
+        for (idx, fp) in self.presentation_timeline().enumerate() {
+            let next = cursor.saturating_add(fp.duration);
+            // Half-open [cursor, next): a zero-duration block has
+            // cursor == next and is skipped (it can never contain a point).
+            if elapsed >= cursor && elapsed < next {
+                return Some(idx);
+            }
+            cursor = next;
+        }
+        None
+    }
+}
+
+/// One entry in a [`GifImage::presentation_timeline`]: the wall-clock
+/// `start` offset (from the beginning of a single playback pass) at which
+/// a graphic-rendering block is presented, and its `duration` (the
+/// §23.c.vii Delay Time). The block occupies the half-open interval
+/// `[start, start + duration)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramePresentation {
+    /// Wall-clock offset from the start of the pass at which this block is
+    /// presented — the sum of every earlier block's §23.c.vii Delay Time.
+    pub start: Duration,
+    /// This block's own §23.c.vii Delay Time ([`Duration::ZERO`] when the
+    /// block has no §23 Graphic Control Extension or a zero Delay Time).
+    pub duration: Duration,
 }
 
 #[cfg(test)]
@@ -3519,6 +3596,113 @@ mod tests {
             .map(|r| r.unwrap().delay)
             .collect();
         assert_eq!(from_timeline, from_playback);
+    }
+
+    /// §23.c.vii — the presentation timeline gives each block a `start`
+    /// that is the running sum of every earlier Delay Time and a
+    /// `duration` equal to its own Delay Time; the last block's
+    /// `start + duration` equals `single_pass_duration`.
+    #[test]
+    fn presentation_timeline_accumulates_starts() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(10)), // 100 ms
+                Block::Image(frame_with_delay(20)), // 200 ms
+                Block::Image(frame_with_delay(70)), // 700 ms
+            ],
+        );
+        let tl: Vec<FramePresentation> = img.presentation_timeline().collect();
+        assert_eq!(
+            tl,
+            vec![
+                FramePresentation {
+                    start: Duration::ZERO,
+                    duration: Duration::from_millis(100),
+                },
+                FramePresentation {
+                    start: Duration::from_millis(100),
+                    duration: Duration::from_millis(200),
+                },
+                FramePresentation {
+                    start: Duration::from_millis(300),
+                    duration: Duration::from_millis(700),
+                },
+            ]
+        );
+        let last = tl.last().unwrap();
+        assert_eq!(last.start + last.duration, img.single_pass_duration());
+    }
+
+    /// `presentation_timeline` durations match `frame_delays` block-for-block
+    /// (it is the cumulative-start view of the same per-block delays).
+    #[test]
+    fn presentation_timeline_durations_match_frame_delays() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(7)),
+                Block::Image(frame_with(None)), // no GCE -> zero
+                Block::Image(frame_with_delay(42)),
+            ],
+        );
+        let durations: Vec<Duration> = img.presentation_timeline().map(|p| p.duration).collect();
+        let delays: Vec<Duration> = img.frame_delays().collect();
+        assert_eq!(durations, delays);
+    }
+
+    /// `frame_index_at` maps an elapsed offset to the block visible at
+    /// that instant via the half-open `[start, start + duration)` rule of
+    /// §23.c.vii, and returns `None` once the pass has finished.
+    #[test]
+    fn frame_index_at_walks_half_open_intervals() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_delay(10)), // [0,    100) ms
+                Block::Image(frame_with_delay(20)), // [100,  300) ms
+                Block::Image(frame_with_delay(70)), // [300, 1000) ms
+            ],
+        );
+        // Interval boundaries.
+        assert_eq!(img.frame_index_at(Duration::ZERO), Some(0));
+        assert_eq!(img.frame_index_at(Duration::from_millis(99)), Some(0));
+        assert_eq!(img.frame_index_at(Duration::from_millis(100)), Some(1));
+        assert_eq!(img.frame_index_at(Duration::from_millis(299)), Some(1));
+        assert_eq!(img.frame_index_at(Duration::from_millis(300)), Some(2));
+        assert_eq!(img.frame_index_at(Duration::from_millis(999)), Some(2));
+        // At/after the end of the pass: nothing is visible.
+        assert_eq!(img.frame_index_at(Duration::from_millis(1000)), None);
+        assert_eq!(img.frame_index_at(Duration::from_secs(5)), None);
+    }
+
+    /// A zero Delay Time block occupies an empty half-open interval, so
+    /// `frame_index_at` skips it entirely — the §23.c.vii "do not wait"
+    /// reading where the block is rendered and immediately superseded.
+    #[test]
+    fn frame_index_at_skips_zero_duration_blocks() {
+        let img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with(None)),     // zero -> [0, 0) empty
+                Block::Image(frame_with_delay(10)), // [0, 100) ms
+                Block::Image(frame_with(None)),     // zero -> [100, 100) empty
+                Block::Image(frame_with_delay(10)), // [100, 200) ms
+            ],
+        );
+        // t=0 lands on block 1 (the first non-empty interval), never 0.
+        assert_eq!(img.frame_index_at(Duration::ZERO), Some(1));
+        assert_eq!(img.frame_index_at(Duration::from_millis(100)), Some(3));
+        assert_eq!(img.frame_index_at(Duration::from_millis(200)), None);
+    }
+
+    /// An empty stream (no graphic-rendering blocks) has an empty timeline
+    /// and `frame_index_at` is always `None`.
+    #[test]
+    fn presentation_timeline_empty_stream() {
+        let img = base_image(Some(pal3()), Vec::new());
+        assert_eq!(img.presentation_timeline().count(), 0);
+        assert_eq!(img.frame_index_at(Duration::ZERO), None);
     }
 
     /// §18.c.vii — with a Global Color Table present and an in-range

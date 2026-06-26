@@ -154,8 +154,8 @@ pub use decoder::{decode, decode_first_frame, decode_lenient};
 pub use encoder::{encode, encode_with_options, EncodeOptions, LzwStrategy};
 pub use error::{Error, Result};
 pub use image::{
-    Application, Block, BlockClass, DisposalMethod, Frame, GifImage, GraphicControl, PlainText,
-    Rgb, Version,
+    Application, Block, BlockClass, DisposalMethod, Frame, FramePresentation, GifImage,
+    GraphicControl, PlainText, Rgb, Version,
 };
 pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};
 pub use quantize::{

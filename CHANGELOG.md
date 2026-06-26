@@ -4,6 +4,25 @@
 
 ### Added
 
+- §23.c.vii presentation-timeline surface. `GifImage::presentation_timeline()`
+  yields one `FramePresentation { start, duration }` per graphic-rendering
+  block (§20 Image + §25 Plain Text) in source order, where `start` is the
+  running sum of every earlier block's Delay Time ("the clock starts ticking
+  immediately after the graphic is rendered") and `duration` is the block's
+  own §23.c.vii Delay Time (1 centisecond = 10 ms; `Duration::ZERO` for a
+  block with no §23 GCE or a zero Delay Time, matching `frame_delays`). The
+  final entry's `start + duration` equals `single_pass_duration()`.
+  `GifImage::frame_index_at(elapsed)` is the seeking-player lookup spine: it
+  returns the zero-based graphic-rendering-block index visible at `elapsed`
+  into one pass via the half-open `[start, start + duration)` rule, skipping
+  zero-Delay-Time blocks (empty interval — rendered and immediately
+  superseded, the "do not wait" reading) and returning `None` once the pass
+  has finished or for a stream with no graphic-rendering blocks.
+  `FramePresentation` is re-exported at the crate root. 5 new `image` unit
+  tests pin the cumulative-start accumulation, the durations-match-frame_delays
+  property, the half-open interval walk with boundary points, the
+  zero-duration skip, and the empty-stream case.
+
 - Lloyd (k-means) palette refinement for the truecolor quantiser. The
   `quantize` module gains a `palette_refine_iterations` field on
   `QuantizeOptions` (default `0` — no refinement). When non-zero, after
