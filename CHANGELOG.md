@@ -4,6 +4,16 @@
 
 ### Added
 
+- End-to-end `tests/seek_timeline.rs` (5 tests) drives the new seek surface
+  through the full build → encode → decode → compose pipeline (real LZW +
+  container bytes, not just an in-memory `GifImage`): the presentation
+  timeline survives a round-trip; `frame_index_at` agrees with the
+  `Playback` iterator's per-frame delays at every interval midpoint;
+  `compose_frame_at_global` returns canvases byte-identical to the `compose`
+  output across 3 loop passes and `None` past the finite run; an
+  infinite-loop stream still resolves pass 100; and `frames_bounding_box` /
+  `frames_inhabit_subregion` survive the round-trip on a corner-placed frame.
+
 - §20.a / §25.a frame-union analysis. `GifImage::frames_bounding_box()`
   returns the union `(left, top, width, height)` of every §20 Image / §25
   Plain Text placement rectangle — the smallest rectangle the animation ever
