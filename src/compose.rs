@@ -220,6 +220,60 @@ pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
     Ok(out)
 }
 
+/// The composited canvas visible at a global playback offset, plus the
+/// loop pass and frame ordinal that produced it. Returned by
+/// [`compose_frame_at_global`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeekResult {
+    /// The fully-rendered logical-screen canvas on display at the queried
+    /// instant (the post-render, pre-disposal snapshot of the resolved
+    /// frame, identical to the matching [`ComposedFrame::canvas`]).
+    pub canvas: RgbaCanvas,
+    /// Zero-based loop pass at the queried instant (pass 0 = first
+    /// playback, pass 1 = first repeat …), per the NETSCAPE2.0 /
+    /// ANIMEXTS1.0 *Looping* semantics.
+    pub pass: u64,
+    /// Zero-based graphic-rendering-block ordinal of the resolved frame —
+    /// the same index [`crate::GifImage::frame_index_at_global`] returns
+    /// and the position into the [`compose`] output `Vec`.
+    pub frame_index: usize,
+}
+
+/// Compose `image` and return the [`SeekResult`] visible at a *global*
+/// playback offset `global` (measured from the start of playback, across
+/// loop repeats), or `None` once a finite-loop animation has finished or
+/// the stream has no on-screen frame at that instant.
+///
+/// This ties the time-domain seek of
+/// [`crate::GifImage::frame_index_at_global`] to actual pixels: it resolves
+/// `global` to a `(pass, frame_index)` with that query, then returns the
+/// matching composited canvas from the [`compose`] state machine. A player
+/// scrubbing a timeline calls this with the wall-clock offset and blits the
+/// returned canvas without stepping every intermediate frame itself.
+///
+/// # Errors
+///
+/// Propagates every error [`compose`] can raise (placement rectangle
+/// escaping the logical screen, out-of-range palette index, missing colour
+/// table).
+pub fn compose_frame_at_global(
+    image: &GifImage,
+    global: core::time::Duration,
+) -> Result<Option<SeekResult>> {
+    let Some((pass, frame_index)) = image.frame_index_at_global(global) else {
+        return Ok(None);
+    };
+    let frames = compose(image)?;
+    // frame_index_at_global only yields an index the timeline contains, and
+    // compose produces exactly one entry per graphic-rendering block, so the
+    // lookup is in bounds — but guard rather than panic on any future skew.
+    Ok(frames.into_iter().nth(frame_index).map(|cf| SeekResult {
+        canvas: cf.canvas,
+        pass,
+        frame_index,
+    }))
+}
+
 /// Planned rectangle replacement for the §20 Image block at
 /// `block_index` — the absolute crop computed by [`plan_frame_crops`].
 struct CropPlan {
@@ -718,6 +772,84 @@ mod tests {
         assert_eq!(px(final_canvas, 3, 3), [0, 0xFF, 0, 0xFF]);
         // Frame-1 timing preserved.
         assert_eq!(frames[0].delay_centis, 10);
+    }
+
+    /// NETSCAPE2.0 Looping(2) application block: 19-byte fixed form with
+    /// the given little-endian loop count, for `compose_frame_at_global`
+    /// seek tests.
+    fn netscape_loop(count: u16) -> Block {
+        Block::Application(crate::image::Application {
+            identifier: *b"NETSCAPE",
+            auth_code: *b"2.0",
+            data: vec![0x01, (count & 0xFF) as u8, (count >> 8) as u8],
+        })
+    }
+
+    /// `compose_frame_at_global` ties the time-domain seek to pixels: at a
+    /// global offset it returns the composited canvas, loop pass, and frame
+    /// ordinal visible at that instant, and `None` once a finite run ends.
+    #[test]
+    fn compose_frame_at_global_seeks_to_pixels_across_loops() {
+        use core::time::Duration;
+        // Frame 0: red top-left, 100 ms, disposal=None (red survives).
+        // Frame 1: green bottom-right, 100 ms. loop_count Some(1) -> 2 passes.
+        let img = base_image(vec![
+            netscape_loop(1),
+            Block::Image(small_frame(
+                0,
+                0,
+                1,
+                Some(GraphicControl {
+                    disposal: DisposalMethod::None,
+                    user_input: false,
+                    transparent_index: None,
+                    delay_centis: 10,
+                }),
+            )),
+            Block::Image(small_frame(
+                2,
+                2,
+                2,
+                Some(GraphicControl {
+                    disposal: DisposalMethod::None,
+                    user_input: false,
+                    transparent_index: None,
+                    delay_centis: 10,
+                }),
+            )),
+        ]);
+        // Per-pass duration is 200 ms; 2 passes -> 400 ms total.
+        assert_eq!(img.single_pass_duration(), Duration::from_millis(200));
+
+        // t=0 -> pass 0, frame 0 (red only).
+        let r = compose_frame_at_global(&img, Duration::ZERO)
+            .unwrap()
+            .unwrap();
+        assert_eq!((r.pass, r.frame_index), (0, 0));
+        assert_eq!(px(&r.canvas, 0, 0), [0xFF, 0, 0, 0xFF]);
+        // Unrendered pixels start as transparent black (the canvas is
+        // zero-filled; disposal=None never paints background).
+        assert_eq!(px(&r.canvas, 2, 2), [0, 0, 0, 0], "green not yet drawn");
+
+        // t=150 ms -> pass 0, frame 1 (red survives + green).
+        let r = compose_frame_at_global(&img, Duration::from_millis(150))
+            .unwrap()
+            .unwrap();
+        assert_eq!((r.pass, r.frame_index), (0, 1));
+        assert_eq!(px(&r.canvas, 0, 0), [0xFF, 0, 0, 0xFF]);
+        assert_eq!(px(&r.canvas, 2, 2), [0, 0xFF, 0, 0xFF]);
+
+        // t=200 ms -> pass 1 (first repeat), frame 0.
+        let r = compose_frame_at_global(&img, Duration::from_millis(200))
+            .unwrap()
+            .unwrap();
+        assert_eq!((r.pass, r.frame_index), (1, 0));
+
+        // t=400 ms -> finite run exhausted (2 passes done) -> None.
+        assert_eq!(
+            compose_frame_at_global(&img, Duration::from_millis(400)).unwrap(),
+            None
+        );
     }
 
     /// disposal=Keep behaves identically to None for the visible

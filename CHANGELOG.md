@@ -4,6 +4,18 @@
 
 ### Added
 
+- `compose::compose_frame_at_global(image, global)` ties the time-domain seek
+  to pixels: it resolves a global playback offset to `(pass, frame_index)`
+  via `GifImage::frame_index_at_global` then returns the matching composited
+  RGBA canvas from the §23 disposal-method state machine as a `SeekResult
+  { canvas, pass, frame_index }`, or `None` once a finite-loop run has
+  finished. A player scrubbing a timeline blits the returned canvas without
+  stepping every intermediate frame. `SeekResult` re-exported at the crate
+  root. 1 new `compose` unit test seeks a 2-frame NETSCAPE2.0 Looping(1)
+  animation at four global offsets (pass 0 frame 0, pass 0 frame 1, pass 1
+  repeat frame 0, and past the 2-pass end → `None`), asserting both the
+  `(pass, frame_index)` and the composited pixels.
+
 - Looping-aware seek `GifImage::frame_index_at_global(global)`. Maps a
   *global* elapsed offset (measured across NETSCAPE2.0 / ANIMEXTS1.0 loop
   repeats from the very start of playback) to the `(pass, frame_index)` pair

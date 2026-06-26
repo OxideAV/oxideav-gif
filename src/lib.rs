@@ -148,7 +148,7 @@ pub mod registry;
 
 pub use app_ext::ApplicationKind;
 pub use builder::AnimationBuilder;
-pub use compose::{compose, ComposedFrame, RgbaCanvas};
+pub use compose::{compose, compose_frame_at_global, ComposedFrame, RgbaCanvas, SeekResult};
 pub use conformance::{ConformanceIssue, ConformanceReport, ConformanceRule, ConformanceSeverity};
 pub use decoder::{decode, decode_first_frame, decode_lenient};
 pub use encoder::{encode, encode_with_options, EncodeOptions, LzwStrategy};
