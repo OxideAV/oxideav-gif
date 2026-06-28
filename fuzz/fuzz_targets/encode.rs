@@ -251,7 +251,16 @@ fuzz_target!(|data: &[u8]| {
     };
     let refine = (data[3] >> 1) as usize % 5; // 0..=4
 
-    for dither in [Dither::None, Dither::FloydSteinberg] {
+    for dither in [
+        Dither::None,
+        Dither::FloydSteinberg,
+        Dither::JarvisJudiceNinke,
+        Dither::Stucki,
+        Dither::Burkes,
+        Dither::Sierra,
+        Dither::Atkinson,
+        Dither::OrderedBayer8x8,
+    ] {
         let opts = QuantizeOptions::with_max_colors(max_colors)
             .dither(dither)
             .box_priority(priority)

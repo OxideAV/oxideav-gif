@@ -236,6 +236,92 @@ fn dithered_still_round_trips_to_a_decodable_gif() {
 }
 
 #[test]
+fn every_dither_variant_round_trips_to_a_decodable_gif() {
+    // Each dither variant (error-diffusion family + ordered Bayer) must
+    // survive the full quantise → encode → decode → compose pipeline with
+    // every composed pixel landing on a palette entry. This exercises the
+    // new kernels through the real container bytes, not just the in-memory
+    // quantiser.
+    use oxideav_gif::{Dither, QuantizeOptions};
+    let (w, h) = (24usize, 24usize);
+    let mut rgba = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let r = (x * 10) as u8;
+            let g = (y * 10) as u8;
+            let b = ((x + y) * 5) as u8;
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    for d in [
+        Dither::JarvisJudiceNinke,
+        Dither::Stucki,
+        Dither::Burkes,
+        Dither::Sierra,
+        Dither::Atkinson,
+        Dither::OrderedBayer8x8,
+    ] {
+        let opts = QuantizeOptions::with_max_colors(8).dither(d);
+        let img = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, opts).unwrap();
+        let pal = img.global_palette.as_ref().unwrap().clone();
+        assert!(pal.len() <= 8, "{d:?} palette exceeds budget");
+        let bytes = encode(&img).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        let composed = compose(&decoded).unwrap();
+        assert_eq!(composed.len(), 1, "{d:?}");
+        let canvas = &composed[0].canvas;
+        assert_eq!(canvas.width as usize, w);
+        assert_eq!(canvas.height as usize, h);
+        for px in canvas.pixels.chunks_exact(4) {
+            assert_eq!(px[3], 255, "{d:?} opaque");
+            let c = Rgb::new(px[0], px[1], px[2]);
+            assert!(
+                pal.contains(&c),
+                "{d:?}: composed colour {c:?} not in palette"
+            );
+        }
+    }
+}
+
+#[test]
+fn shared_palette_animation_dithers_with_each_kernel() {
+    // The shared-palette animation path (one GCT, no LCTs) must accept
+    // every dither variant and produce a decodable, composable animation.
+    use oxideav_gif::{Dither, QuantizeOptions};
+    let (w, h) = (16u16, 16u16);
+    let mut f0 = Vec::new();
+    let mut f1 = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            f0.extend_from_slice(&[(x * 14) as u8, (y * 14) as u8, 90, 255]);
+            f1.extend_from_slice(&[90, (x * 14) as u8, (y * 14) as u8, 255]);
+        }
+    }
+    let frames = [
+        (&f0[..], 8u16, DisposalMethod::None),
+        (&f1[..], 8u16, DisposalMethod::None),
+    ];
+    for d in [
+        Dither::FloydSteinberg,
+        Dither::Sierra,
+        Dither::Atkinson,
+        Dither::OrderedBayer8x8,
+    ] {
+        let opts = QuantizeOptions::with_max_colors(32).dither(d);
+        let img = GifImage::from_rgba_frames_shared_palette(&frames, w, h, opts, Some(0)).unwrap();
+        // Shared palette → one GCT, no per-frame LCTs.
+        assert!(img.global_palette.is_some(), "{d:?} no GCT");
+        for f in img.frames() {
+            assert!(f.local_palette.is_none(), "{d:?} unexpected LCT");
+        }
+        let bytes = encode(&img).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        let composed = compose(&decoded).unwrap();
+        assert_eq!(composed.len(), 2, "{d:?}");
+    }
+}
+
+#[test]
 fn dithered_animation_round_trips_and_composes() {
     use oxideav_gif::{Dither, QuantizeOptions};
     let (w, h) = (8u16, 8u16);

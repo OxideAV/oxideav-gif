@@ -371,7 +371,20 @@ Implements every block type defined by the CompuServe specifications:
   1/16 south-east) so a coarse-palette gradient breaks into a stippled mix
   that averages back to the source over a small neighbourhood — palette
   selection is unchanged, only the index-plane assignment; transparent
-  pixels neither receive nor propagate error. `quantize_rgb_with_options`
+  pixels neither receive nor propagate error. Five further error-diffusion
+  kernels widen the choice — `Dither::JarvisJudiceNinke` (12-tap, two-row,
+  ÷48), `Dither::Stucki` (12-tap, two-row, ÷42), `Dither::Burkes` (8-tap,
+  one-row, ÷32), `Dither::Sierra` (10-tap, two-row, ÷32) trade smoothness
+  against edge crispness, and `Dither::Atkinson` (6-tap, ÷8) diffuses only
+  6/8 of the error for a higher-contrast bitmap-display look. All six run
+  through one generic `(dx, dy, num)/divisor` diffuser over a ring of
+  look-ahead error rows (one or two rows deep), and Floyd–Steinberg's output
+  is byte-identical to before. `Dither::OrderedBayer8x8` is the
+  no-inter-pixel-coupling alternative: a fixed per-position bias from an 8×8
+  recursive Bayer threshold matrix, scaled to the palette's mean inter-entry
+  spacing, applied before the nearest-entry search — deterministic, cheap,
+  and producing the characteristic regular cross-hatch. Palette selection is
+  unchanged across every variant. `quantize_rgb_with_options`
   / `quantize_rgba_with_options` are the option-taking entry points (the
   bare functions keep the flat nearest-entry default). `QuantizeOptions`
   also carries a `BoxPriority` knob (`Extent` default / `Population`)
@@ -487,9 +500,10 @@ panic-freedom on arbitrary bytes:
   can't construct (sub-screen placements, mismatched palette sizes,
   multi-frame disposal sequences). Also synthesises small (≤ 32×32) RGBA
   frames from the fuzz bytes and drives the truecolor quantiser paths —
-  `quantize_rgba_with_options` and `quantize_frames_shared` under both
-  `Dither::None` and `Dither::FloydSteinberg`, both `BoxPriority` rules
-  (`Extent` / `Population`), and a fuzz-derived Lloyd refinement count
+  `quantize_rgba_with_options` and `quantize_frames_shared` under every
+  `Dither` variant (`None`, `FloydSteinberg`, `JarvisJudiceNinke`, `Stucki`,
+  `Burkes`, `Sierra`, `Atkinson`, `OrderedBayer8x8`), both `BoxPriority`
+  rules (`Extent` / `Population`), and a fuzz-derived Lloyd refinement count
   (`palette_refine_iterations` 0..=4), plus the
   `from_rgba_frame_with_options` / `from_rgba_frames_shared_palette`
   constructors through `encode` → `decode` — asserting the index plane
