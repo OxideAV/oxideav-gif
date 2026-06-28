@@ -383,7 +383,13 @@ Implements every block type defined by the CompuServe specifications:
   no-inter-pixel-coupling alternative: a fixed per-position bias from an 8×8
   recursive Bayer threshold matrix, scaled to the palette's mean inter-entry
   spacing, applied before the nearest-entry search — deterministic, cheap,
-  and producing the characteristic regular cross-hatch. Palette selection is
+  and producing the characteristic regular cross-hatch. A `serpentine` flag
+  on `QuantizeOptions` (default off, so Floyd–Steinberg stays byte-stable)
+  scans the error-diffusion kernels in boustrophedon order — odd rows
+  right-to-left with mirrored horizontal taps — to break up the directional
+  "worm" artifacts a one-directional raster scan leaves on smooth gradients;
+  it is a no-op for `Dither::None` / `OrderedBayer8x8`, which carry no
+  inter-pixel error. Palette selection is
   unchanged across every variant. `quantize_rgb_with_options`
   / `quantize_rgba_with_options` are the option-taking entry points (the
   bare functions keep the flat nearest-entry default). `QuantizeOptions`

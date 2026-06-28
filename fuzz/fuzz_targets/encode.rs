@@ -250,6 +250,7 @@ fuzz_target!(|data: &[u8]| {
         BoxPriority::Population
     };
     let refine = (data[3] >> 1) as usize % 5; // 0..=4
+    let serpentine = data[3] & 0x10 != 0;
 
     for dither in [
         Dither::None,
@@ -264,7 +265,8 @@ fuzz_target!(|data: &[u8]| {
         let opts = QuantizeOptions::with_max_colors(max_colors)
             .dither(dither)
             .box_priority(priority)
-            .palette_refine_iterations(refine);
+            .palette_refine_iterations(refine)
+            .serpentine(serpentine);
 
         // Per-frame quantiser: index plane must stay in palette range.
         if let Ok(q) = quantize_rgba_with_options(&frame_a, qw, qh, opts) {

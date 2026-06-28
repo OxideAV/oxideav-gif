@@ -4,6 +4,19 @@
 
 ### Added
 
+- Serpentine (boustrophedon) error-diffusion scan, opt-in via
+  `QuantizeOptions::serpentine` (default `false`, so Floyd–Steinberg output
+  stays byte-stable). When enabled the error-diffusion kernels scan odd rows
+  right-to-left with mirrored horizontal taps, breaking up the directional
+  "worm" artifacts a one-directional raster scan leaves on smooth gradients;
+  it is a no-op for `Dither::None` / `Dither::OrderedBayer8x8`. The diffuser,
+  the ordered-Bayer mapper, and the dispatcher were refactored to take a
+  bundled `DitherInput` (source grid + palette + transparency mask), keeping
+  the helper signatures under clippy's argument-count lint. 4 new `quantize`
+  unit tests pin default-off byte stability, the palette-preserving plane
+  change, the non-diffusion no-op, and the retained block-average error win.
+  The encode fuzz harness now toggles serpentine from a fuzz bit.
+
 - Fixed-palette remap entry points `quantize::remap_rgb_to_palette` and
   `remap_rgba_to_palette` (re-exported at the crate root). They take a
   §19/§21 colour table as input and emit only the §22 index plane — median
