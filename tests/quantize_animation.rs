@@ -284,6 +284,44 @@ fn every_dither_variant_round_trips_to_a_decodable_gif() {
 }
 
 #[test]
+fn serpentine_dither_round_trips_through_the_encode_constructor() {
+    // The QuantizeOptions::serpentine flag must thread through the public
+    // from_rgba_frame_with_options encode path unchanged: the serpentine
+    // and raster runs both decode to a valid in-palette canvas, and the
+    // two encoded streams differ (the flag actually reached the diffuser).
+    use oxideav_gif::{Dither, QuantizeOptions};
+    let (w, h) = (24usize, 24usize);
+    let mut rgba = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let v = ((x + y) * 5) as u8;
+            rgba.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let raster = QuantizeOptions::with_max_colors(4).dither(Dither::FloydSteinberg);
+    let serp = raster.serpentine(true);
+
+    let img_r = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, raster).unwrap();
+    let img_s = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, serp).unwrap();
+    let bytes_r = encode(&img_r).unwrap();
+    let bytes_s = encode(&img_s).unwrap();
+    assert_ne!(
+        bytes_r, bytes_s,
+        "serpentine flag must change the encoded LZW stream"
+    );
+
+    // Both decode + compose to an in-palette canvas.
+    for (bytes, img) in [(&bytes_s, &img_s), (&bytes_r, &img_r)] {
+        let pal = img.global_palette.as_ref().unwrap();
+        let composed = compose(&decode(bytes).unwrap()).unwrap();
+        assert_eq!(composed.len(), 1);
+        for px in composed[0].canvas.pixels.chunks_exact(4) {
+            assert!(pal.contains(&Rgb::new(px[0], px[1], px[2])));
+        }
+    }
+}
+
+#[test]
 fn shared_palette_animation_dithers_with_each_kernel() {
     // The shared-palette animation path (one GCT, no LCTs) must accept
     // every dither variant and produce a decodable, composable animation.
