@@ -591,6 +591,166 @@ pub fn quantize_rgb_with_options(
     })
 }
 
+/// Map an opaque RGB image onto a **caller-supplied fixed palette**,
+/// without selecting a new palette.
+///
+/// Unlike [`quantize_rgb`] (which runs median cut to *choose* a palette),
+/// this takes the palette as input and only produces the §22 index plane —
+/// the colour-selection step is skipped entirely. Useful when a frame must
+/// match an existing §18 Global Color Table (e.g. every frame of an
+/// animation sharing one table, or matching another stream's palette).
+///
+/// `opts.dither` controls the index-plane assignment exactly as for the
+/// `quantize_*` paths; `opts.max_colors` / `box_priority` /
+/// `palette_refine_iterations` are ignored (no palette is selected here).
+/// The returned [`Quantized`] echoes `palette` unchanged with
+/// `transparent_index: None`.
+///
+/// # Errors
+///
+/// * `rgb.len()` is not exactly `width * height * 3`.
+/// * `width * height` overflows `usize`.
+/// * `palette` is empty (no valid index exists) or longer than
+///   [`MAX_PALETTE`].
+pub fn remap_rgb_to_palette(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    palette: &[Rgb],
+    opts: QuantizeOptions,
+) -> Result<Quantized> {
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or_else(|| Error::InvalidInput("remap: width*height overflow".into()))?;
+    if rgb.len() != pixel_count * 3 {
+        return Err(Error::InvalidInput(format!(
+            "remap: rgb length {} != width*height*3 ({})",
+            rgb.len(),
+            pixel_count * 3
+        )));
+    }
+    if palette.is_empty() || palette.len() > MAX_PALETTE {
+        return Err(Error::InvalidInput(format!(
+            "remap: palette length {} must be 1..={MAX_PALETTE}",
+            palette.len()
+        )));
+    }
+    let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let opaque = vec![false; pixel_count];
+    let indices =
+        assign_indices_with_dither(opts.dither, &samples, width, height, palette, &opaque, None);
+    Ok(Quantized {
+        palette: palette.to_vec(),
+        indices,
+        transparent_index: None,
+    })
+}
+
+/// Map an RGBA image onto a **caller-supplied fixed palette**, folding
+/// sub-threshold-alpha pixels to a designated transparency slot.
+///
+/// The RGBA counterpart to [`remap_rgb_to_palette`]: the palette is given,
+/// no new palette is selected. Pixels whose alpha is below
+/// [`ALPHA_OPAQUE_THRESHOLD`] are routed to `transparent_index` (which must
+/// be a valid index into `palette`); the opaque pixels are mapped against
+/// the palette *excluding* that one slot, so a transparent entry is never
+/// chosen for an opaque pixel — matching the [`quantize_rgba`] contract. When
+/// the frame carries no transparent pixel the returned
+/// [`Quantized::transparent_index`] is `None` even if a slot was supplied
+/// (nothing was routed to it).
+///
+/// `transparent_index` may be `None` to forbid transparency: an actually
+/// transparent pixel then maps as if opaque (its arbitrary RGB included in
+/// the nearest-entry search), which is the right behaviour for a palette
+/// with no reserved slot.
+///
+/// To keep the opaque search trivially unable to pick the transparency
+/// slot, a supplied `transparent_index` must be the **last** palette entry
+/// (`palette.len() - 1`) — the universal GIF convention of appending the
+/// reserved slot last, matching how this crate's own quantiser builds its
+/// tables. The opaque pixels are then searched against `palette[..len-1]`.
+///
+/// # Errors
+///
+/// * `rgba.len()` is not exactly `width * height * 4`.
+/// * `width * height` overflows `usize`.
+/// * `palette` is empty or longer than [`MAX_PALETTE`].
+/// * `transparent_index` is `Some(i)` with `i != palette.len() - 1`.
+pub fn remap_rgba_to_palette(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    palette: &[Rgb],
+    transparent_index: Option<u8>,
+    opts: QuantizeOptions,
+) -> Result<Quantized> {
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or_else(|| Error::InvalidInput("remap: width*height overflow".into()))?;
+    if rgba.len() != pixel_count * 4 {
+        return Err(Error::InvalidInput(format!(
+            "remap: rgba length {} != width*height*4 ({})",
+            rgba.len(),
+            pixel_count * 4
+        )));
+    }
+    if palette.is_empty() || palette.len() > MAX_PALETTE {
+        return Err(Error::InvalidInput(format!(
+            "remap: palette length {} must be 1..={MAX_PALETTE}",
+            palette.len()
+        )));
+    }
+    if let Some(ti) = transparent_index {
+        if usize::from(ti) != palette.len() - 1 {
+            return Err(Error::InvalidInput(format!(
+                "remap: transparent_index {ti} must be the last palette entry ({})",
+                palette.len() - 1
+            )));
+        }
+        if palette.len() < 2 {
+            return Err(Error::InvalidInput(
+                "remap: a palette with a reserved transparency slot needs at least one \
+                 opaque entry (len >= 2)"
+                    .into(),
+            ));
+        }
+    }
+
+    let mut is_transparent: Vec<bool> = Vec::with_capacity(pixel_count);
+    for px in rgba.chunks_exact(4) {
+        is_transparent.push(transparent_index.is_some() && px[3] < ALPHA_OPAQUE_THRESHOLD);
+    }
+    let any_transparent = is_transparent.iter().any(|&t| t);
+
+    let samples: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+    // The opaque search omits the trailing reserved slot, if any, so an
+    // opaque pixel can never land on the transparency index.
+    let search: &[Rgb] = if transparent_index.is_some() {
+        &palette[..palette.len() - 1]
+    } else {
+        palette
+    };
+    let effective_ti = if any_transparent {
+        transparent_index
+    } else {
+        None
+    };
+    let indices = assign_indices_with_dither(
+        opts.dither,
+        &samples,
+        width,
+        height,
+        search,
+        &is_transparent,
+        transparent_index,
+    );
+    Ok(Quantized {
+        palette: palette.to_vec(),
+        indices,
+        transparent_index: effective_ti,
+    })
+}
+
 /// Result of quantising a sequence of frames against one shared palette.
 ///
 /// Every frame's index plane references the same [`palette`], so the
@@ -1932,6 +2092,123 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ----- fixed-palette remap -----
+
+    #[test]
+    fn remap_rgb_maps_to_nearest_fixed_entry() {
+        // A fixed 3-entry palette; pixels map to their nearest entry without
+        // any new palette being selected.
+        let pal = vec![
+            Rgb::new(0, 0, 0),
+            Rgb::new(255, 255, 255),
+            Rgb::new(255, 0, 0),
+        ];
+        // 2x2: near-black, near-white, near-red, mid-grey.
+        let rgb = vec![
+            5, 5, 5, // -> black (0)
+            250, 250, 250, // -> white (1)
+            240, 10, 10, // -> red (2)
+            130, 130, 130, // -> nearer white than black (1)
+        ];
+        let q = remap_rgb_to_palette(&rgb, 2, 2, &pal, QuantizeOptions::default()).unwrap();
+        assert_eq!(q.palette, pal, "palette is echoed unchanged");
+        assert_eq!(q.indices, vec![0, 1, 2, 1]);
+        assert_eq!(q.transparent_index, None);
+    }
+
+    #[test]
+    fn remap_rgb_rejects_empty_and_bad_length() {
+        let pal = vec![Rgb::new(0, 0, 0)];
+        assert!(remap_rgb_to_palette(&[0, 0, 0], 1, 1, &[], QuantizeOptions::default()).is_err());
+        assert!(remap_rgb_to_palette(&[0, 0], 1, 1, &pal, QuantizeOptions::default()).is_err());
+    }
+
+    #[test]
+    fn remap_rgb_dithers_against_the_fixed_palette() {
+        // A grey ramp remapped to a 2-entry black/white palette under
+        // Floyd–Steinberg must stipple (more transitions than the flat map).
+        let pal = vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)];
+        let mut rgb = Vec::new();
+        for x in 0..16u8 {
+            let v = x * 17;
+            rgb.extend_from_slice(&[v, v, v]);
+        }
+        let flat = remap_rgb_to_palette(&rgb, 16, 1, &pal, QuantizeOptions::default()).unwrap();
+        let dith = remap_rgb_to_palette(
+            &rgb,
+            16,
+            1,
+            &pal,
+            QuantizeOptions::default().dither(Dither::FloydSteinberg),
+        )
+        .unwrap();
+        assert!(dith.indices.iter().all(|&i| (i as usize) < pal.len()));
+        assert!(transition_count(&dith.indices) > transition_count(&flat.indices));
+    }
+
+    #[test]
+    fn remap_rgba_routes_transparent_to_reserved_last_slot() {
+        // Palette: [black, white, RESERVED]; ti = 2 (last). The transparent
+        // pixel hits slot 2; opaque pixels never do.
+        let pal = vec![
+            Rgb::new(0, 0, 0),
+            Rgb::new(255, 255, 255),
+            Rgb::new(0, 0, 0), // reserved
+        ];
+        let rgba = vec![
+            5, 5, 5, 255, // opaque -> black (0)
+            250, 250, 250, 255, // opaque -> white (1)
+            9, 9, 9, 0, // transparent -> 2
+            255, 255, 255, 255, // opaque -> white (1)
+        ];
+        let q =
+            remap_rgba_to_palette(&rgba, 2, 2, &pal, Some(2), QuantizeOptions::default()).unwrap();
+        assert_eq!(q.transparent_index, Some(2));
+        assert_eq!(q.indices[2], 2, "transparent pixel on reserved slot");
+        assert_ne!(q.indices[0], 2);
+        assert_ne!(q.indices[1], 2);
+        assert_ne!(q.indices[3], 2);
+    }
+
+    #[test]
+    fn remap_rgba_no_transparent_pixels_yields_none_index() {
+        let pal = vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)];
+        let rgba = vec![5, 5, 5, 255, 250, 250, 250, 255];
+        // Even with a reserved slot supplied, a fully-opaque frame routes
+        // nothing to it → transparent_index is None.
+        let q =
+            remap_rgba_to_palette(&rgba, 2, 1, &pal, Some(1), QuantizeOptions::default()).unwrap();
+        assert_eq!(q.transparent_index, None);
+    }
+
+    #[test]
+    fn remap_rgba_rejects_non_trailing_transparent_index() {
+        let pal = vec![
+            Rgb::new(0, 0, 0),
+            Rgb::new(255, 255, 255),
+            Rgb::new(1, 2, 3),
+        ];
+        let rgba = vec![0, 0, 0, 0];
+        // ti = 0 is not the last entry (len-1 = 2) → error.
+        assert!(
+            remap_rgba_to_palette(&rgba, 1, 1, &pal, Some(0), QuantizeOptions::default()).is_err()
+        );
+        // ti out of range entirely → error.
+        assert!(
+            remap_rgba_to_palette(&rgba, 1, 1, &pal, Some(9), QuantizeOptions::default()).is_err()
+        );
+    }
+
+    #[test]
+    fn remap_rgba_one_entry_with_reserved_slot_errors() {
+        // A reserved slot needs at least one opaque entry beside it.
+        let pal = vec![Rgb::new(0, 0, 0)];
+        let rgba = vec![0, 0, 0, 0];
+        assert!(
+            remap_rgba_to_palette(&rgba, 1, 1, &pal, Some(0), QuantizeOptions::default()).is_err()
+        );
     }
 
     // ----- shared-palette multi-frame quantisation -----

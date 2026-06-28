@@ -4,6 +4,21 @@
 
 ### Added
 
+- Fixed-palette remap entry points `quantize::remap_rgb_to_palette` and
+  `remap_rgba_to_palette` (re-exported at the crate root). They take a
+  §19/§21 colour table as input and emit only the §22 index plane — median
+  cut / box priority / Lloyd refinement are skipped entirely — so a caller
+  can map a frame onto an existing Global Color Table, match another
+  stream's palette, or re-use one table across an animation. Every `Dither`
+  variant threads through the index-plane assignment. The RGBA form routes
+  sub-threshold-alpha pixels to a caller-designated transparency slot, which
+  must be the trailing palette entry so the opaque nearest-entry search
+  (over `palette[..len-1]`) can never pick it; a fully-opaque frame yields
+  `transparent_index: None` even when a slot was supplied. 7 new `quantize`
+  unit tests pin nearest-entry mapping, fixed-palette dithering, transparent
+  routing to the reserved last slot, the opaque-frame `None` case, and the
+  non-trailing / out-of-range / one-entry rejection paths.
+
 - Five additional error-diffusion dither kernels plus an ordered (Bayer)
   dither for the truecolor quantiser. `Dither` gains `JarvisJudiceNinke`,
   `Stucki`, `Burkes`, `Sierra`, `Atkinson`, and `OrderedBayer8x8` alongside

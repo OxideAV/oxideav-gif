@@ -424,7 +424,16 @@ Implements every block type defined by the CompuServe specifications:
   N independent tables, with no inter-frame palette flicker. The registry
   `GifEncoder` routes through this: a fully-opaque ≤256-colour frame keeps
   its exact palette (lossless), and a >256-colour or transparent frame is
-  quantised instead of rejected.
+  quantised instead of rejected. `quantize::remap_rgb_to_palette` /
+  `remap_rgba_to_palette` are the fixed-palette counterparts: they take the
+  §19/§21 colour table as *input* and produce only the §22 index plane
+  (no palette is selected), honouring every `Dither` choice — for mapping a
+  frame onto an existing Global Color Table, matching another stream's
+  palette, or re-using one table across an animation without re-running
+  median cut. The RGBA form routes sub-threshold-alpha pixels to a
+  caller-designated §23.c.viii Transparency Index, which must be the table's
+  trailing entry (the universal "reserved slot appended last" convention),
+  so an opaque pixel can never land on it.
 - `decode_first_frame` cover-frame fast-path that short-circuits at
   the first image-bearing block and skips the per-block dispatch
   for everything that follows. Useful when you only need a static
