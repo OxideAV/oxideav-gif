@@ -4,6 +4,31 @@
 
 ### Added
 
+- Five additional error-diffusion dither kernels plus an ordered (Bayer)
+  dither for the truecolor quantiser. `Dither` gains `JarvisJudiceNinke`,
+  `Stucki`, `Burkes`, `Sierra`, `Atkinson`, and `OrderedBayer8x8` alongside
+  the existing `None` / `FloydSteinberg`. All six error-diffusion kernels now
+  route through one generic `(dx, dy, num)/divisor` kernel-driven diffuser
+  backed by a ring of look-ahead error rows (two rows for the JJN / Stucki /
+  Sierra / Atkinson kernels, one for Floyd–Steinberg / Burkes), so a kernel
+  reaching two rows below the current scanline is handled uniformly. The
+  Floyd–Steinberg output is byte-for-byte unchanged (its `e * num / 16`
+  arithmetic is reproduced exactly), so every existing dithered fixture is
+  stable. `OrderedBayer8x8` applies a fixed per-position bias from an 8×8
+  recursive Bayer threshold matrix scaled to the palette's mean inter-entry
+  spacing — no inter-pixel coupling, deterministic, cheap. Palette selection
+  (median cut / box priority / Lloyd refinement) is identical for every
+  variant; only the index-plane assignment changes, so the ≤256-entry
+  §19/§21 output shape is unaffected. All variants thread through
+  `quantize_rgb_with_options` / `quantize_rgba_with_options` /
+  `quantize_frames_shared`, routing transparent pixels to the reserved
+  §23.c.viii slot and keeping every index in palette range. 8 new `quantize`
+  unit tests pin in-range output, solid-image flatness, transparent routing,
+  shared-palette threading, the FS-wrapper/dispatcher agreement, the
+  block-average error win for every error-diffusion kernel, the
+  ordered-dither banding break, and the Bayer matrix being a 0..=63
+  permutation.
+
 - End-to-end `tests/seek_timeline.rs` (5 tests) drives the new seek surface
   through the full build → encode → decode → compose pipeline (real LZW +
   container bytes, not just an in-memory `GifImage`): the presentation

@@ -59,7 +59,189 @@ pub enum Dither {
     /// general image-processing technique; the GIF spec only constrains
     /// the ≤256-entry/index-plane output shape, which is unchanged.
     FloydSteinberg,
+    /// Jarvis–Judice–Ninke error diffusion. A wider 12-tap kernel spread
+    /// over the next two rows (divisor 48), so the error of each pixel is
+    /// distributed more gradually than [`Dither::FloydSteinberg`]'s 4-tap
+    /// kernel. Produces a smoother, lower-frequency stipple at higher cost.
+    JarvisJudiceNinke,
+    /// Stucki error diffusion. A 12-tap two-row kernel (divisor 42) closely
+    /// related to Jarvis–Judice–Ninke but with weights chosen so the
+    /// divisor is a power of two times three; visually similar, marginally
+    /// sharper than [`Dither::JarvisJudiceNinke`].
+    Stucki,
+    /// Burkes error diffusion. An 8-tap kernel spread over the current and
+    /// next row only (divisor 32) — a single-look-ahead-row simplification
+    /// of Stucki that keeps most of the smoothness at roughly half the work.
+    Burkes,
+    /// Sierra (Sierra-3) error diffusion. A 10-tap two-row kernel (divisor
+    /// 32). The next-row weights taper more steeply than Stucki, trading a
+    /// little smoothness for edge crispness.
+    Sierra,
+    /// Atkinson error diffusion. A 6-tap kernel (divisor 8) that diffuses
+    /// only `6/8` of each pixel's error — the remaining `2/8` is discarded.
+    /// The deliberate error loss raises local contrast, giving the crisp
+    /// high-contrast look associated with early bitmap displays rather than
+    /// the error-preserving smoothness of the other kernels.
+    Atkinson,
+    /// Ordered (Bayer) dithering with an 8×8 recursive threshold matrix.
+    /// Unlike the error-diffusion variants this applies a fixed
+    /// per-position bias drawn from the Bayer matrix before the
+    /// nearest-entry search, with no inter-pixel coupling — so it is
+    /// deterministic per pixel, cheap, and produces the characteristic
+    /// regular cross-hatch pattern. The bias magnitude is scaled to the
+    /// mean spacing between palette entries so a fine palette gets a
+    /// proportionally finer bias.
+    OrderedBayer8x8,
 }
+
+impl Dither {
+    /// `true` for the error-diffusion family (everything but [`Dither::None`]
+    /// and the ordered [`Dither::OrderedBayer8x8`]).
+    fn error_diffusion_kernel(self) -> Option<&'static ErrorDiffusionKernel> {
+        match self {
+            Dither::None | Dither::OrderedBayer8x8 => None,
+            Dither::FloydSteinberg => Some(&FLOYD_STEINBERG),
+            Dither::JarvisJudiceNinke => Some(&JARVIS_JUDICE_NINKE),
+            Dither::Stucki => Some(&STUCKI),
+            Dither::Burkes => Some(&BURKES),
+            Dither::Sierra => Some(&SIERRA),
+            Dither::Atkinson => Some(&ATKINSON),
+        }
+    }
+}
+
+/// One error-diffusion kernel: a list of forward neighbours each receiving
+/// a fraction `num / divisor` of the current pixel's quantisation error.
+///
+/// Only forward neighbours are listed — a tap is `(dx, dy, num)` where
+/// `dy == 0` means the same (current) row strictly to the right (`dx > 0`)
+/// and `dy >= 1` means a following row at horizontal offset `dx` (which may
+/// be negative). A serpentine-free left-to-right, top-to-bottom raster scan
+/// guarantees every listed neighbour is still un-quantised when the error
+/// arrives. Each weight is applied as the integer `error * num / divisor`,
+/// truncating toward zero independently per tap, matching the historical
+/// Floyd–Steinberg arithmetic. The taps need not sum to `divisor`
+/// ([`ATKINSON`] deliberately discards `2/8`).
+struct ErrorDiffusionKernel {
+    /// `(dx, dy, num)` forward neighbours. `dy` is `0..=2` for every kernel
+    /// shipped here (max two look-ahead rows).
+    taps: &'static [(i32, i32, i32)],
+    /// Shared denominator for every tap's `num`.
+    divisor: i32,
+    /// Largest `dy` across `taps` — the number of look-ahead error rows the
+    /// diffuser must keep live below the current row.
+    look_ahead_rows: usize,
+}
+
+/// Floyd–Steinberg (1976): 4 taps, divisor 16.
+static FLOYD_STEINBERG: ErrorDiffusionKernel = ErrorDiffusionKernel {
+    taps: &[(1, 0, 7), (-1, 1, 3), (0, 1, 5), (1, 1, 1)],
+    divisor: 16,
+    look_ahead_rows: 1,
+};
+
+/// Jarvis–Judice–Ninke (1976): 12 taps over two look-ahead rows, divisor 48.
+static JARVIS_JUDICE_NINKE: ErrorDiffusionKernel = ErrorDiffusionKernel {
+    taps: &[
+        (1, 0, 7),
+        (2, 0, 5),
+        (-2, 1, 3),
+        (-1, 1, 5),
+        (0, 1, 7),
+        (1, 1, 5),
+        (2, 1, 3),
+        (-2, 2, 1),
+        (-1, 2, 3),
+        (0, 2, 5),
+        (1, 2, 3),
+        (2, 2, 1),
+    ],
+    divisor: 48,
+    look_ahead_rows: 2,
+};
+
+/// Stucki (1981): 12 taps over two look-ahead rows, divisor 42.
+static STUCKI: ErrorDiffusionKernel = ErrorDiffusionKernel {
+    taps: &[
+        (1, 0, 8),
+        (2, 0, 4),
+        (-2, 1, 2),
+        (-1, 1, 4),
+        (0, 1, 8),
+        (1, 1, 4),
+        (2, 1, 2),
+        (-2, 2, 1),
+        (-1, 2, 2),
+        (0, 2, 4),
+        (1, 2, 2),
+        (2, 2, 1),
+    ],
+    divisor: 42,
+    look_ahead_rows: 2,
+};
+
+/// Burkes (1988): 8 taps over one look-ahead row, divisor 32.
+static BURKES: ErrorDiffusionKernel = ErrorDiffusionKernel {
+    taps: &[
+        (1, 0, 8),
+        (2, 0, 4),
+        (-2, 1, 2),
+        (-1, 1, 4),
+        (0, 1, 8),
+        (1, 1, 4),
+        (2, 1, 2),
+    ],
+    divisor: 32,
+    look_ahead_rows: 1,
+};
+
+/// Sierra-3 (1989): 10 taps over two look-ahead rows, divisor 32.
+static SIERRA: ErrorDiffusionKernel = ErrorDiffusionKernel {
+    taps: &[
+        (1, 0, 5),
+        (2, 0, 3),
+        (-2, 1, 2),
+        (-1, 1, 4),
+        (0, 1, 5),
+        (1, 1, 4),
+        (2, 1, 2),
+        (-1, 2, 2),
+        (0, 2, 3),
+        (1, 2, 2),
+    ],
+    divisor: 32,
+    look_ahead_rows: 2,
+};
+
+/// Atkinson (1980s): 6 taps, divisor 8, diffusing only `6/8` of the error
+/// (the remaining `2/8` is intentionally discarded for higher contrast).
+static ATKINSON: ErrorDiffusionKernel = ErrorDiffusionKernel {
+    taps: &[
+        (1, 0, 1),
+        (2, 0, 1),
+        (-1, 1, 1),
+        (0, 1, 1),
+        (1, 1, 1),
+        (0, 2, 1),
+    ],
+    divisor: 8,
+    look_ahead_rows: 2,
+};
+
+/// 8×8 recursive Bayer threshold matrix, entries `0..=63`. Generated by the
+/// standard recurrence `M_{2n} = [[4·M_n, 4·M_n+2],[4·M_n+3, 4·M_n+1]]`
+/// from the 2×2 base `[[0,2],[3,1]]`. The matrix is a fixed data table, not
+/// derived from any external implementation.
+static BAYER_8X8: [[i32; 8]; 8] = [
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+];
 
 /// Box-selection rule for the median-cut palette search.
 ///
@@ -284,43 +466,41 @@ pub fn quantize_rgba_with_options(
         None
     };
 
-    let indices = match opts.dither {
-        Dither::None => {
-            // Stitch the per-pixel index plane: transparent pixels take
-            // the reserved slot, opaque pixels take their nearest-entry
-            // assignment from median cut.
-            let mut indices = Vec::with_capacity(pixel_count);
-            let mut opaque_iter = opaque_lookup.into_iter();
-            for &transparent in &is_transparent {
-                if transparent {
-                    indices.push(transparent_index.expect("any_transparent implies Some"));
-                } else {
-                    indices.push(
-                        opaque_iter
-                            .next()
-                            .expect("one lookup entry per opaque pixel"),
-                    );
-                }
+    let indices = if opts.dither == Dither::None {
+        // Stitch the per-pixel index plane: transparent pixels take
+        // the reserved slot, opaque pixels take their nearest-entry
+        // assignment from median cut.
+        let mut indices = Vec::with_capacity(pixel_count);
+        let mut opaque_iter = opaque_lookup.into_iter();
+        for &transparent in &is_transparent {
+            if transparent {
+                indices.push(transparent_index.expect("any_transparent implies Some"));
+            } else {
+                indices.push(
+                    opaque_iter
+                        .next()
+                        .expect("one lookup entry per opaque pixel"),
+                );
             }
-            indices
         }
-        Dither::FloydSteinberg => {
-            // Error diffusion runs over the full spatial grid so it can
-            // reach each pixel's right/below neighbours. The opaque-pixel
-            // search palette excludes the reserved transparent slot (a
-            // transparent entry must never be chosen for an opaque pixel),
-            // so dither against the leading `opaque_len` entries.
-            let opaque_len = palette.len() - usize::from(any_transparent);
-            let samples: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
-            dither_samples_floyd_steinberg(
-                &samples,
-                width,
-                height,
-                &palette[..opaque_len],
-                &is_transparent,
-                transparent_index,
-            )
-        }
+        indices
+    } else {
+        // Dithering runs over the full spatial grid (error diffusion needs
+        // each pixel's neighbours; ordered needs the per-position bias). The
+        // opaque-pixel search palette excludes the reserved transparent slot
+        // (a transparent entry must never be chosen for an opaque pixel), so
+        // dither against the leading `opaque_len` entries.
+        let opaque_len = palette.len() - usize::from(any_transparent);
+        let samples: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+        assign_indices_with_dither(
+            opts.dither,
+            &samples,
+            width,
+            height,
+            &palette[..opaque_len],
+            &is_transparent,
+            transparent_index,
+        )
     };
 
     Ok(Quantized {
@@ -388,14 +568,21 @@ pub fn quantize_rgb_with_options(
         opts.box_priority,
         opts.palette_refine_iterations,
     );
-    let indices = match opts.dither {
-        Dither::None => lookup,
-        Dither::FloydSteinberg => {
-            // No transparency: every pixel is opaque, the full palette is
-            // the opaque-search palette, and the mask is all-false.
-            let opaque = vec![false; pixel_count];
-            dither_samples_floyd_steinberg(&samples, width, height, &palette, &opaque, None)
-        }
+    let indices = if opts.dither == Dither::None {
+        lookup
+    } else {
+        // No transparency: every pixel is opaque, the full palette is the
+        // opaque-search palette, and the mask is all-false.
+        let opaque = vec![false; pixel_count];
+        assign_indices_with_dither(
+            opts.dither,
+            &samples,
+            width,
+            height,
+            &palette,
+            &opaque,
+            None,
+        )
     };
     Ok(Quantized {
         palette,
@@ -520,8 +707,8 @@ pub fn quantize_frames_shared(
     let mut frame_indices = Vec::with_capacity(frames.len());
     for (frame, mask) in frames.iter().zip(&masks) {
         let samples: Vec<[u8; 3]> = frame.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
-        let plane = match opts.dither {
-            Dither::None => samples
+        let plane = if opts.dither == Dither::None {
+            samples
                 .iter()
                 .zip(mask)
                 .map(|(&[r, g, b], &transparent)| {
@@ -531,15 +718,17 @@ pub fn quantize_frames_shared(
                         nearest_index(opaque_palette, Rgb::new(r, g, b))
                     }
                 })
-                .collect(),
-            Dither::FloydSteinberg => dither_samples_floyd_steinberg(
+                .collect()
+        } else {
+            assign_indices_with_dither(
+                opts.dither,
                 &samples,
                 width,
                 height,
                 opaque_palette,
                 mask,
                 transparent_index,
-            ),
+            )
         };
         frame_indices.push(plane);
     }
@@ -842,12 +1031,21 @@ fn remap_to_nearest(samples: &[[u8; 3]], palette: &[Rgb]) -> Vec<u8> {
 /// Error is carried in a per-channel `i32` working buffer so accumulated
 /// diffusion can exceed the `0..=255` range before it is re-clamped at
 /// the nearest-entry search. The kernel pushes the quantisation error of
-/// each pixel onto its not-yet-visited neighbours — 7/16 east, 3/16
-/// south-west, 5/16 south, 1/16 south-east — left-to-right, top-to-bottom.
+/// each pixel onto its not-yet-visited neighbours per the supplied
+/// [`ErrorDiffusionKernel`], scanning left-to-right, top-to-bottom.
 /// Transparent pixels neither receive nor emit error (they are never
 /// displayed): incoming error to a transparent cell is dropped and no
 /// error is diffused out of one.
-fn dither_samples_floyd_steinberg(
+///
+/// A ring of `look_ahead_rows + 1` per-row error accumulators is kept live:
+/// `err_rows[0]` is the current row, `err_rows[k]` the `k`-th row below.
+/// After each row the ring rotates so the just-completed look-ahead row 0
+/// is recycled (cleared) to become the new bottom row. Each tap applies the
+/// integer `error * num / divisor`, truncating toward zero independently,
+/// so for the Floyd–Steinberg kernel (`divisor = 16`) this reproduces the
+/// historical `e * 7 / 16` etc. arithmetic byte-for-byte.
+fn dither_samples_error_diffusion(
+    kernel: &ErrorDiffusionKernel,
     samples: &[[u8; 3]],
     width: usize,
     height: usize,
@@ -857,10 +1055,11 @@ fn dither_samples_floyd_steinberg(
 ) -> Vec<u8> {
     let pixel_count = width * height;
     let mut indices = vec![0u8; pixel_count];
-    // Two rows of accumulated error (current + next), each [r, g, b] in
-    // i32 so over/undershoot can build up across pixels before clamping.
-    let mut cur_err = vec![[0i32; 3]; width];
-    let mut next_err = vec![[0i32; 3]; width];
+    // Ring of per-row error accumulators: index 0 is the current row, the
+    // rest are look-ahead rows below it. Each cell is a per-channel i32 so
+    // accumulated over/undershoot can build before re-clamping.
+    let ring_len = kernel.look_ahead_rows + 1;
+    let mut err_rows: Vec<Vec<[i32; 3]>> = (0..ring_len).map(|_| vec![[0i32; 3]; width]).collect();
 
     // An empty (degenerate) palette has no valid opaque index; every
     // opaque pixel falls back to 0, matching `nearest_index`'s contract.
@@ -871,10 +1070,6 @@ fn dither_samples_floyd_steinberg(
     };
 
     for y in 0..height {
-        // Reset the next-row accumulator before this row diffuses into it.
-        for e in next_err.iter_mut() {
-            *e = [0; 3];
-        }
         for x in 0..width {
             let p = y * width + x;
             if is_transparent[p] {
@@ -885,10 +1080,11 @@ fn dither_samples_floyd_steinberg(
             // Source colour + the error diffused into this cell, clamped
             // back to the displayable range for the nearest-entry search.
             let [sr, sg, sb] = samples[p];
+            let cur = err_rows[0][x];
             let want = [
-                (sr as i32 + cur_err[x][0]).clamp(0, 255),
-                (sg as i32 + cur_err[x][1]).clamp(0, 255),
-                (sb as i32 + cur_err[x][2]).clamp(0, 255),
+                (sr as i32 + cur[0]).clamp(0, 255),
+                (sg as i32 + cur[1]).clamp(0, 255),
+                (sb as i32 + cur[2]).clamp(0, 255),
             ];
             let idx = nearest_index(
                 search,
@@ -902,28 +1098,188 @@ fn dither_samples_floyd_steinberg(
                 want[1] - chosen.g as i32,
                 want[2] - chosen.b as i32,
             ];
-            // Diffuse: 7/16 east, 3/16 south-west, 5/16 south, 1/16 SE.
-            for c in 0..3 {
-                let e = err[c];
-                if x + 1 < width {
-                    cur_err[x + 1][c] += e * 7 / 16;
+            for &(dx, dy, num) in kernel.taps {
+                let nx = x as i32 + dx;
+                if nx < 0 || nx as usize >= width {
+                    continue;
                 }
-                if y + 1 < height {
-                    if x > 0 {
-                        next_err[x - 1][c] += e * 3 / 16;
-                    }
-                    next_err[x][c] += e * 5 / 16;
-                    if x + 1 < width {
-                        next_err[x + 1][c] += e / 16;
-                    }
+                let ny = y as i32 + dy;
+                if ny as usize >= height {
+                    continue;
+                }
+                let row = &mut err_rows[dy as usize][nx as usize];
+                for c in 0..3 {
+                    row[c] += err[c] * num / kernel.divisor;
                 }
             }
         }
-        // The row we just diffused into becomes the current row.
-        core::mem::swap(&mut cur_err, &mut next_err);
+        // Rotate the ring: the finished current row (index 0) moves to the
+        // back to be reused as the new bottom look-ahead row, after being
+        // cleared. Rows 1..ring_len shift down by one.
+        err_rows.rotate_left(1);
+        for e in err_rows[ring_len - 1].iter_mut() {
+            *e = [0; 3];
+        }
     }
 
     indices
+}
+
+/// Floyd–Steinberg dispatch wrapper kept for the call sites that always use
+/// FS (none currently — all routes go through the `Dither` dispatcher — but
+/// retained as the canonical FS entry point for clarity and tests).
+#[cfg(test)]
+fn dither_samples_floyd_steinberg(
+    samples: &[[u8; 3]],
+    width: usize,
+    height: usize,
+    palette: &[Rgb],
+    is_transparent: &[bool],
+    transparent_index: Option<u8>,
+) -> Vec<u8> {
+    dither_samples_error_diffusion(
+        &FLOYD_STEINBERG,
+        samples,
+        width,
+        height,
+        palette,
+        is_transparent,
+        transparent_index,
+    )
+}
+
+/// Ordered (Bayer) dithering: map each pixel to a palette entry after adding
+/// a fixed per-position bias drawn from the 8×8 [`BAYER_8X8`] threshold
+/// matrix. No inter-pixel coupling — every pixel is independent, so this is
+/// cheap and deterministic. The bias is centred on zero (`matrix/64 - 0.5`)
+/// and scaled by `strength`, a per-channel magnitude in code units; passing
+/// the mean inter-entry palette spacing makes the bias proportional to how
+/// coarse the palette is. Transparent pixels emit `transparent_index`.
+fn dither_samples_ordered_bayer(
+    samples: &[[u8; 3]],
+    width: usize,
+    height: usize,
+    palette: &[Rgb],
+    is_transparent: &[bool],
+    transparent_index: Option<u8>,
+    strength: i32,
+) -> Vec<u8> {
+    let pixel_count = width * height;
+    let mut indices = vec![0u8; pixel_count];
+    let search = if palette.is_empty() {
+        &[Rgb::new(0, 0, 0)][..]
+    } else {
+        palette
+    };
+    for y in 0..height {
+        for x in 0..width {
+            let p = y * width + x;
+            if is_transparent[p] {
+                indices[p] = transparent_index.expect("transparent pixel needs reserved index");
+                continue;
+            }
+            // Bayer threshold in 0..=63 → bias in roughly [-strength/2,
+            // +strength/2]: (m * 2 - 63) * strength / 64.
+            let m = BAYER_8X8[y & 7][x & 7];
+            let bias = (m * 2 - 63) * strength / 64;
+            let [sr, sg, sb] = samples[p];
+            let want = [
+                (sr as i32 + bias).clamp(0, 255),
+                (sg as i32 + bias).clamp(0, 255),
+                (sb as i32 + bias).clamp(0, 255),
+            ];
+            indices[p] = nearest_index(
+                search,
+                Rgb::new(want[0] as u8, want[1] as u8, want[2] as u8),
+            );
+        }
+    }
+    indices
+}
+
+/// Mean nearest-neighbour spacing between palette entries, used to scale the
+/// ordered-dither bias to the palette's coarseness. Returns a conservative
+/// default for a degenerate (≤1 entry) palette so a flat image gets no bias.
+fn palette_mean_spacing(palette: &[Rgb]) -> i32 {
+    if palette.len() < 2 {
+        return 0;
+    }
+    // Average over each entry's nearest other entry (Euclidean in RGB).
+    let mut total = 0i64;
+    for (i, a) in palette.iter().enumerate() {
+        let mut best = i64::MAX;
+        for (j, b) in palette.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let dr = a.r as i64 - b.r as i64;
+            let dg = a.g as i64 - b.g as i64;
+            let db = a.b as i64 - b.b as i64;
+            let d2 = dr * dr + dg * dg + db * db;
+            if d2 < best {
+                best = d2;
+            }
+        }
+        total += (best as f64).sqrt() as i64;
+    }
+    (total / palette.len() as i64) as i32
+}
+
+/// Index-plane assignment for a chosen palette + dither, the shared core
+/// behind every `quantize_*` entry point's non-`None` paths.
+fn assign_indices_with_dither(
+    dither: Dither,
+    samples: &[[u8; 3]],
+    width: usize,
+    height: usize,
+    palette: &[Rgb],
+    is_transparent: &[bool],
+    transparent_index: Option<u8>,
+) -> Vec<u8> {
+    if let Some(kernel) = dither.error_diffusion_kernel() {
+        return dither_samples_error_diffusion(
+            kernel,
+            samples,
+            width,
+            height,
+            palette,
+            is_transparent,
+            transparent_index,
+        );
+    }
+    match dither {
+        Dither::OrderedBayer8x8 => {
+            let strength = palette_mean_spacing(palette);
+            dither_samples_ordered_bayer(
+                samples,
+                width,
+                height,
+                palette,
+                is_transparent,
+                transparent_index,
+                strength,
+            )
+        }
+        // Dither::None: flat nearest-entry assignment.
+        _ => {
+            let search = if palette.is_empty() {
+                &[Rgb::new(0, 0, 0)][..]
+            } else {
+                palette
+            };
+            samples
+                .iter()
+                .zip(is_transparent)
+                .map(|(&[r, g, b], &transparent)| {
+                    if transparent {
+                        transparent_index.expect("transparent pixel needs reserved index")
+                    } else {
+                        nearest_index(search, Rgb::new(r, g, b))
+                    }
+                })
+                .collect()
+        }
+    }
 }
 
 /// Map a single RGB colour to the nearest entry of an existing palette
@@ -1355,6 +1711,225 @@ mod tests {
                 );
             } else {
                 assert_ne!(q.indices[i], ti, "opaque pixel {i} landed on reserved slot");
+            }
+        }
+    }
+
+    // ----- extended dither kernels (JJN / Stucki / Burkes / Sierra /
+    //       Atkinson) + ordered Bayer -----
+
+    /// Every error-diffusion + ordered dither variant other than `None`.
+    const DITHER_VARIANTS: &[Dither] = &[
+        Dither::FloydSteinberg,
+        Dither::JarvisJudiceNinke,
+        Dither::Stucki,
+        Dither::Burkes,
+        Dither::Sierra,
+        Dither::Atkinson,
+        Dither::OrderedBayer8x8,
+    ];
+
+    #[test]
+    fn fs_wrapper_matches_dispatcher() {
+        // The FS-only test wrapper and the generic kernel dispatch must
+        // agree byte-for-byte — both route through the same generic
+        // diffuser with the FLOYD_STEINBERG kernel.
+        let mut rgb = Vec::new();
+        for y in 0..8u8 {
+            for x in 0..8u8 {
+                rgb.extend_from_slice(&[x * 36, y * 36, (x ^ y) * 30]);
+            }
+        }
+        let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+        let (pal, _) = median_cut(&samples, 6);
+        let mask = vec![false; 64];
+        let via_wrapper = dither_samples_floyd_steinberg(&samples, 8, 8, &pal, &mask, None);
+        let via_dispatch =
+            assign_indices_with_dither(Dither::FloydSteinberg, &samples, 8, 8, &pal, &mask, None);
+        assert_eq!(via_wrapper, via_dispatch);
+    }
+
+    #[test]
+    fn every_dither_variant_stays_in_palette_range() {
+        // 8x8 multi-channel ramp, budget 4, run through each variant.
+        let mut rgb = Vec::new();
+        for y in 0..8u8 {
+            for x in 0..8u8 {
+                rgb.extend_from_slice(&[x * 36, y * 36, 128]);
+            }
+        }
+        for &d in DITHER_VARIANTS {
+            let opts = QuantizeOptions::with_max_colors(4).dither(d);
+            let q = quantize_rgb_with_options(&rgb, 8, 8, opts).unwrap();
+            assert_eq!(q.indices.len(), 64, "{d:?}");
+            assert!(
+                q.indices.iter().all(|&i| (i as usize) < q.palette.len()),
+                "{d:?} produced an out-of-range index"
+            );
+        }
+    }
+
+    #[test]
+    fn every_dither_variant_is_flat_on_a_solid_image() {
+        // Zero quantisation error → no diffusion / bias has anything to do,
+        // so every variant collapses to the single palette entry.
+        let rgb = vec![77u8; 3 * 16]; // 4x4 solid
+        for &d in DITHER_VARIANTS {
+            let opts = QuantizeOptions::with_max_colors(8).dither(d);
+            let q = quantize_rgb_with_options(&rgb, 4, 4, opts).unwrap();
+            assert_eq!(q.palette.len(), 1, "{d:?}");
+            assert!(q.indices.iter().all(|&i| i == 0), "{d:?} not flat");
+        }
+    }
+
+    #[test]
+    fn error_diffusion_kernels_lower_block_average_error() {
+        // Each error-diffusion kernel (not ordered Bayer, whose fixed bias
+        // is a different mechanism) must beat the flat plane's block-average
+        // error on a gradient, just like Floyd–Steinberg.
+        let w = 32usize;
+        let h = 32usize;
+        let mut src = Vec::with_capacity(w * h);
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                let r = (x * 8) as u8;
+                let g = (y * 8) as u8;
+                let b = ((x + y) * 4) as u8;
+                src.push([r, g, b]);
+                rgb.extend_from_slice(&[r, g, b]);
+            }
+        }
+        let flat = quantize_rgb(&rgb, w, h, 8).unwrap();
+        let flat_err = block_mean_sq_error(&src, &flat.palette, &flat.indices, w, h, 4);
+        for &d in &[
+            Dither::FloydSteinberg,
+            Dither::JarvisJudiceNinke,
+            Dither::Stucki,
+            Dither::Burkes,
+            Dither::Sierra,
+            Dither::Atkinson,
+        ] {
+            let dithered = quantize_rgb_with_options(
+                &rgb,
+                w,
+                h,
+                QuantizeOptions::with_max_colors(8).dither(d),
+            )
+            .unwrap();
+            let err = block_mean_sq_error(&src, &dithered.palette, &dithered.indices, w, h, 4);
+            assert!(
+                err < flat_err,
+                "{d:?} block-avg error {err:.1} not below flat {flat_err:.1}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_bayer_breaks_banding() {
+        // A smooth 1-D ramp quantised to 2 colours bands into two solid
+        // blocks under the flat plane; the ordered bias must interleave the
+        // two indices, raising the transition count like error diffusion.
+        let mut rgb = Vec::new();
+        for x in 0..16u8 {
+            let v = x * 17;
+            rgb.extend_from_slice(&[v, v, v]);
+        }
+        let flat = quantize_rgb(&rgb, 16, 1, 2).unwrap();
+        let ordered = quantize_rgb_with_options(
+            &rgb,
+            16,
+            1,
+            QuantizeOptions::with_max_colors(2).dither(Dither::OrderedBayer8x8),
+        )
+        .unwrap();
+        assert_eq!(ordered.palette.len(), 2);
+        assert!(
+            transition_count(&ordered.indices) > transition_count(&flat.indices),
+            "ordered dithering should add index transitions"
+        );
+    }
+
+    #[test]
+    fn every_dither_variant_routes_transparent_pixels() {
+        // Transparent pixels must hit the reserved slot under every variant,
+        // and no opaque pixel may land on it.
+        let w = 4usize;
+        let h = 4usize;
+        let mut rgba = Vec::new();
+        for i in 0..(w * h) {
+            if i % 5 == 0 {
+                rgba.extend_from_slice(&[9, 9, 9, 0]);
+            } else {
+                let v = (i * 13) as u8;
+                rgba.extend_from_slice(&[v, 255 - v, v / 2, 255]);
+            }
+        }
+        for &d in DITHER_VARIANTS {
+            let opts = QuantizeOptions::with_max_colors(8).dither(d);
+            let q = quantize_rgba_with_options(&rgba, w, h, opts).unwrap();
+            let ti = q.transparent_index.expect("has transparent pixels");
+            for (i, px) in rgba.chunks_exact(4).enumerate() {
+                if px[3] < ALPHA_OPAQUE_THRESHOLD {
+                    assert_eq!(q.indices[i], ti, "{d:?}: transparent pixel {i}");
+                } else {
+                    assert_ne!(q.indices[i], ti, "{d:?}: opaque pixel {i} on reserved slot");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bayer_matrix_is_a_permutation_of_0_to_63() {
+        // The recursive Bayer construction must produce every value 0..=63
+        // exactly once.
+        let mut seen = [false; 64];
+        for row in &BAYER_8X8 {
+            for &v in row {
+                assert!((0..64).contains(&v));
+                assert!(!seen[v as usize], "duplicate Bayer value {v}");
+                seen[v as usize] = true;
+            }
+        }
+        assert!(seen.iter().all(|&s| s), "Bayer matrix missing a value");
+    }
+
+    #[test]
+    fn dither_variants_thread_through_shared_palette() {
+        // The shared-palette path honours every dither variant: indices in
+        // range, transparent pixels routed.
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for y in 0..8u8 {
+            for x in 0..8u8 {
+                a.extend_from_slice(&[x * 30, y * 30, 100, 255]);
+                if (x + y) % 7 == 0 {
+                    b.extend_from_slice(&[0, 0, 0, 0]); // transparent
+                } else {
+                    b.extend_from_slice(&[y * 30, 200, x * 30, 255]);
+                }
+            }
+        }
+        for &d in DITHER_VARIANTS {
+            let s = quantize_frames_shared(
+                &[&a, &b],
+                8,
+                8,
+                QuantizeOptions::with_max_colors(8).dither(d),
+            )
+            .unwrap();
+            let ti = s.transparent_index.expect("frame b has transparent pixels");
+            for plane in &s.frame_indices {
+                assert!(
+                    plane.iter().all(|&i| (i as usize) < s.palette.len()),
+                    "{d:?} out-of-range shared index"
+                );
+            }
+            // Every transparent pixel of frame b maps to the reserved slot.
+            for (i, px) in b.chunks_exact(4).enumerate() {
+                if px[3] < ALPHA_OPAQUE_THRESHOLD {
+                    assert_eq!(s.frame_indices[1][i], ti, "{d:?} transparent routing");
+                }
             }
         }
     }
