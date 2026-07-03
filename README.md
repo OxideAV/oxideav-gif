@@ -1,5 +1,7 @@
 # oxideav-gif
 
+[![CI](https://github.com/OxideAV/oxideav-gif/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-gif/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-gif.svg)](https://crates.io/crates/oxideav-gif) [![docs.rs](https://docs.rs/oxideav-gif/badge.svg)](https://docs.rs/oxideav-gif) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust decoder and encoder for the GIF87a and GIF89a image formats.
 
 ## Status
