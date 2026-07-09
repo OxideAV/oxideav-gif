@@ -769,15 +769,19 @@ pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<V
             )));
         }
 
-        // Emit in forward order.
-        for &b in scratch.iter().rev() {
-            if output.len() >= expected_pixels {
-                // Decoder may have produced "trailing" output beyond
-                // the image area — accept and stop. The spec allows
-                // the encoder to over-produce in deferred-clear mode.
-                break;
-            }
-            output.push(b);
+        // Emit in forward order (`scratch` holds the entry's bytes in
+        // reverse). The common case — the whole entry fits before the
+        // `expected_pixels` ceiling — bulk-extends with no per-byte
+        // bound check; only the final entry that would cross the ceiling
+        // takes the truncating tail path. The decoder may legitimately
+        // produce "trailing" output beyond the image area (the spec
+        // allows the encoder to over-produce in deferred-clear mode), so
+        // crossing the ceiling stops emission without erroring.
+        let remaining = expected_pixels - output.len();
+        if scratch.len() <= remaining {
+            output.extend(scratch.iter().rev());
+        } else {
+            output.extend(scratch.iter().rev().take(remaining));
         }
 
         // Add `prev + entry_first_byte` as the next entry, mirroring

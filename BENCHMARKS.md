@@ -105,6 +105,31 @@ pipelines that already keep an encoder context across frames pick
 up the win by constructing one `LzwEncoder` and calling
 `encode_frame` per raster instead of `lzw::encode`.
 
+## Round 402 — decode emit-loop bulk extend
+
+`lzw::decode` materialises each dictionary entry into a scratch buffer
+(walking the parent-pointer chain in reverse) and then copies it into the
+output raster. The per-output-byte `output.len() >= expected_pixels`
+truncation check dominated the copy for large images. The emit path now
+splits into the common case — the whole entry fits before the
+`expected_pixels` ceiling, so it bulk-`extend`s from the reversed scratch
+iterator with no per-byte branch and a single reservation — and the rare
+final-entry tail that crosses the ceiling (`extend(... .take(remaining))`).
+Output stays byte-identical (the truncation point is unchanged; pinned by
+the existing `lzw` unit + `randomized_roundtrip` + fuzz coverage).
+
+Measured delta (Apple M-series, `--warm-up-time 1 --measurement-time 3`):
+
+| Scenario                       | Before   | After    | Delta   |
+| ------------------------------ | -------- | -------- | ------- |
+| `decode_still_320x240_256pal`  | ~230 µs  | ~221 µs  | **−4 %** |
+| `decode_still_64x64_8pal`      | ~8.2 µs  | ~8.2 µs  | neutral |
+| `decode_anim_64x64_8f`         | ~95 µs   | ~95 µs   | neutral |
+
+The win concentrates on rasters with long LZW dictionary entries (large
+low-entropy regions), where each emitted entry copies many bytes; small
+and high-entropy images are copy-bound on short entries and see no change.
+
 ## Re-running
 
 Full statistically-significant run (≈30s/scenario):
