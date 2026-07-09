@@ -515,6 +515,53 @@ impl GifImage {
         })
     }
 
+    /// Mutably iterate the §20 image-bearing blocks, in source order.
+    ///
+    /// The mutable companion to [`Self::frames`]; §24 Comment, §25 Plain
+    /// Text, and §26 Application blocks are skipped. Useful for
+    /// post-construction edits to a decoded or freshly-built stream —
+    /// for example flipping the §20.c.vii Interlace Flag (see
+    /// [`Self::set_frames_interlaced`]) or rewriting a frame's placement.
+    pub fn frames_mut(&mut self) -> impl Iterator<Item = &mut Frame> {
+        self.blocks.iter_mut().filter_map(|b| match b {
+            Block::Image(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    /// Set the §20.c.vii Interlace Flag on every §20 Image frame, returning
+    /// the number of frames whose flag actually changed.
+    ///
+    /// Interlacing is a §20.c.vii / Appendix-E *storage-order* choice, not
+    /// a pixel change: the encoder re-shuffles each interlaced frame's rows
+    /// into the four-pass order at serialisation time
+    /// ([`crate::encode`]), and the decoder presents every frame already
+    /// de-interlaced regardless. So toggling this flag leaves the composed
+    /// RGBA output byte-identical while switching the on-disk layout to (or
+    /// from) the progressive-display order a renderer can paint in four
+    /// coarse-to-fine passes.
+    ///
+    /// The high-level RGBA constructors ([`Self::from_rgba_frame`] and
+    /// friends) and [`crate::builder::AnimationBuilder`] emit
+    /// non-interlaced frames by default; this is the one-call way to opt a
+    /// whole stream — however it was produced — into interlaced emission
+    /// before [`crate::encode`]. Pass `false` to clear the flag again (for
+    /// instance to strip interlacing off a decoded stream before
+    /// re-encoding it in the simpler sequential layout).
+    ///
+    /// Frames already at the requested state are left untouched and not
+    /// counted, so the call is idempotent.
+    pub fn set_frames_interlaced(&mut self, interlaced: bool) -> usize {
+        let mut changed = 0;
+        for frame in self.frames_mut() {
+            if frame.interlaced != interlaced {
+                frame.interlaced = interlaced;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Iterate every image-bearing block paired with the colour table the
     /// decoder should render it against, in source order.
     ///
@@ -4667,6 +4714,88 @@ mod tests {
         assert_eq!(img.interlaced_frame_count(), 2);
         assert!(img.has_interlaced_frames());
         assert!(img.all_frames_interlaced());
+    }
+
+    /// `set_frames_interlaced(true)` sets the §20.c.vii flag on every §20
+    /// Image, skips non-image blocks, and reports the count it changed.
+    #[test]
+    fn set_frames_interlaced_sets_flag_on_all_images() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"c".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(Some(pal3_alt()))),
+                Block::PlainText {
+                    params: PlainText {
+                        left: 0,
+                        top: 0,
+                        width: 8,
+                        height: 8,
+                        cell_width: 8,
+                        cell_height: 8,
+                        fg_color_index: 1,
+                        bg_color_index: 0,
+                        text: b"t".to_vec(),
+                    },
+                    graphic_control: None,
+                },
+            ],
+        );
+        assert!(!img.has_interlaced_frames());
+        let changed = img.set_frames_interlaced(true);
+        assert_eq!(changed, 2, "both §20 Images flip; non-image blocks skipped");
+        assert!(img.all_frames_interlaced());
+    }
+
+    /// `set_frames_interlaced` is idempotent: a frame already at the
+    /// requested state is left untouched and not counted.
+    #[test]
+    fn set_frames_interlaced_is_idempotent() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Image(frame_with_interlaced(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        // First frame already interlaced, second not: only one flips.
+        assert_eq!(img.set_frames_interlaced(true), 1);
+        // All already interlaced now: nothing to change.
+        assert_eq!(img.set_frames_interlaced(true), 0);
+        assert!(img.all_frames_interlaced());
+        // Clearing flips both back.
+        assert_eq!(img.set_frames_interlaced(false), 2);
+        assert!(!img.has_interlaced_frames());
+    }
+
+    /// `set_frames_interlaced` on a metadata-only stream changes nothing.
+    #[test]
+    fn set_frames_interlaced_no_op_on_frameless_stream() {
+        let mut img = base_image(Some(pal3()), vec![Block::Comment(b"m".to_vec())]);
+        assert_eq!(img.set_frames_interlaced(true), 0);
+        assert_eq!(img.set_frames_interlaced(false), 0);
+    }
+
+    /// `frames_mut` yields every §20 Image and skips non-image blocks,
+    /// mirroring the read-only `frames` shape.
+    #[test]
+    fn frames_mut_yields_only_image_blocks() {
+        let mut img = base_image(
+            Some(pal3()),
+            vec![
+                Block::Comment(b"c".to_vec()),
+                Block::Image(frame_with(None)),
+                Block::Image(frame_with(None)),
+            ],
+        );
+        assert_eq!(img.frames_mut().count(), 2);
+        // Mutating through the iterator is visible on the read side.
+        for (i, f) in img.frames_mut().enumerate() {
+            f.top = i as u16;
+        }
+        let tops: Vec<u16> = img.frames().map(|f| f.top).collect();
+        assert_eq!(tops, vec![0, 1]);
     }
 
     // ---- §20.c.ix Size of Local Color Table stream-level accessors ----
