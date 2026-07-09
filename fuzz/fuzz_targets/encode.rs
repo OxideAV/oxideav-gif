@@ -225,6 +225,26 @@ fuzz_target!(|data: &[u8]| {
     for _ in pb.frames().take(MAX_PLAYBACK_FRAMES) {}
     for _ in pb.looping_frames().take(MAX_PLAYBACK_FRAMES) {}
 
+    // Interlace-emission equivalence. Flipping every §20.c.vii Interlace
+    // Flag is a storage-order change only: the encoder re-shuffles each
+    // frame's rows into Appendix E four-pass order and the decoder
+    // de-interlaces back, so the composited RGBA output must be identical
+    // to the sequential encoding. This drives the encoder's interlace
+    // row-shuffle + the decoder's de-interlace on arbitrary fuzz-derived
+    // rasters (a path the sequential builder never reaches on its own).
+    {
+        let mut interlaced = img.clone();
+        interlaced.set_frames_interlaced(true);
+        if let Ok(ibytes) = encode(&interlaced) {
+            let Ok(idecoded) = decode(&ibytes) else {
+                panic!("encoder emitted interlaced bytes the decoder rejected");
+            };
+            if let (Ok(seq), Ok(int)) = (compose(&img), compose(&idecoded)) {
+                assert_eq!(seq, int, "interlacing changed the composited output");
+            }
+        }
+    }
+
     // Truecolor quantiser paths. Synthesise small RGBA frames from the
     // fuzz bytes and drive every option-taking quantiser entry point —
     // the dither index-plane assignment, the shared-palette pooling, and

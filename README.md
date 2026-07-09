@@ -527,7 +527,12 @@ panic-freedom on arbitrary bytes:
   → `compose` → `Playback::frames` / `looping_frames` on the result.
   Reaches encoder configurations the decoder-output-only harness
   can't construct (sub-screen placements, mismatched palette sizes,
-  multi-frame disposal sequences). Also synthesises small (≤ 32×32) RGBA
+  multi-frame disposal sequences). Also re-encodes each built stream with
+  every §20.c.vii Interlace Flag set (`set_frames_interlaced(true)`) and
+  asserts `compose` of the interlaced encoding equals `compose` of the
+  sequential one — driving the encoder's Appendix E row-shuffle and the
+  decoder's de-interlace on arbitrary fuzz-derived rasters. Also
+  synthesises small (≤ 32×32) RGBA
   frames from the fuzz bytes and drives the truecolor quantiser paths —
   `quantize_rgba_with_options` and `quantize_frames_shared` under every
   `Dither` variant (`None`, `FloydSteinberg`, `JarvisJudiceNinke`, `Stucki`,
