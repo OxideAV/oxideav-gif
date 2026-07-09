@@ -307,7 +307,11 @@ Implements every block type defined by the CompuServe specifications:
   a §23 Graphic Control Extension that carries the Delay Time and
   Disposal Method; `loop_forever()` / `loop_count(n)` / `play_once()`
   pick the looping behaviour, emitting a NETSCAPE2.0 *Looping*
-  Application Extension ahead of the frames for the looping cases.
+  Application Extension ahead of the frames for the looping cases;
+  `interlaced(bool)` stamps the §20.c.vii Interlace Flag onto frames
+  added after the call (captured per frame, so toggling between adds
+  mixes interlaced and progressive frames — the fluent counterpart to
+  `GifImage::set_frames_interlaced`, default progressive).
   `build()` validates placement (rectangles must fit the Logical
   Screen), index counts, palette-index range, and the §19 1..=256
   palette-size limit, returning a `Gif89a` `GifImage` ready for

@@ -93,6 +93,11 @@ pub struct AnimationBuilder {
     palette: Vec<Rgb>,
     background_index: u8,
     loop_behaviour: LoopBehaviour,
+    /// §20.c.vii Interlace Flag stamped onto frames added *after* the
+    /// most recent [`interlaced`](Self::interlaced) call. Captured per
+    /// frame at add time so a caller can mix interlaced and progressive
+    /// frames in one stream (§20.c.vii is a per-frame flag).
+    interlace: bool,
     frames: Vec<Frame>,
 }
 
@@ -113,8 +118,26 @@ impl AnimationBuilder {
             palette,
             background_index: 0,
             loop_behaviour: LoopBehaviour::Once,
+            interlace: false,
             frames: Vec::new(),
         }
+    }
+
+    /// Set the §20.c.vii Interlace Flag applied to every frame added
+    /// *after* this call. Frames added while the flag is `on` are stored
+    /// in Appendix E four-pass order by [`crate::encode`]; the composited
+    /// output is unaffected (interlacing is a storage-order choice).
+    ///
+    /// The flag is captured per frame at add time, so toggling it between
+    /// [`add_full_frame`](Self::add_full_frame) /
+    /// [`add_placed_frame`](Self::add_placed_frame) calls produces a
+    /// stream that mixes interlaced and progressive frames — §20.c.vii is
+    /// a per-frame flag. Defaults to `false` (progressive). This is the
+    /// fluent counterpart to [`crate::GifImage::set_frames_interlaced`],
+    /// which stamps a whole already-built stream at once.
+    pub fn interlaced(mut self, on: bool) -> Self {
+        self.interlace = on;
+        self
     }
 
     /// Set the §18.c.vii Background Color Index — the colour
@@ -198,7 +221,7 @@ impl AnimationBuilder {
             height,
             local_palette: None,
             palette_sorted: false,
-            interlaced: false,
+            interlaced: self.interlace,
             indices,
             graphic_control: Some(GraphicControl {
                 disposal,
@@ -522,6 +545,56 @@ mod tests {
             .unwrap();
         assert!(matches!(img.blocks.first(), Some(Block::Application(_))));
         assert!(matches!(img.blocks.get(1), Some(Block::Image(_))));
+    }
+
+    /// `interlaced(true)` stamps the §20.c.vii flag onto frames added
+    /// afterward; the built stream reports them via the interlace
+    /// accessors and survives an encode → decode round-trip.
+    #[test]
+    fn interlaced_toggle_stamps_frames() {
+        let img = AnimationBuilder::new(4, 4, pal2())
+            .interlaced(true)
+            .add_full_frame(vec![0; 16], 10, DisposalMethod::None)
+            .unwrap()
+            .add_full_frame(vec![1; 16], 10, DisposalMethod::None)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(img.all_frames_interlaced());
+
+        let decoded = crate::decode(&crate::encode(&img).unwrap()).unwrap();
+        assert_eq!(decoded, img, "interlaced builder output round-trips");
+    }
+
+    /// The flag is captured per frame at add time, so toggling it between
+    /// adds mixes interlaced and progressive frames in one stream.
+    #[test]
+    fn interlaced_toggle_is_per_frame() {
+        let img = AnimationBuilder::new(2, 2, pal2())
+            .interlaced(true)
+            .add_full_frame(vec![0; 4], 0, DisposalMethod::None)
+            .unwrap()
+            .interlaced(false)
+            .add_full_frame(vec![1; 4], 0, DisposalMethod::None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let flags: Vec<bool> = img.frames().map(|f| f.interlaced).collect();
+        assert_eq!(flags, vec![true, false]);
+        assert!(img.has_interlaced_frames());
+        assert!(!img.all_frames_interlaced());
+    }
+
+    /// The default is progressive (no Interlace Flag), preserving the
+    /// historical builder behaviour.
+    #[test]
+    fn builder_default_is_progressive() {
+        let img = AnimationBuilder::new(2, 2, pal2())
+            .add_full_frame(vec![0; 4], 0, DisposalMethod::None)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!img.has_interlaced_frames());
     }
 
     /// color_resolution_for maps palette size to the §18.c.iv 3-bit
