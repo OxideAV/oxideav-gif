@@ -70,7 +70,19 @@ Implements every block type defined by the CompuServe specifications:
   renderer gate on a single query rather than walking every
   `Frame::interlaced`; the decoded raster is always presented
   de-interlaced regardless, so this only affects the policy decision
-  on whether to enable an Appendix-E-aware progressive path. §20.c.ix
+  on whether to enable an Appendix-E-aware progressive path. On the
+  *encode* side, `GifImage::set_frames_interlaced(bool)` stamps the
+  §20.c.vii Interlace Flag onto every §20 Image in one call (returning
+  the count it changed; idempotent, non-image blocks skipped) so a
+  stream produced by any construction path — the `from_rgba_*`
+  constructors, `AnimationBuilder`, or a decode — can be opted into
+  interlaced emission before `encode`; the encoder re-shuffles each
+  flagged frame's rows into Appendix E four-pass order at serialisation
+  while the composed RGBA output stays byte-identical (interlacing is a
+  storage-order choice, not a pixel change).
+  `GifImage::frames_mut()` is the underlying mutable §20-Image iterator
+  (the mutable companion to `frames()`) for other post-construction
+  frame edits. §20.c.ix
   Size of Local Color Table surface:
   `Frame::local_color_table_size_field()` returns the 3-bit encoded
   field value (`0..=7`, smallest `N` such that `2^(N+1)` is ≥ the LCT
