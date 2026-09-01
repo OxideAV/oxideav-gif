@@ -169,7 +169,9 @@ pub use quantize::{
 // looks up `oxideav_gif::__oxideav_entry`, which only exists at the
 // crate root via this re-export.
 #[cfg(feature = "registry")]
+#[doc(hidden)]
+pub use registry::__oxideav_entry;
+#[cfg(feature = "registry")]
 pub use registry::{
-    __oxideav_entry, register, register_codecs, register_containers, GifDecoder, GifEncoder,
-    CODEC_ID_STR,
+    register, register_codecs, register_containers, GifDecoder, GifEncoder, CODEC_ID_STR,
 };
