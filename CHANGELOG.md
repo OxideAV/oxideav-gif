@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OxideAV/oxideav-gif/compare/v0.0.11...v0.0.12) - 2026-09-01
+
+### Other
+
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+- AnimationBuilder::interlaced fluent §20.c.vii toggle
+- LZW decode emits entries with a bulk extend instead of a per-byte loop
+- encode fuzz harness asserts interlace compose-equivalence
+- README — document the set_frames_interlaced encode-side surface
+- set_frames_interlaced mutator exposes §20.c.vii on the encode path
+- add CI / crates.io / docs.rs / MIT-license badges
+- integration test pins serpentine through the encode constructor
+- serpentine error-diffusion scan option
+- fixed-palette remap entry points (remap_rgb/rgba_to_palette)
+- expose new dithers through encode constructors + fuzz + README
+- five extra error-diffusion kernels + ordered Bayer dither
+- README — document §23.c.vii presentation-timeline + seek surface
+- end-to-end seek-timeline integration test through encode/decode
+- §20.a frames bounding-box union + subregion query
+- compose_frame_at_global ties the time-domain seek to pixels
+- looping-aware seek frame_index_at_global across loop repeats
+- §23.c.vii presentation timeline + frame_index_at seek lookup
+- note new quantiser option coverage in the encode-fuzz README section
+- fuzz the new quantiser box-priority + refinement paths in encode harness
+- Lloyd (k-means) palette refinement for the truecolor quantiser
+- population-weighted median-cut box selection (BoxPriority)
+- extend encode fuzz harness to the truecolor quantiser paths
+- shared-palette multi-frame quantisation (one GCT, no LCTs)
+- Floyd-Steinberg dithering option for the truecolor encode path
+- quantiser index plane is nearest-entry, not box-of-origin
+- route registry encoder through quantiser + truecolor animation integration test
+- GifImage::from_rgba_frame / from_rgba_frames truecolor constructors
+- median-cut RGBA/RGB colour quantiser (quantize module)
+- validate_strict hard-gate + Display for conformance report
+- non-fatal Appendix-B + §7–§26 conformance reporting
+- §25 Plain Text grid-geometry + draw-count accessors
+- §26 ApplicationKind namespace classification + stream rollups
+- §12 block classification + §11 palette-loader stream queries
+- resync NETSCAPE2.0/ANIMEXTS1.0 loop parsing past unknown §15 sub-blocks
+- dedicated Appendix F LZW codec harness (round 318)
+- surface §23.e.ii indefinite-user-input-wait query
+- refresh to current status, drop per-round changelog cruft
+- wire Appendix-F clear-on-full LZW strategy into top-level encoder
+- lzw::encode_with_clear_on_full Clear-on-full table strategy
+- §20.a/§25.a all_blocks_fit_screen Logical Screen boundary queries
+- §23.d apply GCE Transparency Index to §25 Plain Text rendering
+- GifImage::optimize_frame_rects §20 inter-frame rect optimisation
+- §23.c.viii Transparent Index stream-level roll-up accessors
+- §23.c.iv Disposal Method stream-level roll-up
+- Frame §20.c.ix Size of Local Color Table typed accessors
+- drop release-plz.toml — use release-plz defaults across the workspace
+- GifImage §20.c.vii Interlace Flag stream-level accessors
+- GifImage::plain_texts §25 typed iterator + §25.e queries
+- LzwEncoder reusable-state encoder amortising the dictionary
+- GifImage §18.c.v / §20.c.viii Sort Flag accessors
+- GifImage::frames_with_graphic_control §23 GCE pairing accessor
+- §23 disposal-method edge-case sweep
+- GifImage §18.c.iv Color Resolution + frame_count accessors
+- §25 Plain Text Extension dedicated cargo-fuzz harness (round 200)
+
 ### Added
 
 - Serpentine (boustrophedon) error-diffusion scan, opt-in via
