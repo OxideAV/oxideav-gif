@@ -9,6 +9,8 @@ authors = ["Mark Karpeles"]
 description = "Pure-Rust GIF87a / GIF89a decoder and encoder"
 
 readme = "README.md"
+# crates.io caps packages at 10 MiB; fixtures and fuzz corpora stay out.
+exclude = ["/tests", "/fuzz"]
 homepage = "https://github.com/OxideAV/oxideav-gif"
 keywords = ["multimedia", "image", "gif", "lzw", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]

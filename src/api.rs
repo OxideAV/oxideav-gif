@@ -212,17 +212,20 @@ pub fn encode_to<W: Write>(image: &GifImage, opts: &EncodeOptions, mut w: W) -> 
 /// For anything finer (shared palettes, sub-rectangle frames, Plain
 /// Text, comments) build a [`GifFile`] — see [`crate::AnimationBuilder`]
 /// and [`GifFile::from_rgba_frames_shared_palette`].
-pub fn encode_animation(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
+///
+/// This is the contract's multi-image encoder (the mirror of
+/// [`decode_all`]); [`encode_animation`] is the GIF-named alias.
+pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
     let first = frames
         .first()
-        .ok_or_else(|| Error::invalid_input("encode_animation: at least one frame is required"))?;
+        .ok_or_else(|| Error::invalid_input("encode_all: at least one frame is required"))?;
     let (width, height) = (first.image.width, first.image.height);
     let (w16, h16) = wire_dims(width, height)?;
     let mut rgba_frames: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
     for (i, f) in frames.iter().enumerate() {
         if f.image.width != width || f.image.height != height {
             return Err(Error::invalid_input(format!(
-                "encode_animation: frame {i} is {}x{} but frame 0 is {width}x{height}",
+                "encode_all: frame {i} is {}x{} but frame 0 is {width}x{height}",
                 f.image.width, f.image.height
             )));
         }
@@ -253,6 +256,12 @@ pub fn encode_animation(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8
     }
     file.upgrade_version_if_needed();
     encode_file_with(&file, opts)
+}
+
+/// GIF-named alias of [`encode_all`] (animated GIF from full-canvas
+/// frames); identical output.
+pub fn encode_animation(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
+    encode_all(frames, opts)
 }
 
 impl GifFile {
@@ -990,6 +999,31 @@ mod tests {
             encode_animation(&[], &opts),
             Err(Error::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn encode_all_round_trips_opaque_frames_losslessly() {
+        // Opaque full-canvas frames with ≤ 256 colours each: GIF carries
+        // them exactly, so decode_all(encode_all(frames)) == frames.
+        let (w, h) = (6u32, 3u32);
+        let mut frames = Vec::new();
+        for k in 0..3u8 {
+            let rgba: Vec<u8> = (0..w * h)
+                .flat_map(|i| [(i as u8) * 13 + k, 255 - (i as u8) * 7, k * 60, 255])
+                .collect();
+            let img = GifImage::from_rgba8(w, h, rgba).unwrap();
+            frames.push(
+                Frame::new(img, Some(Duration::from_millis(u64::from(k + 1) * 50)))
+                    .with_disposal(DisposalMethod::Keep),
+            );
+        }
+        let bytes = encode_all(&frames, &EncodeOptions::default()).unwrap();
+        assert_eq!(
+            bytes,
+            encode_animation(&frames, &EncodeOptions::default()).unwrap()
+        );
+        let back = decode_all(&bytes).unwrap();
+        assert_eq!(back, frames, "decode_all(encode_all(frames)) == frames");
     }
 
     #[test]

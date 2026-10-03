@@ -428,14 +428,24 @@ pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
 
 // ---- Decoder --------------------------------------------------------------
 
-/// `Decoder` trait wrapper around the framework-free
-/// [`crate::decode_all`].
+/// `Decoder` trait wrapper around the framework-free [`crate::decode`]
+/// / [`crate::decode_all`].
 ///
 /// One input [`Packet`] is treated as a complete `<GIF Data Stream>`
-/// (Header → Logical Screen Descriptor → blocks → Trailer). Every
-/// graphic-rendering block becomes one composited `Rgba`
-/// [`VideoFrame`] (the §23 disposal-method state machine of
-/// [`crate::compose()`]), `pts` = frame ordinal.
+/// (Header → Logical Screen Descriptor → blocks → Trailer).
+///
+/// * A still image (exactly one graphic-rendering block) is emitted in
+///   its native layout, exactly as [`crate::decode`] returns it: `Pal8`
+///   with the palette side-channel (RGB; the framework palette carries
+///   no alpha), or `Rgba` only when the file's 256-entry table leaves no
+///   room for a transparent entry.
+/// * An animation (two or more graphic-rendering blocks) is emitted as
+///   [`crate::decode_all`] does: every block becomes one composited
+///   `Rgba` [`VideoFrame`] (the §23 disposal-method state machine of
+///   [`crate::compose()`]), because disposal across frames with
+///   distinct colour tables has no indexed representation.
+///
+/// `pts` = frame ordinal.
 pub struct GifDecoder {
     codec_id: CodecId,
     queued: std::collections::VecDeque<CoreFrame>,
@@ -463,6 +473,15 @@ impl Decoder for GifDecoder {
     }
 
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
+        let info = crate::info(&packet.data)?;
+        if info.frames == 1 && info.image_count == 1 {
+            // Still image: the native layout (`Pal8` + palette), as
+            // `decode` returns it.
+            let image = crate::decode(&packet.data)?;
+            self.queued
+                .push_back(CoreFrame::Video(image_into_video_frame(image, Some(0))));
+            return Ok(());
+        }
         let frames = crate::decode_all(&packet.data)?;
         for (idx, frame) in frames.into_iter().enumerate() {
             self.queued
@@ -627,15 +646,82 @@ mod tests {
         let CoreFrame::Video(v) = frame_out else {
             panic!("decoder returned non-video frame");
         };
-        assert_eq!(v.planes.len(), 1);
-        assert_eq!(v.planes[0].stride, w * 4);
-        assert_eq!(v.planes[0].data.len(), w * h * 4);
-        // Solid colour input → every pixel decodes back to the same
-        // RGB triplet (alpha forced to 255 since the input was opaque
-        // and we did not set a transparent index).
-        for px in v.planes[0].data.chunks_exact(4) {
-            assert_eq!(px, [0x10, 0x80, 0xC0, 0xFF]);
+        // A still GIF comes back in its native layout: one `Pal8`
+        // plane plus the palette side-channel (RGB), never a
+        // pre-expanded `Rgba` canvas.
+        assert_eq!(v.image_plane_count(), 1);
+        assert_eq!(v.planes[0].stride, w);
+        assert_eq!(v.planes[0].data.len(), w * h);
+        let pal = v.palette().expect("Pal8 frame carries its palette");
+        assert_eq!(pal.len() % 3, 0);
+        // Solid colour input → every index points at the one RGB
+        // triplet (opaque input, no transparent index requested).
+        for &i in &v.planes[0].data {
+            let i = usize::from(i) * 3;
+            assert_eq!(&pal[i..i + 3], [0x10, 0x80, 0xC0]);
         }
+        // Expanding through the standalone type gives the input back.
+        let img = crate::GifImage::from_video_frame(&v, &params_for(&v, w, h)).unwrap();
+        assert_eq!(img.format, crate::PixelFormat::Pal8);
+        assert_eq!(img.to_rgba8(), rgba);
+    }
+
+    fn params_for(v: &VideoFrame, w: usize, h: usize) -> CodecParameters {
+        let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        p.width = Some(w as u32);
+        p.height = Some(h as u32);
+        p.pixel_format = Some(if v.planes[0].stride == w {
+            PixelFormat::Pal8
+        } else {
+            PixelFormat::Rgba
+        });
+        p
+    }
+
+    #[test]
+    fn decoder_emits_native_pal8_for_stills_and_composited_rgba_for_animations() {
+        use crate::{decode_all, encode_all, EncodeOptions, Frame, GifImage};
+        // Still: a 2-colour 4×2 Pal8 image.
+        let still = GifImage::from_rgb8(
+            4,
+            2,
+            vec![
+                1, 2, 3, 1, 2, 3, 9, 8, 7, 9, 8, 7, 9, 8, 7, 1, 2, 3, 1, 2, 3, 9, 8, 7,
+            ],
+        )
+        .unwrap();
+        let bytes = crate::encode(&still, &EncodeOptions::default()).unwrap();
+        let params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        let mut dec = make_decoder(&params).unwrap();
+        dec.send_packet(&Packet::new(0u32, TimeBase::new(1, 1), bytes))
+            .unwrap();
+        let CoreFrame::Video(v) = dec.receive_frame().unwrap() else {
+            panic!("non-video frame");
+        };
+        assert_eq!(v.planes[0].stride, 4, "still GIF is emitted as Pal8");
+        assert_eq!(v.planes[0].data.len(), 8);
+        assert!(v.palette().is_some(), "palette side-channel is stamped");
+        assert!(dec.receive_frame().is_err(), "exactly one frame");
+
+        // Animation: two full-canvas frames → two composited Rgba frames.
+        let a = GifImage::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+        let b = GifImage::from_rgba8(2, 1, vec![0, 255, 0, 255, 0, 0, 255, 255]).unwrap();
+        let frames = [Frame::new(a, None), Frame::new(b, None)];
+        let anim = encode_all(&frames, &EncodeOptions::default()).unwrap();
+        let expect = decode_all(&anim).unwrap();
+        let mut dec = make_decoder(&params).unwrap();
+        dec.send_packet(&Packet::new(0u32, TimeBase::new(1, 1), anim))
+            .unwrap();
+        for (idx, want) in expect.iter().enumerate() {
+            let CoreFrame::Video(v) = dec.receive_frame().unwrap() else {
+                panic!("non-video frame");
+            };
+            assert_eq!(v.pts, Some(idx as i64));
+            assert_eq!(v.planes[0].stride, 2 * 4, "animation frames are Rgba");
+            assert_eq!(v.planes[0].data, want.image.as_bytes().unwrap());
+            assert!(v.palette().is_none());
+        }
+        assert!(dec.receive_frame().is_err());
     }
 
     #[test]

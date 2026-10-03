@@ -47,7 +47,7 @@ if oxideav_gif::probe(&bytes) {
 | `encode(&GifImage, &EncodeOptions) -> Result<Vec<u8>>` | Single-image GIF. `Pal8` palette written as given; `Rgb24` / `Rgba` quantised (see *Supported layouts*). |
 | `encode_rgb8(w, h, &[u8], &opts)` / `encode_rgba8(..)` | The one-call raw paths: median-cut to ≤ 256 colours; alpha < 128 → the one Transparency Index. |
 | `encode_to<W: Write>` | `encode` into a writer. |
-| `encode_animation(&[Frame], &EncodeOptions)` | Full-canvas frames (the `decode_all` shape) → animated GIF with per-frame Local Color Tables, delays, disposals, NETSCAPE2.0 loop count. |
+| `encode_all(&[Frame], &EncodeOptions)` (alias `encode_animation`) | Full-canvas frames (the `decode_all` shape) → animated GIF with per-frame Local Color Tables, delays, disposals, NETSCAPE2.0 loop count. Lossless for opaque frames of ≤ 256 colours each: `decode_all(encode_all(frames)) == frames`. |
 | `GifImage` | `{ width: u32, height: u32, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette> }` — `new(..) -> Result` (validates geometry), `packed`, `from_rgb8`, `from_rgba8`, `from_indexed`, `with_color` / `with_metadata` / `with_palette`, `width()`, `height()`, `format()`, `as_bytes() -> Option<&[u8]>`, `into_raw()`, `to_rgb8()`, `to_rgba8()`, `has_alpha()`. |
 | `GifPixelFormat` (`PixelFormat`) | `Pal8`, `Rgb24`, `Rgba` — names mirror `oxideav_core::PixelFormat`. |
 | `Plane`, `ColorInfo` / `ColorRange`, `Metadata`, `Palette`, `RgbImage`, `RgbaImage`, `Frame`, `ImageInfo` | The contract records (identical fields in every image crate); `Palette.entries` is `Vec<[u8; 4]>` RGBA. |
@@ -66,8 +66,13 @@ installs the `gif` codec and the `.gif` extension hint
 (`register_codecs` / `register_containers` are the split forms;
 `oxideav_meta::register_all` calls the `__oxideav_entry` wrapper).
 `make_decoder` / `make_encoder` are the factories; the trait-side
-`GifDecoder` emits one composited `Rgba` `VideoFrame` per
-graphic-rendering block (`decode_all`), `GifEncoder` writes one
+`GifDecoder` emits a still GIF (one graphic-rendering block) in its
+native layout exactly as `decode` returns it — `Pal8` with the palette
+side-channel (RGB; the framework palette has no alpha), `Rgba` only
+when the file's 256-entry table leaves no transparent slot — and an
+animation as one composited `Rgba` `VideoFrame` per graphic-rendering
+block (`decode_all`; disposal across distinct colour tables has no
+indexed form). `GifEncoder` writes one
 single-image GIF per `Rgba` / `Rgb24` / `Pal8` frame (`encode`), with
 `params.options` parsed into `EncodeOptions` (`lzw_strategy`,
 `interlace`, `max_colors`, `dither`, `loop_count`, `embed_metadata`).
@@ -130,7 +135,7 @@ Image Descriptor **before** any raster is allocated.
 | `lzw_strategy: LzwStrategy` | `DeferredClear` | Appendix F table-full strategy (`ClearOnFull` re-adapts after 4096 entries). |
 | `interlace: bool` | `false` | §20.c.vii Interlace Flag for encoder-built images. |
 | `quantize: QuantizeOptions` | 256 colours, no dither, extent priority, no Lloyd refinement | Reduction of `Rgb24` / `Rgba` input (`with_max_colors`, `with_dither` shortcuts). |
-| `loop_count: Option<u16>` | `Some(0)` (forever) | NETSCAPE2.0 loop count for `encode_animation`; `None` plays once. |
+| `loop_count: Option<u16>` | `Some(0)` (forever) | NETSCAPE2.0 loop count for `encode_all`; `None` plays once. |
 | `embed_metadata: bool` | `true` | Write ICC / Exif / XMP Application Extensions from `GifImage::metadata`. |
 
 ## Metadata and colour

@@ -7,9 +7,10 @@
 use std::time::Duration;
 
 use oxideav_gif::{
-    compose, decode, decode_all, decode_rgb8, decode_rgba8, decode_with, encode, encode_animation,
-    encode_file, encode_rgb8, encode_rgba8, info, parse, probe, AnimationBuilder, DecodeOptions,
-    DisposalMethod, EncodeOptions, Error, Frame, GifImage, Palette, PixelFormat, Rgb,
+    compose, decode, decode_all, decode_rgb8, decode_rgba8, decode_with, encode, encode_all,
+    encode_animation, encode_file, encode_rgb8, encode_rgba8, info, parse, probe, AnimationBuilder,
+    DecodeOptions, DisposalMethod, EncodeOptions, Error, Frame, GifImage, Palette, PixelFormat,
+    Rgb,
 };
 
 /// Tiny deterministic PRNG so the fixtures need no dev-dependency.
@@ -141,7 +142,12 @@ fn decode_shows_the_first_composed_frame_on_random_animations() {
 
         // Every composited frame re-encodes as an animation showing the
         // same pixels.
-        let anim = encode_animation(&frames, &EncodeOptions::default()).unwrap();
+        let anim = encode_all(&frames, &EncodeOptions::default()).unwrap();
+        assert_eq!(
+            anim,
+            encode_animation(&frames, &EncodeOptions::default()).unwrap(),
+            "encode_animation is a byte-identical alias of encode_all"
+        );
         let back = decode_all(&anim).unwrap();
         assert_eq!(back.len(), frames.len());
         for (a, b) in back.iter().zip(&frames) {

@@ -38,7 +38,7 @@
 //!   §23 disposal rules ([`Frame`]: `Rgba` canvas, delay, disposal);
 //!   [`decode_from`] reads a `Read` to its end.
 //! * [`encode`] / [`encode_rgb8`] / [`encode_rgba8`] / [`encode_to`] /
-//!   [`encode_animation`] with [`EncodeOptions`] (LZW strategy,
+//!   [`encode_all`] (alias [`encode_animation`]) with [`EncodeOptions`] (LZW strategy,
 //!   interlace, quantiser, loop count, metadata).
 //! * [`GifError`] (alias [`Error`]): `InvalidData`, `Unsupported`,
 //!   `LimitExceeded`, `Io`, `UnexpectedEof`, `InvalidInput`.
@@ -177,7 +177,7 @@ pub mod types;
 // with `default-features = false`.
 pub use api::{
     decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
-    encode, encode_animation, encode_rgb8, encode_rgba8, encode_to, info, probe,
+    encode, encode_all, encode_animation, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
 pub use error::{Error, GifError, Result};
 pub use options::DecodeOptions;

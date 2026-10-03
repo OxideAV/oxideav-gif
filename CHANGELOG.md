@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- `encode_all(&[Frame], &EncodeOptions)`, the contract's multi-image
+  encoder (mirror of `decode_all`); `encode_animation` stays as the
+  GIF-named alias with byte-identical output. Pinned:
+  `decode_all(encode_all(frames)) == frames` for opaque frames of ≤ 256
+  colours each.
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
+
+### Changed
+
+- **Framework `GifDecoder` emits the native layout for still images.**
+  A GIF with one graphic-rendering block now comes out exactly as
+  `decode` returns it — `Pal8` with the palette side-channel (RGB), or
+  `Rgba` only when the 256-entry table leaves no transparent slot —
+  instead of a pre-expanded `Rgba` canvas. Animations (two or more
+  blocks) still emit one composited `Rgba` frame per block, as
+  `decode_all` does. Consumers reading still GIFs through the registry
+  must expand `Pal8` via the frame's palette (as for `Pal8` PNG).
+
 ## [0.0.12](https://github.com/OxideAV/oxideav-gif/compare/v0.0.11...v0.0.12) - 2026-10-03
 
 ### Other
