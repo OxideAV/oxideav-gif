@@ -4,7 +4,180 @@
 
 Pure-Rust decoder and encoder for the GIF87a and GIF89a image formats.
 
-## Status
+## Standalone use
+
+The crate follows the OxideAV image-crate contract (`IMAGE_CRATE_API`
+in the workspace root): a small root vocabulary that works with
+`default-features = false` (no `oxideav-core`) and returns pixels as
+plain `Vec<u8>`.
+
+```toml
+[dependencies]
+oxideav-gif = { version = "0.0", default-features = false }
+```
+
+```rust
+let bytes = std::fs::read("in.gif")?;
+if oxideav_gif::probe(&bytes) {
+    let info = oxideav_gif::info(&bytes)?;   // header only: width, height, format, frames, loop count
+    let img = oxideav_gif::decode(&bytes)?;  // GifImage: first frame on the logical screen, Pal8
+    let rgba: Vec<u8> = img.to_rgba8();      // tightly packed RGBA, 4 * width bytes per row
+    let (w, h) = (img.width(), img.height());
+
+    let opts = oxideav_gif::EncodeOptions::default().with_max_colors(64);
+    let out: Vec<u8> = oxideav_gif::encode_rgba8(w, h, &rgba, &opts)?;
+    std::fs::write("out.gif", out)?;
+
+    // Animations: every frame as the viewer shows it.
+    for frame in oxideav_gif::decode_all(&bytes)? {
+        let _ = (frame.image.to_rgba8(), frame.delay, frame.disposal);
+    }
+}
+```
+
+| Item | What it does |
+|---|---|
+| `probe(&[u8]) -> bool` | `GIF87a` / `GIF89a` signature sniff; allocation-free. |
+| `info(&[u8]) -> Result<ImageInfo>` | Structural walk, no LZW expansion: `width`, `height`, `format`, `frames` (graphic-rendering blocks = `decode_all` length), `has_alpha`, `color`, `has_icc` / `has_exif` / `has_xmp`, plus `version`, `image_count`, `has_global_palette`, `palette_entries`, `interlaced`, `loop_count`, `pixel_aspect_ratio`. |
+| `decode(&[u8]) -> Result<GifImage>` | The **first §20 image composed onto the §18 Logical Screen** — pixels outside the image rectangle and at the §23.c.viii Transparency Index are transparent, exactly as `compose` renders them. `Pal8` with the frame's colour table (see *Supported layouts*), `Rgba` when no single table can describe the canvas. Only the first raster is LZW-expanded. |
+| `decode_with(&[u8], &DecodeOptions)` | Same under explicit limits / `strict` / `lenient`. |
+| `decode_rgb8` / `decode_rgba8` | One call to `RgbImage { width, height, data }` / `RgbaImage` (3 / 4 bytes per pixel, row-major). |
+| `decode_all(&[u8]) -> Result<Vec<Frame>>` (+ `decode_all_with`) | Every graphic-rendering block (§20 images and §25 Plain Text) as a composited `Rgba` canvas per the §23 disposal-method state machine, with `Frame { image, delay, disposal, user_input }`. |
+| `decode_from<R: Read>` | Reads to end, then `decode`. |
+| `encode(&GifImage, &EncodeOptions) -> Result<Vec<u8>>` | Single-image GIF. `Pal8` palette written as given; `Rgb24` / `Rgba` quantised (see *Supported layouts*). |
+| `encode_rgb8(w, h, &[u8], &opts)` / `encode_rgba8(..)` | The one-call raw paths: median-cut to ≤ 256 colours; alpha < 128 → the one Transparency Index. |
+| `encode_to<W: Write>` | `encode` into a writer. |
+| `encode_animation(&[Frame], &EncodeOptions)` | Full-canvas frames (the `decode_all` shape) → animated GIF with per-frame Local Color Tables, delays, disposals, NETSCAPE2.0 loop count. |
+| `GifImage` | `{ width: u32, height: u32, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette> }` — `new(..) -> Result` (validates geometry), `packed`, `from_rgb8`, `from_rgba8`, `from_indexed`, `with_color` / `with_metadata` / `with_palette`, `width()`, `height()`, `format()`, `as_bytes() -> Option<&[u8]>`, `into_raw()`, `to_rgb8()`, `to_rgba8()`, `has_alpha()`. |
+| `GifPixelFormat` (`PixelFormat`) | `Pal8`, `Rgb24`, `Rgba` — names mirror `oxideav_core::PixelFormat`. |
+| `Plane`, `ColorInfo` / `ColorRange`, `Metadata`, `Palette`, `RgbImage`, `RgbaImage`, `Frame`, `ImageInfo` | The contract records (identical fields in every image crate); `Palette.entries` is `Vec<[u8; 4]>` RGBA. |
+| `DecodeOptions`, `EncodeOptions` | See *Options*. |
+| `GifError` (`Error`) | `InvalidData`, `Unsupported`, `LimitExceeded`, `Io(std::io::Error)`, `UnexpectedEof`, `InvalidInput`. |
+
+The contract is a floor, not a ceiling: the whole GIF Data Stream
+model (`GifFile`), the compositor, the playback iterator, the
+quantiser and the conformance walk are described under *GIF
+specifics* below.
+
+## Framework use
+
+With the default-on `registry` feature, `register(&mut RuntimeContext)`
+installs the `gif` codec and the `.gif` extension hint
+(`register_codecs` / `register_containers` are the split forms;
+`oxideav_meta::register_all` calls the `__oxideav_entry` wrapper).
+`make_decoder` / `make_encoder` are the factories; the trait-side
+`GifDecoder` emits one composited `Rgba` `VideoFrame` per
+graphic-rendering block (`decode_all`), `GifEncoder` writes one
+single-image GIF per `Rgba` / `Rgb24` / `Pal8` frame (`encode`), with
+`params.options` parsed into `EncodeOptions` (`lzw_strategy`,
+`interlace`, `max_colors`, `dither`, `loop_count`, `embed_metadata`).
+`From<GifImage> for VideoFrame` (palette and colour-signal
+side-channels), `GifImage::from_video_frame(&VideoFrame,
+&CodecParameters)` / `TryFrom<(&VideoFrame, &CodecParameters)>`,
+`to_core_pixel_format` and `to_color_signal` / `from_color_signal`
+bridge the two worlds. One implementation: the registry path calls the
+standalone functions.
+
+## Supported layouts
+
+Decode:
+
+| Source | Layout |
+|---|---|
+| First §20 image composed onto the Logical Screen, when one colour table can describe the canvas: the image covers the screen, or it has a §23.c.viii Transparency Index, or the table has room | `Pal8` + `Palette` — the frame's Global / Local Color Table as RGBA (alpha 255; the Transparency Index at alpha 0). When the image leaves screen pixels uncovered (or its transparent index is past the table) and has no in-range transparent index, a synthetic `[0, 0, 0, 0]` entry is appended right after the table and the table is padded to the next power of two, so the round trip stays exact. |
+| First image whose table has 256 opaque entries and still leaves transparent pixels | `Rgba` (the composited canvas). |
+| Every `decode_all` frame | `Rgba` (the composited canvas after that block, §23 disposal applied between frames; dispose-to-background clears to the §18.c.vii background colour when the Global Color Table defines it, else to transparent). |
+
+Every §20 image is supported: 2–256-entry Global / Local Color Tables,
+Appendix E interlace, Appendix F LZW with both table-full strategies,
+§23 Graphic Control (disposal 0–3, transparency, delay, user input),
+§25 Plain Text (rendered with the crate-local 8×8 font), §24 Comment
+and §26 Application Extensions.
+
+Encode:
+
+| Input | Written as |
+|---|---|
+| `Pal8` | The palette's RGB as the Global Color Table, exactly as given (1–256 entries, zero-padded to the wire's power of two). The first entry with alpha < 128 becomes the Transparency Index; pixels at any *other* such entry are re-pointed to it (GIF has one transparent index per image). Indices past the palette: `Error::InvalidInput`. |
+| `Rgb24` | Reduced to ≤ `quantize.max_colors` entries by the deterministic median-cut quantiser (lossless when the input has that many distinct colours or fewer) — the same conversion `encode_rgb8` performs. GIF has no truecolour layout, so this is documented, not refused. |
+| `Rgba` | As `Rgb24`, with every pixel of alpha < 128 routed to the one Transparency Index (one slot of the colour budget), the rest opaque — the `encode_rgba8` conversion. |
+| width or height > 65 535 | `Error::Unsupported` (the §18 / §20 fields are 16-bit). |
+
+`encode` writes `GIF87a` when no extension is needed and `GIF89a`
+otherwise (§7); `EncodeOptions::interlace` stores the rows in
+Appendix E order. `decode(encode(img)) == img` for every `Pal8` image
+`decode` produces (planes, palette, metadata).
+
+## Options
+
+`DecodeOptions` (`Default`, `with_*`, `unlimited()`):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_width` / `max_height: Option<u32>` | `None` | Reject a Logical Screen wider / taller than this. |
+| `max_pixels: Option<u64>` | `None` | Reject a Logical Screen or image rectangle with more pixels. |
+| `max_bytes: Option<u64>` | `Some(1 GiB)` | Reject decodes whose buffers would exceed this: each §22 raster as it is expanded, their running total, the `decode` canvas, `frames × canvas` for `decode_all`. |
+| `strict: bool` | `false` | Run the §7–§26 conformance walk (`GifFile::validate_strict`) and fail on any error-level issue. |
+| `lenient: bool` | `false` | Recovery parser (`parse_lenient`): skip malformed blocks past the header / LSD / GCT, accept a missing Trailer. Exclusive with `strict`. |
+
+Every limit is checked against the Logical Screen Descriptor and every
+Image Descriptor **before** any raster is allocated.
+
+`EncodeOptions` (`Default`, `with_*`):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `lzw_strategy: LzwStrategy` | `DeferredClear` | Appendix F table-full strategy (`ClearOnFull` re-adapts after 4096 entries). |
+| `interlace: bool` | `false` | §20.c.vii Interlace Flag for encoder-built images. |
+| `quantize: QuantizeOptions` | 256 colours, no dither, extent priority, no Lloyd refinement | Reduction of `Rgb24` / `Rgba` input (`with_max_colors`, `with_dither` shortcuts). |
+| `loop_count: Option<u16>` | `Some(0)` (forever) | NETSCAPE2.0 loop count for `encode_animation`; `None` plays once. |
+| `embed_metadata: bool` | `true` | Write ICC / Exif / XMP Application Extensions from `GifImage::metadata`. |
+
+## Metadata and colour
+
+`GifImage::metadata` carries the ICC profile (`ICCRGBG1012`
+Application Extension), Exif (`Exif`) and XMP (`XMP DataXMP`) packets as
+`Option<Vec<u8>>`; GIF has no gamma field, so `gamma` is always `None`.
+GIF carries no colour signalling, so `GifImage::color` is always
+`ColorInfo::gif_default()` — full-range RGB (`matrix` 0) with
+unspecified primaries and transfer (H.273 code point 2); an embedded ICC
+profile governs when present. `encode` writes the three extensions back
+unless `embed_metadata` is off. `to_rgb8` / `to_rgba8` are exact palette
+expansions; no colour management is applied.
+
+## Limits
+
+Every function returns `GifError` on hostile input, never panics; the
+`contract` fuzz target drives `probe` / `info` / `decode` /
+`decode_with` / `decode_all` (strict and lenient) and asserts the
+`info` ↔ `decode` agreement and the `Pal8` round trip. Beyond
+`DecodeOptions`, the LZW decoder is bounded by the raster size the
+Image Descriptor implies, and `decode_all` bounds `frames × canvas` by
+`max_bytes`. The `GIF87a` / `GIF89a` wire limits (65 535 × 65 535,
+256 colours, one transparent index per image) are enforced by the
+encoder with `Error::Unsupported` / `Error::InvalidInput`.
+
+## GIF specifics
+
+The GIF Data Stream model is `GifFile` — every block in source order
+(`Block`: §20 images as `GifFrameData` with their raw §22 index rasters,
+§24 comments, §25 Plain Text, §26 Application Extensions), both colour
+tables and the §18 Logical Screen fields. `parse` / `parse_with` /
+`parse_first_frame` / `parse_first_frame_with` / `parse_lenient` read
+it; `encode_file` / `encode_file_with` serialise it (byte-stable round
+trip); `GifFile::parse`, `to_bytes`, `first_image`,
+`frames_composited` and `metadata` bridge to the contract types.
+`compose` / `Playback` / `compose_frame_at_global` are the §23
+disposal-method state machine as eager canvases, a lazy
+NETSCAPE2.0-loop-aware iterator and a wall-clock seek; `AnimationBuilder`
+and `GifFile::from_rgba_frame*` author streams from truecolour input;
+`quantize` is the median-cut / dithering / Lloyd / fixed-palette
+toolkit; `app_ext` the typed NETSCAPE2.0 / ANIMEXTS1.0 / XMP / ICC /
+Exif views; `GifFile::conformance_report` / `validate_strict` the
+§7–§26 conformance walk; `lzw` the Appendix F codec on its own.
+
+### Implemented (per the CompuServe specifications)
+
 
 Implements every block type defined by the CompuServe specifications:
 
@@ -76,7 +249,7 @@ Implements every block type defined by the CompuServe specifications:
   the count it changed; idempotent, non-image blocks skipped) so a
   stream produced by any construction path — the `from_rgba_*`
   constructors, `AnimationBuilder`, or a decode — can be opted into
-  interlaced emission before `encode`; the encoder re-shuffles each
+  interlaced emission before `encode_file`; the encoder re-shuffles each
   flagged frame's rows into Appendix E four-pass order at serialisation
   while the composed RGBA output stays byte-identical (interlacing is a
   storage-order choice, not a pixel change).
@@ -130,8 +303,9 @@ Implements every block type defined by the CompuServe specifications:
   do not disqualify it), the "Header, Logical Screen Descriptor, a
   Global Color Table and the GIF Trailer" stream §11 describes for
   loading a decoder with a palette ahead of subsequent tableless Data
-  Streams. The strict `decode` entry point rejects an image-less stream,
-  so this arises from `decode_lenient` or a freshly-built `GifFile`.
+  Streams. The contract `decode` rejects an image-less stream (`parse`
+  accepts it), so this arises from `parse` / `parse_lenient` or a
+  freshly-built `GifFile`.
 - Variable-Length-Code LZW compression (Appendix F). The codec pair
   ships in two flavours: the stateless `lzw::encode` / `lzw::decode`
   free functions for one-shot calls, and `lzw::LzwEncoder` which
@@ -148,14 +322,15 @@ Implements every block type defined by the CompuServe specifications:
   `lzw::encode_with_clear_on_full` emits a Clear code and rebuilds the
   dictionary the instant it fills, so the table re-adapts to later
   content instead of coding it against a frozen prefix set. Both decode
-  to identical pixels (`decode` honours the §F.1 mid-stream Clear) and
+  to identical pixels (`lzw::decode` honours the §F.1 mid-stream Clear) and
   emit byte-identical output for rasters that never fill the table; on a
   large regime-changing raster the re-adapting path is ~3.7 % smaller
   in the in-tree property test (166 077 → 159 854 B). The top-level
-  encoder exposes the choice: `encode_with_options(image, EncodeOptions
-  { lzw_strategy })` drives every §20 Image frame's LZW through the
-  selected `LzwStrategy` (`DeferredClear` default / `ClearOnFull`), while
-  the bare `encode(image)` keeps the byte-stable deferred-clear default.
+  encoder exposes the choice: `encode_file_with(&file,
+  &EncodeOptions::default().with_lzw_strategy(..))` drives every §20
+  Image frame's LZW through the selected `LzwStrategy` (`DeferredClear`
+  default / `ClearOnFull`), while the bare `encode_file(&file)` keeps the
+  byte-stable deferred-clear default.
   Both decode to identical pixels and emit byte-identical streams for any
   frame whose dictionary never reaches the 4096-entry ceiling.
 - Four-pass interlace transform (Appendix E)
@@ -315,7 +490,7 @@ Implements every block type defined by the CompuServe specifications:
   `build()` validates placement (rectangles must fit the Logical
   Screen), index counts, palette-index range, and the §19 1..=256
   palette-size limit, returning a `Gif89a` `GifFile` ready for
-  `encode`; the result's timeline accessors read back exactly what was
+  `encode_file`; the result's timeline accessors read back exactly what was
   set and a build → encode → decode round-trip is value-stable.
 - Structured views over the five ecosystem-defined Application
   Extensions (`app_ext` module) — NETSCAPE2.0 looping +
@@ -458,16 +633,17 @@ Implements every block type defined by the CompuServe specifications:
   caller-designated §23.c.viii Transparency Index, which must be the table's
   trailing entry (the universal "reserved slot appended last" convention),
   so an opaque pixel can never land on it.
-- `decode_first_frame` cover-frame fast-path that short-circuits at
+- `parse_first_frame` cover-frame fast-path that short-circuits at
   the first image-bearing block and skips the per-block dispatch
   for everything that follows. Useful when you only need a static
   thumbnail of an animated stream.
-- `decode_lenient` error-recovery decoder that skips corrupted
+- `parse_lenient` error-recovery decoder that skips corrupted
   sub-blocks, malformed extensions, and partial frames by scanning
   forward to the next §20 Image Separator / §27 Trailer. Use for
   viewers / thumbnailers / recovery tools that prefer "show what
-  we can" over "all or nothing"; the strict `decode` entry point
-  stays the default for round-trip-stable consumers.
+  we can" over "all or nothing"; the strict `parse` entry point
+  stays the default for round-trip-stable consumers
+  (`DecodeOptions::lenient` selects it on the contract path).
 - §7 "Required Version" enforcement on encode. The encoder honours
   the per-block "Required Version" table — §23 Graphic Control,
   §24 Comment, §25 Plain Text, and §26 Application Extensions all
@@ -480,9 +656,9 @@ Implements every block type defined by the CompuServe specifications:
 - Non-fatal conformance reporting. `GifFile::conformance_report()`
   walks an in-memory image against the Appendix-B grammar and the
   §7–§26 field rules and returns a `ConformanceReport` — the diagnostic
-  counterpart to `encode`'s fatal validation, and a *superset* of it.
+  counterpart to `encode_file`'s fatal validation, and a *superset* of it.
   Alongside the §7 version, §19/§21 colour-table-size, and §20/§22
-  indices-length rules `encode` also rejects, the report surfaces the
+  indices-length rules `encode_file` also rejects, the report surfaces the
   placement / range / recommendation departures the encoder tolerates:
   §20.a images escaping the Logical Screen, §18.c.vii Background Color
   Index past the Global Color Table, §22/Appendix-F pixel indices past
@@ -500,21 +676,28 @@ Implements every block type defined by the CompuServe specifications:
   the hard-gate convenience: `Ok(())` when no error-level issue is found
   (recommendations tolerated), else an `Error::InvalidInput` listing
   every error. Because the report is a superset of the encoder's checks,
-  `validate_strict().is_ok()` implies `encode` accepts the image but not
+  `validate_strict().is_ok()` implies `encode_file` accepts the image but not
   conversely.
 
 ## Fuzzing
 
-`fuzz/fuzz_targets/` ships seven `cargo-fuzz` harnesses, all asserting
+`fuzz/fuzz_targets/` ships eight `cargo-fuzz` harnesses, all asserting
 panic-freedom on arbitrary bytes:
 
-- `decode_panic_free` — strict `decode` entry point.
-- `decode_lenient_panic_free` — error-recovery `decode_lenient` entry
+- `contract` — the image-crate contract surface: `probe` / `info` /
+  `decode` / `decode_with` (strict and lenient) / `decode_rgb8` /
+  `decode_rgba8` / `decode_all` under a 1 MiB `max_bytes`, asserting
+  that `info` predicts `decode`'s size / layout / alpha and
+  `decode_all`'s length, that `decode(encode(img)) == img` for every
+  `Pal8` image `decode` produced, and that `encode_animation` accepts
+  every `decode_all` output.
+- `decode_panic_free` — strict `parse` entry point.
+- `decode_lenient_panic_free` — error-recovery `parse_lenient` entry
   point (different resync state machine).
 - `roundtrip` — decoder output round-trips through encoder + decoder
   with `assert_eq!` on the resulting `GifFile`.
-- `decode` — end-to-end decode-side harness: chains `decode_lenient` +
-  `decode_first_frame` + `decode` + `compose` + `Playback::frames` +
+- `decode` — end-to-end decode-side harness: chains `parse_lenient` +
+  `parse_first_frame` + `parse` + `compose` + `Playback::frames` +
   `Playback::looping_frames` + the §26 Application Extension typed
   parsers + the §24 Comment Extension accessors + the §18.c.viii Pixel
   Aspect Ratio decoder + the §7 Required Version inference + an
@@ -527,7 +710,7 @@ panic-freedom on arbitrary bytes:
 - `encode` — end-to-end encode-side harness: derives a `GifFile` from
   fuzz bytes via `AnimationBuilder` (rect placement, palette size,
   per-frame disposal, NETSCAPE2.0 / loop-forever behaviour), then
-  drives `encode` → `decode` → `decode_lenient` → `decode_first_frame`
+  drives `encode_file` → `parse` → `parse_lenient` → `parse_first_frame`
   → `compose` → `Playback::frames` / `looping_frames` on the result.
   Reaches encoder configurations the decoder-output-only harness
   can't construct (sub-screen placements, mismatched palette sizes,
@@ -544,7 +727,7 @@ panic-freedom on arbitrary bytes:
   rules (`Extent` / `Population`), and a fuzz-derived Lloyd refinement count
   (`palette_refine_iterations` 0..=4), plus the
   `from_rgba_frame_with_options` / `from_rgba_frames_shared_palette`
-  constructors through `encode` → `decode` — asserting the index plane
+  constructors through `encode_file` → `parse` — asserting the index plane
   stays in palette range and the decoder accepts every encoded stream.
   Caps screen at 256×256 and frame count at 16.
 - `plain_text` — dedicated §25 Plain Text Extension
@@ -554,7 +737,7 @@ panic-freedom on arbitrary bytes:
   prefix — so the §25 grammar is effectively unreached on truly
   arbitrary input. This harness builds a `GifFile` whose `blocks`
   are exclusively Plain Text Extensions (each optionally carrying a
-  §23 GCE), then drives `encode` → `decode` (strict + lenient +
+  §23 GCE), then drives `encode_file` → `parse` (strict + lenient +
   cover-frame) → `compose` → `Playback`. Covers the §25.c.viii/ix
   `cell_width = 0` no-op short-circuit, the §25.c.x/xi out-of-palette
   fg/bg-index clamp in `render_plain_text`, multi-sub-block §15

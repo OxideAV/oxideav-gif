@@ -109,6 +109,14 @@
   `ColorSignal`). CI gains the inline `ci-standalone` job
   (`--no-default-features` clippy + tests).
 
+- **Image-crate API contract, part 6 — README** reordered to the
+  contract: *Standalone use* (one-screen example + root-item table),
+  *Framework use*, *Supported layouts* (decode / encode tables),
+  *Options*, *Metadata and colour*, *Limits*, then *GIF specifics* (the
+  `GifFile` model, compositor, playback, builder, quantiser, conformance
+  walk — the former *Status* catalogue, with the depth entry points
+  renamed). Crate docs follow the same order.
+
 ### Fixed
 
 - **LZW code-width switch was one code early on both sides — streams
