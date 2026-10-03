@@ -77,6 +77,20 @@
   `lzw_strategy`; it is no longer `Copy`.
 - `parse_with` under `strict` maps the conformance walk's
   `InvalidInput` to `InvalidData` (a decode-side departure).
+- **Image-crate API contract, part 3 — registry adapter** (`registry`
+  feature): `make_decoder` / `make_encoder` are public factories with the
+  fleet signature; `From<GifImage> for VideoFrame` (+ `From<&GifImage>`,
+  palette and colour-signal side-channels), `GifImage::from_video_frame(&VideoFrame,
+  &CodecParameters) -> Result` and `TryFrom<(&VideoFrame,
+  &CodecParameters)>`; `to_core_pixel_format` / `From<GifPixelFormat> for
+  PixelFormat` / `TryFrom<PixelFormat> for GifPixelFormat`;
+  `to_color_signal` / `from_color_signal`. `GifDecoder` now calls
+  `decode_all` and `GifEncoder` calls `encode` (one implementation);
+  the encoder accepts `Rgba`, `Rgb24` and `Pal8` (palette side-channel)
+  frames per `params.pixel_format` and parses `params.options` through
+  `EncodeOptions`' new `CodecOptionsStruct` schema (`lzw_strategy`,
+  `interlace`, `max_colors`, `dither`, `loop_count`, `embed_metadata`).
+  The capability list advertises `Rgba` / `Rgb24` / `Pal8`.
 
 ### Deprecated
 

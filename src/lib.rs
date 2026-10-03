@@ -47,9 +47,9 @@
 //!
 //! With the default-on `registry` feature, [`register`] installs the
 //! `gif` codec and the `.gif` extension hint into an
-//! `oxideav_core::RuntimeContext`; `make_decoder` / `make_encoder`
+//! `oxideav_core::RuntimeContext`; [`make_decoder`] / [`make_encoder`]
 //! are the factories, and `From<GifImage> for VideoFrame` /
-//! `GifImage::from_video_frame` convert between the two worlds. The
+//! [`GifImage::from_video_frame`] convert between the two worlds. The
 //! trait-side [`GifDecoder`] / [`GifEncoder`] call the standalone
 //! functions ([`decode_all`] and [`encode`]).
 //!
@@ -217,5 +217,6 @@ pub use quantize::{
 pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{
-    register, register_codecs, register_containers, GifDecoder, GifEncoder, CODEC_ID_STR,
+    from_color_signal, make_decoder, make_encoder, register, register_codecs, register_containers,
+    to_color_signal, to_core_pixel_format, GifDecoder, GifEncoder, CODEC_ID_STR,
 };
