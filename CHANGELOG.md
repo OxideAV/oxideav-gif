@@ -91,6 +91,23 @@
   `EncodeOptions`' new `CodecOptionsStruct` schema (`lzw_strategy`,
   `interlace`, `max_colors`, `dither`, `loop_count`, `embed_metadata`).
   The capability list advertises `Rgba` / `Rgb24` / `Pal8`.
+- **Image-crate API contract, part 4 — gates.** `tests/contract_api.rs`
+  pins, over 64 randomised animations (sub-rectangle frames, every
+  disposal method, transparency, interlace): `decode(..).to_rgba8()`
+  shows exactly what `compose(..)[0]` shows, `decode_all` equals
+  `compose` frame for frame (pixels, delays), `info` predicts `decode`'s
+  layout / alpha and `decode_all`'s length, `decode(encode(img)) == img`
+  for every `Pal8` image the decoder produced, and `encode_animation`
+  of `decode_all` output shows the same pixels; plus the deterministic
+  quantiser, the alpha threshold, refusals and hostile inputs. The
+  `decode` synthetic transparent slot is now padded to the next
+  power-of-two table size so the round trip stays exact. New fuzz target
+  `contract` (`probe` / `info` / `decode*` / `decode_all` with `strict` /
+  `lenient`, asserting the `info` ↔ `decode` agreement and the `Pal8`
+  round trip; 5 min clean locally). The fuzz sub-crate's lockfile moves
+  from `oxideav-core` 0.1.26 to 0.1.37 (the registry bridge needs
+  `ColorSignal`). CI gains the inline `ci-standalone` job
+  (`--no-default-features` clippy + tests).
 
 ### Deprecated
 

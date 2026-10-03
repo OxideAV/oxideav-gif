@@ -413,7 +413,14 @@ fn first_frame_image(file: &GifFile, opts: &DecodeOptions) -> Result<GifImage> {
             opts.check_bytes((sw * sh) as u64)?;
             let mut palette = Palette::from_color_table(table, transparent);
             if synthetic {
+                // The transparent slot goes right past the file's table,
+                // then the table is padded to the next power of two with
+                // opaque black — the shape a §19 / §21 colour table takes
+                // on the wire — so `decode(encode(img)) == img` holds for
+                // this image too.
                 palette.entries.push([0, 0, 0, 0]);
+                let padded = palette.len().next_power_of_two().clamp(2, 256);
+                palette.entries.resize(padded, [0, 0, 0, 255]);
             }
             let fill = transparent.unwrap_or(0);
             let mut indices = vec![fill; sw * sh];
@@ -748,8 +755,9 @@ mod tests {
         let img = decode(&bytes).unwrap();
         assert_eq!(img.format, PixelFormat::Pal8);
         let pal = img.palette.as_ref().unwrap();
-        assert_eq!(pal.len(), 3);
+        assert_eq!(pal.len(), 4, "2 entries + synthetic slot, padded to 4");
         assert_eq!(pal.entries[2], [0, 0, 0, 0]);
+        assert_eq!(pal.entries[3], [0, 0, 0, 255]);
         assert_eq!(
             img.as_bytes().unwrap(),
             &[2, 2, 2, 2, 2, 0, 1, 2, 2, 2, 2, 2]

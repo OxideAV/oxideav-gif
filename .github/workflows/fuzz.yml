@@ -3,7 +3,7 @@ name: Fuzz
 # Daily fuzz run for the cargo-fuzz harnesses under fuzz/. The 30-minute
 # total budget is split across every target the crate-fuzz workflow
 # discovers (decode / decode_panic_free / decode_lenient_panic_free /
-# roundtrip / encode).
+# roundtrip / encode / plain_text / lzw / contract).
 
 on:
   schedule:

@@ -61,3 +61,9 @@ name = "lzw"
 path = "fuzz_targets/lzw.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "contract"
+path = "fuzz_targets/contract.rs"
+test = false
+doc = false

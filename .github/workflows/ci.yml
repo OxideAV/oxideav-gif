@@ -15,3 +15,26 @@ jobs:
   ci:
     uses: OxideAV/.github/.github/workflows/crate-ci.yml@master
     secrets: inherit
+
+  # Standalone (no-`registry`) verification — the image-crate contract's
+  # `ci-standalone` job. Image-library consumers depend on the crate with
+  # `default-features = false` to skip the `oxideav-core` dep tree
+  # entirely; the Layer-1 surface (`probe` / `info` / `decode*` /
+  # `encode*`) must build, lint and pass its tests in that configuration
+  # on every change. Tests that need the framework traits are gated on
+  # `cfg(feature = "registry")` and skip here.
+  ci-standalone:
+    name: Standalone (no registry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: standalone
+      - name: cargo clippy --all-targets --no-default-features
+        run: cargo clippy --all-targets --no-deps --no-default-features -- -D warnings
+      - name: cargo test --no-default-features
+        run: cargo test --no-default-features --verbose
