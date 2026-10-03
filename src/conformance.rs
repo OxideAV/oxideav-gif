@@ -1,5 +1,5 @@
 //! Non-fatal Appendix-B grammar + cross-section conformance reporting
-//! for an in-memory [`GifImage`].
+//! for an in-memory [`GifFile`].
 //!
 //! The [`crate::encoder`] enforces the small set of constraints whose
 //! violation makes a stream *un-encodable* (palette length, declared
@@ -8,7 +8,7 @@
 //! a byte goes to the wire.
 //!
 //! This module is the complementary *diagnostic* surface: it walks a
-//! [`GifImage`] and reports **every** way it departs from the
+//! [`GifFile`] and reports **every** way it departs from the
 //! CompuServe Appendix-B grammar and the surrounding §18–§26 field
 //! rules — including the **recommendation**-level departures the
 //! encoder deliberately tolerates (a frame escaping the §20.a Logical
@@ -30,11 +30,11 @@
 //!   <Logical Screen> <Data>* Trailer`, `<Logical Screen> ::= Logical
 //!   Screen Descriptor [Global Color Table]`,
 //!   `<Table-Based Image> ::= Image Descriptor [Local Color Table]
-//!   Image Data`. The in-memory [`GifImage`] is already shaped to this
+//!   Image Data`. The in-memory [`GifFile`] is already shaped to this
 //!   grammar (the decoder builds it that way and the §23 GCE is stored
 //!   *attached* to the graphic-rendering block it scopes), so the
 //!   structural production rules are satisfied by construction. What a
-//!   hand-built or mutated [`GifImage`] can still violate is the
+//!   hand-built or mutated [`GifFile`] can still violate is the
 //!   *field-level* and *cross-reference* conformance the grammar
 //!   leaves to the per-block sections below.
 //! * §7 "Version Numbers" — the declared version must cover every
@@ -52,7 +52,7 @@
 //! * §25 "Plain Text Extension" — fg/bg index references against the
 //!   active colour table.
 
-use crate::image::{Block, GifImage, Rgb};
+use crate::image::{Block, GifFile, Rgb};
 use core::fmt;
 
 /// How seriously a [`ConformanceIssue`] departs from the spec.
@@ -114,14 +114,14 @@ pub enum ConformanceRule {
     PlainTextIndexRange,
 }
 
-/// One conformance departure found while walking a [`GifImage`].
+/// One conformance departure found while walking a [`GifFile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConformanceIssue {
     /// Which spec rule was departed from.
     pub rule: ConformanceRule,
     /// How seriously (error vs. recommendation).
     pub severity: ConformanceSeverity,
-    /// Index into [`GifImage::blocks`] of the offending block, or
+    /// Index into [`GifFile::blocks`] of the offending block, or
     /// `None` for a stream-level issue (Logical Screen Descriptor
     /// fields, Global Color Table).
     pub block_index: Option<usize>,
@@ -149,7 +149,7 @@ impl fmt::Display for ConformanceIssue {
     }
 }
 
-/// The full set of conformance departures for a [`GifImage`], in the
+/// The full set of conformance departures for a [`GifFile`], in the
 /// order they were discovered (stream-level first, then per-block in
 /// source order).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -232,7 +232,7 @@ impl fmt::Display for ConformanceReport {
     }
 }
 
-impl GifImage {
+impl GifFile {
     /// Produce a non-fatal [`ConformanceReport`] for this image,
     /// checking it against the Appendix-B grammar and the §7–§26
     /// field-level rules.
@@ -612,7 +612,7 @@ fn check_gce(
 mod tests {
     use super::*;
     use crate::image::{
-        Block, DisposalMethod, Frame, GifImage, GraphicControl, PlainText, Version,
+        Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, PlainText, Version,
     };
 
     fn rgb(r: u8, g: u8, b: u8) -> Rgb {
@@ -621,8 +621,8 @@ mod tests {
 
     /// A 2×2 single-frame GIF89a with a 2-entry global palette, every
     /// field in range — the conformance baseline.
-    fn clean_image() -> GifImage {
-        GifImage {
+    fn clean_image() -> GifFile {
+        GifFile {
             version: Version::Gif89a,
             screen_width: 2,
             screen_height: 2,
@@ -631,7 +631,7 @@ mod tests {
             background_index: 0,
             pixel_aspect_ratio: 0,
             global_palette: Some(vec![rgb(0, 0, 0), rgb(255, 255, 255)]),
-            blocks: vec![Block::Image(Frame {
+            blocks: vec![Block::Image(GifFrameData {
                 left: 0,
                 top: 0,
                 width: 2,

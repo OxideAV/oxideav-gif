@@ -15,7 +15,7 @@
 //! `0x21 0x01 0x0C` extension-introducer prefix — a vanishingly rare
 //! event on truly arbitrary fuzz input.
 //!
-//! This harness drives the encode side directly: it builds a `GifImage`
+//! This harness drives the encode side directly: it builds a `GifFile`
 //! whose `blocks` vector is a sequence of `Block::PlainText` (some with
 //! attached GCEs, some without), encodes it, decodes the resulting
 //! bytes, composes the decoded image, and asserts the decode→encode→
@@ -53,7 +53,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
     compose, decode, decode_first_frame, decode_lenient, encode,
-    image::{Block, GifImage, GraphicControl, PlainText, Rgb},
+    image::{Block, GifFile, GraphicControl, PlainText, Rgb},
     playback::Playback,
     DisposalMethod, Version,
 };
@@ -153,14 +153,14 @@ fuzz_target!(|data: &[u8]| {
     // `background_index` only matters when a §23 RestoreBackground
     // disposal fires; allow any u8 so we cover both "in palette" and
     // "past end of palette" cases (the latter resolves to fully-
-    // transparent black via `GifImage::background_color_rgba`).
+    // transparent black via `GifFile::background_color_rgba`).
     let background_index = data[3];
 
     // Plain Text blocks require a §18 Global Color Table per §25.a;
     // without one, `render_plain_text` is a no-op in `compose` (and
     // an Err in `encode` on at least one path). Always attach a GCT
     // so we exercise the rendering side.
-    let mut img = GifImage {
+    let mut img = GifFile {
         version: Version::Gif89a, // §25 is 89a-only.
         screen_width: screen_w,
         screen_height: screen_h,
@@ -215,7 +215,7 @@ fuzz_target!(|data: &[u8]| {
                 user_input: (bg & 0x01) != 0,
                 transparent_index: if (bg & 0x02) != 0 { Some(fg) } else { None },
                 // 0..=255 centiseconds is the realistic range; the
-                // GifImage::total_play_duration accessor uses saturating
+                // GifFile::total_play_duration accessor uses saturating
                 // arithmetic so an adversarial value here can't overflow.
                 delay_centis: cell_w as u16,
             })

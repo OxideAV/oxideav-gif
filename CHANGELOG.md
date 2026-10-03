@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Image-crate API contract (`IMAGE_CRATE_API`), part 1 — names.** The
+  parsed GIF Data Stream model is now `GifFile` (was `GifImage`; the
+  contract reserves `GifImage` for the first composed frame in its native
+  `Pal8` layout) and the §20 Image Descriptor + raster record is
+  `GifFrameData` (was `Frame`; the contract reserves `Frame` for
+  `decode_all` entries). Every method, builder, compositor, playback and
+  registry surface keeps its name on the renamed types. No alias is
+  possible for either old name because both are re-used by the contract
+  types.
+- The error enum is `GifError` with `pub type Error = GifError`
+  (`#[non_exhaustive]`); it gains the contract's `LimitExceeded(String)`
+  and `Io(std::io::Error)` variants (`From<std::io::Error>`,
+  `std::error::Error::source`) and the `invalid` / `unsupported` /
+  `limit` / `invalid_input` constructors. Because it now carries an
+  `io::Error` it no longer derives `Clone` / `PartialEq` / `Eq` — match on
+  variants or `Display`. The framework conversion maps `LimitExceeded`
+  to `oxideav_core::Error::InvalidData` and `Io` to `Io`.
+
 ### Added
 
 - Serpentine (boustrophedon) error-diffusion scan, opt-in via

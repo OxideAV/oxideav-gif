@@ -259,7 +259,7 @@ pub struct Application {
 
 /// One Image Descriptor (§20) plus its decoded pixel raster.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Frame {
+pub struct GifFrameData {
     pub left: u16,
     pub top: u16,
     pub width: u16,
@@ -284,7 +284,7 @@ pub struct Frame {
 /// One element of the `<Data>*` repetition in the §B grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
-    Image(Frame),
+    Image(GifFrameData),
     PlainText {
         params: PlainText,
         graphic_control: Option<GraphicControl>,
@@ -339,7 +339,7 @@ impl Block {
     ///   Control block (the §23 Graphic Control Extension is stored
     ///   *attached* to the graphic-rendering block it scopes, not as a
     ///   free-standing [`Block`], and the Header / LSD / Trailer are
-    ///   structural fields of [`GifImage`], not list entries).
+    ///   structural fields of [`GifFile`], not list entries).
     /// * **Special-Purpose** — labels `0xFA..=0xFF`. §12 names "the
     ///   Comment Extension and the Application Extension"; their labels
     ///   are the §24.c.ii Comment Label `0xFE` and the §26.c.ii
@@ -381,7 +381,7 @@ impl Block {
 /// GIF89a §12 partitions every block into three groups by purpose and
 /// label-byte range. The third group — Control — covers the Header,
 /// Logical Screen Descriptor, §23 Graphic Control Extension and §27
-/// Trailer; in this crate those are structural fields of [`GifImage`]
+/// Trailer; in this crate those are structural fields of [`GifFile`]
 /// or attached to the graphic-rendering block they scope, so a
 /// free-standing [`Block`] is never Control. The variant is still
 /// modelled for completeness and forward-compatibility with the §12
@@ -400,7 +400,7 @@ pub enum BlockClass {
     SpecialPurpose,
 }
 
-impl Frame {
+impl GifFrameData {
     /// §20.c.ix "Size of Local Color Table" — the 3-bit encoded field
     /// value that would be written for this frame's Local Color Table
     /// (`0..=7`), or `None` when no LCT is attached.
@@ -412,7 +412,7 @@ impl Frame {
     /// counts round up — a 5-entry LCT rounds up to the 8-entry slot and
     /// encodes as `2`.
     ///
-    /// Returns `None` when [`Frame::local_palette`] is `None` — per
+    /// Returns `None` when [`GifFrameData::local_palette`] is `None` — per
     /// §20.c.ix "This value should be 0 if there is no Local Color
     /// Table specified", the field is undefined and the encoded `0`
     /// would collide with the "2-entry LCT" case, so the typed
@@ -470,7 +470,7 @@ impl Frame {
 /// Top-level result of a successful decode and the input shape an
 /// encoder accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GifImage {
+pub struct GifFile {
     pub version: Version,
     /// Logical Screen Descriptor §18 — width × height of the virtual
     /// screen on which all frames are composited.
@@ -506,9 +506,9 @@ fn palette_color_resolution(palette_len: usize) -> u8 {
     bits - 1
 }
 
-impl GifImage {
+impl GifFile {
     /// Iterate the image-bearing blocks.
-    pub fn frames(&self) -> impl Iterator<Item = &Frame> {
+    pub fn frames(&self) -> impl Iterator<Item = &GifFrameData> {
         self.blocks.iter().filter_map(|b| match b {
             Block::Image(f) => Some(f),
             _ => None,
@@ -522,7 +522,7 @@ impl GifImage {
     /// post-construction edits to a decoded or freshly-built stream —
     /// for example flipping the §20.c.vii Interlace Flag (see
     /// [`Self::set_frames_interlaced`]) or rewriting a frame's placement.
-    pub fn frames_mut(&mut self) -> impl Iterator<Item = &mut Frame> {
+    pub fn frames_mut(&mut self) -> impl Iterator<Item = &mut GifFrameData> {
         self.blocks.iter_mut().filter_map(|b| match b {
             Block::Image(f) => Some(f),
             _ => None,
@@ -577,7 +577,7 @@ impl GifImage {
     /// The yielded slice borrows from `self`, so callers iterating
     /// frames + palette together do not need to clone the palette or
     /// resolve precedence themselves.
-    pub fn frames_with_palette(&self) -> impl Iterator<Item = (&Frame, Option<&[Rgb]>)> {
+    pub fn frames_with_palette(&self) -> impl Iterator<Item = (&GifFrameData, Option<&[Rgb]>)> {
         let global = self.global_palette.as_deref();
         self.frames().map(move |f| {
             let palette = f.local_palette.as_deref().or(global);
@@ -593,9 +593,9 @@ impl GifImage {
     /// the Image Descriptor Block and the Plain Text Extension", a
     /// §23 GCE attaches to the immediately-following graphic-rendering
     /// block. On decode that attachment is stored on
-    /// [`Frame::graphic_control`] (and likewise on
+    /// [`GifFrameData::graphic_control`] (and likewise on
     /// [`Block::PlainText::graphic_control`] for §25 Plain Text); this
-    /// accessor surfaces the §20 half of that pairing — `(&Frame,
+    /// accessor surfaces the §20 half of that pairing — `(&GifFrameData,
     /// Option<GraphicControl>)` — in source order so a caller walking
     /// "every image and the GCE that controls it" can do so without
     /// re-deriving the relationship from [`Self::blocks`].
@@ -616,7 +616,7 @@ impl GifImage {
     /// accessors compose naturally.
     pub fn frames_with_graphic_control(
         &self,
-    ) -> impl Iterator<Item = (&Frame, Option<GraphicControl>)> {
+    ) -> impl Iterator<Item = (&GifFrameData, Option<GraphicControl>)> {
         self.frames().map(|f| (f, f.graphic_control))
     }
 
@@ -666,7 +666,7 @@ impl GifImage {
     /// palette or hand-roll the precedence + Sort Flag lookup.
     pub fn frames_with_sorted_palette(
         &self,
-    ) -> impl Iterator<Item = (&Frame, Option<&[Rgb]>, bool)> {
+    ) -> impl Iterator<Item = (&GifFrameData, Option<&[Rgb]>, bool)> {
         let global = self.global_palette.as_deref();
         let global_sorted = self.global_palette_sorted;
         self.frames().map(move |f| {
@@ -712,8 +712,8 @@ impl GifImage {
     /// Per §20.c.vii the Interlace Flag is a per-image property; a
     /// single stream may mix interlaced and non-interlaced frames. The
     /// decoder presents every frame already de-interlaced (the
-    /// `Frame::indices` raster is row-major top-to-bottom regardless),
-    /// but the original flag is preserved on [`Frame::interlaced`] so an
+    /// `GifFrameData::indices` raster is row-major top-to-bottom regardless),
+    /// but the original flag is preserved on [`GifFrameData::interlaced`] so an
     /// encoder can round-trip it. This accessor is the stream-level
     /// roll-up of that bit — counts only [`Block::Image`] entries, never
     /// §24 Comment / §25 Plain Text / §26 Application (none of which
@@ -729,7 +729,7 @@ impl GifImage {
     /// stream relies on the Appendix E four-pass row reordering (so it
     /// can, for example, present partial decoded data progressively)
     /// can gate on this single query rather than walking
-    /// [`Self::frames`] and inspecting each [`Frame::interlaced`].
+    /// [`Self::frames`] and inspecting each [`GifFrameData::interlaced`].
     ///
     /// Returns `false` for a stream with no §20 Image blocks (every
     /// metadata-only stream) and for one whose every image leaves the
@@ -764,7 +764,7 @@ impl GifImage {
     /// Color Table Flag is set; per §20.c.ix "This value should be 0 if
     /// there is no Local Color Table specified", which this accessor
     /// surfaces as `None` (the LCT flag is implicitly clear too, since
-    /// [`Frame::local_palette`] is `None`) rather than a sentinel `0`
+    /// [`GifFrameData::local_palette`] is `None`) rather than a sentinel `0`
     /// that a caller might confuse with the "2-entry LCT" case.
     ///
     /// The yielded field value is what an encoder writes for the LCT —
@@ -776,7 +776,9 @@ impl GifImage {
     ///
     /// Only [`Block::Image`] entries contribute. §24 Comment / §25
     /// Plain Text / §26 Application carry no §20.c.ix at all.
-    pub fn frames_with_local_color_table_size(&self) -> impl Iterator<Item = (&Frame, Option<u8>)> {
+    pub fn frames_with_local_color_table_size(
+        &self,
+    ) -> impl Iterator<Item = (&GifFrameData, Option<u8>)> {
         self.frames().map(|f| (f, f.local_color_table_size_field()))
     }
 
@@ -790,7 +792,7 @@ impl GifImage {
     /// attached, where `count` is the power-of-two-rounded number of
     /// entries (range `2..=256`) the on-disk LCT carries. `count` is
     /// always `>=` `frame.local_palette.as_ref().unwrap().len()`: the
-    /// in-memory [`Frame::local_palette`] holds only the colours the
+    /// in-memory [`GifFrameData::local_palette`] holds only the colours the
     /// stream actually carries, but the on-disk §21 table is rounded up
     /// to the next power of two with any unused tail entries written as
     /// the encoder's pad (this crate writes black; the spec leaves the
@@ -801,7 +803,7 @@ impl GifImage {
     /// companion).
     pub fn frames_with_local_color_table_entry_count(
         &self,
-    ) -> impl Iterator<Item = (&Frame, Option<u32>)> {
+    ) -> impl Iterator<Item = (&GifFrameData, Option<u32>)> {
         self.frames()
             .map(|f| (f, f.local_color_table_entry_count()))
     }
@@ -1321,7 +1323,7 @@ impl GifImage {
     /// (or no palette at all, falling back on an existing GCT). On a
     /// successful hoist:
     ///
-    /// * Every matching `Frame::local_palette` is set to `None` so the
+    /// * Every matching `GifFrameData::local_palette` is set to `None` so the
     ///   encoder writes the frame without an §21 Local Color Table
     ///   block (saves `3 × 2^(size_bits + 1)` bytes per frame).
     /// * The hoisted palette is installed as `self.global_palette`
@@ -1459,7 +1461,7 @@ impl GifImage {
     }
 }
 
-impl GifImage {
+impl GifFile {
     /// Build a single-image §18 Logical Screen from one truecolor RGBA
     /// frame, quantising it to a §19 Global Color Table + §22 index
     /// plane with [`crate::quantize::quantize_rgba`].
@@ -1490,7 +1492,7 @@ impl GifImage {
         width: u16,
         height: u16,
         max_colors: usize,
-    ) -> crate::error::Result<GifImage> {
+    ) -> crate::error::Result<GifFile> {
         Self::from_rgba_frame_with_options(
             rgba,
             width,
@@ -1515,7 +1517,7 @@ impl GifImage {
         width: u16,
         height: u16,
         opts: crate::quantize::QuantizeOptions,
-    ) -> crate::error::Result<GifImage> {
+    ) -> crate::error::Result<GifFile> {
         if width == 0 || height == 0 {
             return Err(crate::error::Error::InvalidInput(
                 "from_rgba_frame: width/height must be non-zero".into(),
@@ -1539,7 +1541,7 @@ impl GifImage {
             Version::Gif87a
         };
         let color_resolution = palette_color_resolution(q.palette.len());
-        Ok(GifImage {
+        Ok(GifFile {
             version,
             screen_width: width,
             screen_height: height,
@@ -1548,7 +1550,7 @@ impl GifImage {
             background_index: 0,
             pixel_aspect_ratio: 0,
             global_palette: Some(q.palette),
-            blocks: vec![Block::Image(Frame {
+            blocks: vec![Block::Image(GifFrameData {
                 left: 0,
                 top: 0,
                 width,
@@ -1599,7 +1601,7 @@ impl GifImage {
         height: u16,
         max_colors: usize,
         loop_count: Option<u16>,
-    ) -> crate::error::Result<GifImage> {
+    ) -> crate::error::Result<GifFile> {
         Self::from_rgba_frames_with_options(
             frames,
             width,
@@ -1623,7 +1625,7 @@ impl GifImage {
         height: u16,
         opts: crate::quantize::QuantizeOptions,
         loop_count: Option<u16>,
-    ) -> crate::error::Result<GifImage> {
+    ) -> crate::error::Result<GifFile> {
         if width == 0 || height == 0 {
             return Err(crate::error::Error::InvalidInput(
                 "from_rgba_frames: width/height must be non-zero".into(),
@@ -1662,7 +1664,7 @@ impl GifImage {
                 transparent_index: q.transparent_index,
                 delay_centis,
             });
-            blocks.push(Block::Image(Frame {
+            blocks.push(Block::Image(GifFrameData {
                 left: 0,
                 top: 0,
                 width,
@@ -1675,7 +1677,7 @@ impl GifImage {
             }));
         }
 
-        Ok(GifImage {
+        Ok(GifFile {
             version: Version::Gif89a,
             screen_width: width,
             screen_height: height,
@@ -1718,7 +1720,7 @@ impl GifImage {
         height: u16,
         opts: crate::quantize::QuantizeOptions,
         loop_count: Option<u16>,
-    ) -> crate::error::Result<GifImage> {
+    ) -> crate::error::Result<GifFile> {
         if width == 0 || height == 0 {
             return Err(crate::error::Error::InvalidInput(
                 "from_rgba_frames_shared_palette: width/height must be non-zero".into(),
@@ -1754,7 +1756,7 @@ impl GifImage {
                 transparent_index: shared.transparent_index,
                 delay_centis,
             });
-            blocks.push(Block::Image(Frame {
+            blocks.push(Block::Image(GifFrameData {
                 left: 0,
                 top: 0,
                 width,
@@ -1767,7 +1769,7 @@ impl GifImage {
             }));
         }
 
-        Ok(GifImage {
+        Ok(GifFile {
             version: Version::Gif89a,
             screen_width: width,
             screen_height: height,
@@ -1780,7 +1782,7 @@ impl GifImage {
         })
     }
 
-    /// Bump [`GifImage::version`] up to [`Self::required_version`] when
+    /// Bump [`GifFile::version`] up to [`Self::required_version`] when
     /// the current declared version is too low to cover the blocks in
     /// this stream. Returns `true` when a bump actually happened.
     ///
@@ -1993,7 +1995,7 @@ impl GifImage {
     /// §12 "transparent" and do not disqualify the loader shape). The
     /// strict [`crate::decode`] entry point rejects an image-less
     /// stream, so this shape arises from [`crate::decode_lenient`] or
-    /// from a freshly-built [`GifImage`]; the query lets a multi-stream
+    /// from a freshly-built [`GifFile`]; the query lets a multi-stream
     /// consumer recognise a table-install stream before discarding it
     /// as "frameless".
     pub fn is_palette_loader_stream(&self) -> bool {
@@ -2493,7 +2495,7 @@ impl GifImage {
     }
 }
 
-/// One entry in a [`GifImage::presentation_timeline`]: the wall-clock
+/// One entry in a [`GifFile::presentation_timeline`]: the wall-clock
 /// `start` offset (from the beginning of a single playback pass) at which
 /// a graphic-rendering block is presented, and its `duration` (the
 /// §23.c.vii Delay Time). The block occupies the half-open interval
@@ -2521,8 +2523,8 @@ mod tests {
         vec![Rgb::new(9, 9, 9), Rgb::new(8, 8, 8), Rgb::new(7, 7, 7)]
     }
 
-    fn frame_with(local: Option<Vec<Rgb>>) -> Frame {
-        Frame {
+    fn frame_with(local: Option<Vec<Rgb>>) -> GifFrameData {
+        GifFrameData {
             left: 0,
             top: 0,
             width: 1,
@@ -2535,8 +2537,8 @@ mod tests {
         }
     }
 
-    fn base_image(global: Option<Vec<Rgb>>, blocks: Vec<Block>) -> GifImage {
-        GifImage {
+    fn base_image(global: Option<Vec<Rgb>>, blocks: Vec<Block>) -> GifFile {
+        GifFile {
             version: Version::Gif89a,
             screen_width: 1,
             screen_height: 1,
@@ -3037,12 +3039,9 @@ mod tests {
     /// raw = round(ratio × 64) − 15. Square pixels (1.0) → 49.
     #[test]
     fn raw_pixel_aspect_ratio_inverts_decode() {
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(1.0), Some(49));
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(0.25), Some(1));
-        assert_eq!(
-            GifImage::raw_pixel_aspect_ratio_for(270.0 / 64.0),
-            Some(255)
-        );
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(1.0), Some(49));
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(0.25), Some(1));
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(270.0 / 64.0), Some(255));
     }
 
     /// Encode → decode round-trips for every representable raw byte
@@ -3054,7 +3053,7 @@ mod tests {
             img.pixel_aspect_ratio = raw;
             let ratio = img.pixel_aspect_ratio_value().unwrap();
             assert_eq!(
-                GifImage::raw_pixel_aspect_ratio_for(ratio),
+                GifFile::raw_pixel_aspect_ratio_for(ratio),
                 Some(raw),
                 "raw {raw} -> ratio {ratio} did not round-trip"
             );
@@ -3067,17 +3066,17 @@ mod tests {
     #[test]
     fn raw_pixel_aspect_ratio_out_of_range_is_none() {
         // 0.25 is the smallest; anything meaningfully smaller is gone.
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(0.2), None);
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(0.2), None);
         // ~4.22 is the largest; 5:1 is out of range.
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(5.0), None);
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(0.0), None);
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(-1.0), None);
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(f32::NAN), None);
-        assert_eq!(GifImage::raw_pixel_aspect_ratio_for(f32::INFINITY), None);
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(5.0), None);
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(0.0), None);
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(-1.0), None);
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(f32::NAN), None);
+        assert_eq!(GifFile::raw_pixel_aspect_ratio_for(f32::INFINITY), None);
     }
 
-    fn frame_with_delay(delay_centis: u16) -> Frame {
-        Frame {
+    fn frame_with_delay(delay_centis: u16) -> GifFrameData {
+        GifFrameData {
             graphic_control: Some(GraphicControl {
                 delay_centis,
                 ..GraphicControl::default()
@@ -3156,8 +3155,8 @@ mod tests {
         );
     }
 
-    fn frame_with_gce(gce: GraphicControl) -> Frame {
-        Frame {
+    fn frame_with_gce(gce: GraphicControl) -> GifFrameData {
+        GifFrameData {
             graphic_control: Some(gce),
             ..frame_with(None)
         }
@@ -4095,7 +4094,7 @@ mod tests {
         assert_eq!(collected, vec![Some(pal3()), Some(pal3_alt())]);
     }
 
-    /// The yielded `&Frame` reference points at the same frame
+    /// The yielded `&GifFrameData` reference points at the same frame
     /// `frames()` would yield — the new iterator is a strict extension
     /// of the existing one.
     #[test]
@@ -4107,8 +4106,8 @@ mod tests {
                 Block::Image(frame_with(None)),
             ],
         );
-        let lhs: Vec<*const Frame> = img.frames().map(|f| f as *const _).collect();
-        let rhs: Vec<*const Frame> = img
+        let lhs: Vec<*const GifFrameData> = img.frames().map(|f| f as *const _).collect();
+        let rhs: Vec<*const GifFrameData> = img
             .frames_with_palette()
             .map(|(f, _)| f as *const _)
             .collect();
@@ -4213,7 +4212,7 @@ mod tests {
         assert_eq!(collected[0].1.map(|g| g.delay_centis), Some(7));
     }
 
-    /// The yielded `&Frame` reference points at the same frame
+    /// The yielded `&GifFrameData` reference points at the same frame
     /// `frames()` would yield — the new iterator is a strict extension
     /// of the existing one, matching the `frames_with_palette`
     /// invariant.
@@ -4228,8 +4227,8 @@ mod tests {
         });
         let f2 = frame_with(Some(pal3_alt()));
         let img = base_image(Some(pal3()), vec![Block::Image(f1), Block::Image(f2)]);
-        let lhs: Vec<*const Frame> = img.frames().map(|f| f as *const _).collect();
-        let rhs: Vec<*const Frame> = img
+        let lhs: Vec<*const GifFrameData> = img.frames().map(|f| f as *const _).collect();
+        let rhs: Vec<*const GifFrameData> = img
             .frames_with_graphic_control()
             .map(|(f, _)| f as *const _)
             .collect();
@@ -4237,7 +4236,7 @@ mod tests {
     }
 
     /// The §23 GCE pairing must agree with the per-frame timing
-    /// surfaced by [`GifImage::frame_delays`] for §20 Image blocks. The
+    /// surfaced by [`GifFile::frame_delays`] for §20 Image blocks. The
     /// pairing carries the full GCE (not just the delay), but the
     /// `delay_centis` field is the source of truth for both accessors.
     #[test]
@@ -4288,7 +4287,7 @@ mod tests {
     /// `color_resolution_bits()` masks the raw field to its low 3
     /// bits, so a defensively-set high-bit value still yields a sane
     /// `1..=8` result. (The decoder already masks, but the accessor
-    /// is reachable from caller-built `GifImage`s too.)
+    /// is reachable from caller-built `GifFile`s too.)
     #[test]
     fn color_resolution_bits_masks_high_bits() {
         let mut img = base_image(Some(pal3()), vec![]);
@@ -4351,7 +4350,7 @@ mod tests {
     /// Build a §20 Frame whose §20.c.viii Sort Flag (`palette_sorted`)
     /// is set, with the supplied (optional) Local Color Table. Used by
     /// the §18.c.v / §20.c.viii Sort Flag accessor tests.
-    fn frame_with_sorted(local: Option<Vec<Rgb>>) -> Frame {
+    fn frame_with_sorted(local: Option<Vec<Rgb>>) -> GifFrameData {
         let mut f = frame_with(local);
         f.palette_sorted = true;
         f
@@ -4556,7 +4555,7 @@ mod tests {
     // ---- §20.c.vii Interlace Flag stream-level accessors ----
 
     /// Build a §20 Frame whose §20.c.vii Interlace Flag is set.
-    fn frame_with_interlaced(local: Option<Vec<Rgb>>) -> Frame {
+    fn frame_with_interlaced(local: Option<Vec<Rgb>>) -> GifFrameData {
         let mut f = frame_with(local);
         f.interlaced = true;
         f
@@ -4810,7 +4809,7 @@ mod tests {
             .collect()
     }
 
-    /// `Frame::local_color_table_size_field()` returns `None` when the
+    /// `GifFrameData::local_color_table_size_field()` returns `None` when the
     /// frame carries no Local Color Table (§20.c.vi flag clear, §20.c.ix
     /// undefined).
     #[test]
@@ -5196,7 +5195,7 @@ mod tests {
     /// A §20 Image at `(left, top)` with `width × height`, filled with
     /// index 0 so the indices buffer matches the declared rectangle.
     fn placed_frame(left: u16, top: u16, width: u16, height: u16) -> Block {
-        Block::Image(Frame {
+        Block::Image(GifFrameData {
             left,
             top,
             width,
@@ -5227,9 +5226,9 @@ mod tests {
         }
     }
 
-    /// A `GifImage` with an arbitrary §18 Logical Screen size.
-    fn screen_image(screen_width: u16, screen_height: u16, blocks: Vec<Block>) -> GifImage {
-        GifImage {
+    /// A `GifFile` with an arbitrary §18 Logical Screen size.
+    fn screen_image(screen_width: u16, screen_height: u16, blocks: Vec<Block>) -> GifFile {
+        GifFile {
             version: Version::Gif89a,
             screen_width,
             screen_height,
@@ -5636,7 +5635,7 @@ mod tests {
         assert!(!overflows.all_plain_texts_fit_grid());
     }
 
-    // ---- truecolor RGBA → GifImage constructors ----
+    // ---- truecolor RGBA → GifFile constructors ----
 
     #[test]
     fn palette_color_resolution_table() {
@@ -5659,7 +5658,7 @@ mod tests {
         for _ in 0..6 {
             rgba.extend_from_slice(&[200, 0, 200, 255]);
         }
-        let img = GifImage::from_rgba_frame(&rgba, 3, 2, 256).unwrap();
+        let img = GifFile::from_rgba_frame(&rgba, 3, 2, 256).unwrap();
         assert_eq!(img.version, Version::Gif87a);
         assert_eq!(img.screen_width, 3);
         assert_eq!(img.screen_height, 2);
@@ -5676,7 +5675,7 @@ mod tests {
     fn from_rgba_frame_transparent_attaches_gce_with_index() {
         // 2x1: one opaque red, one transparent.
         let rgba = vec![255, 0, 0, 255, 9, 9, 9, 0];
-        let img = GifImage::from_rgba_frame(&rgba, 2, 1, 256).unwrap();
+        let img = GifFile::from_rgba_frame(&rgba, 2, 1, 256).unwrap();
         assert_eq!(img.version, Version::Gif89a);
         let frame = img.frames().next().unwrap();
         let gce = frame.graphic_control.expect("transparency → GCE");
@@ -5691,8 +5690,8 @@ mod tests {
 
     #[test]
     fn from_rgba_frame_rejects_zero_dimensions() {
-        assert!(GifImage::from_rgba_frame(&[], 0, 1, 256).is_err());
-        assert!(GifImage::from_rgba_frame(&[], 1, 0, 256).is_err());
+        assert!(GifFile::from_rgba_frame(&[], 0, 1, 256).is_err());
+        assert!(GifFile::from_rgba_frame(&[], 1, 0, 256).is_err());
     }
 
     #[test]
@@ -5708,7 +5707,7 @@ mod tests {
                 }
             }
         }
-        let img = GifImage::from_rgba_frame(&rgba, 4, 4, 256).unwrap();
+        let img = GifFile::from_rgba_frame(&rgba, 4, 4, 256).unwrap();
         let bytes = crate::encode(&img).unwrap();
         let back = crate::decode(&bytes).unwrap();
         assert_eq!(back.screen_width, 4);
@@ -5737,7 +5736,7 @@ mod tests {
             (&red, 10, DisposalMethod::None),
             (&blue, 20, DisposalMethod::Keep),
         ];
-        let img = GifImage::from_rgba_frames(&frames, 2, 2, 256, Some(0)).unwrap();
+        let img = GifFile::from_rgba_frames(&frames, 2, 2, 256, Some(0)).unwrap();
         assert_eq!(img.version, Version::Gif89a);
         assert!(img.global_palette.is_none());
         assert_eq!(img.frame_count(), 2);
@@ -5757,17 +5756,17 @@ mod tests {
     #[test]
     fn from_rgba_frames_rejects_empty_and_zero_dims() {
         let empty: Vec<(&[u8], u16, DisposalMethod)> = vec![];
-        assert!(GifImage::from_rgba_frames(&empty, 2, 2, 256, None).is_err());
+        assert!(GifFile::from_rgba_frames(&empty, 2, 2, 256, None).is_err());
         let red: Vec<u8> = [255, 0, 0, 255].repeat(4);
         let frames: Vec<(&[u8], u16, DisposalMethod)> = vec![(&red, 0, DisposalMethod::None)];
-        assert!(GifImage::from_rgba_frames(&frames, 0, 2, 256, None).is_err());
+        assert!(GifFile::from_rgba_frames(&frames, 0, 2, 256, None).is_err());
     }
 
     #[test]
     fn from_rgba_frames_play_once_emits_no_netscape_block() {
         let red: Vec<u8> = [255, 0, 0, 255].repeat(4);
         let frames: Vec<(&[u8], u16, DisposalMethod)> = vec![(&red, 5, DisposalMethod::None)];
-        let img = GifImage::from_rgba_frames(&frames, 2, 2, 256, None).unwrap();
+        let img = GifFile::from_rgba_frames(&frames, 2, 2, 256, None).unwrap();
         // No NETSCAPE Application Extension when loop_count is None.
         assert!(img
             .blocks

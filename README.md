@@ -9,37 +9,37 @@ Pure-Rust decoder and encoder for the GIF87a and GIF89a image formats.
 Implements every block type defined by the CompuServe specifications:
 
 - Header (§17), Logical Screen Descriptor (§18), Trailer (§27).
-  `GifImage::pixel_aspect_ratio_value()` decodes the §18.c.viii Pixel
+  `GifFile::pixel_aspect_ratio_value()` decodes the §18.c.viii Pixel
   Aspect Ratio byte into the pixel width÷height ratio via
   `(raw + 15) / 64` (raw 0 → `None`, "no aspect ratio information"),
-  and `GifImage::raw_pixel_aspect_ratio_for(ratio)` is its exact
+  and `GifFile::raw_pixel_aspect_ratio_for(ratio)` is its exact
   inverse (`None` outside the spec's 1:4 .. ~4:1 representable span;
-  square pixels = raw 49). `GifImage::background_color()` resolves
+  square pixels = raw 49). `GifFile::background_color()` resolves
   the §18.c.vii Background Color Index against the §18.c.ii Global
   Color Table (`None` when the GCT flag was zero, when no palette is
   attached, or when the index is past the end of the GCT — the
   conservative reading of §18.c.vii's "should be ignored" clause);
-  `GifImage::background_color_rgba()` is the alpha-extended form used
+  `GifFile::background_color_rgba()` is the alpha-extended form used
   by the §23 dispose-to-background canvas clear in `compose` /
-  `Playback`. `GifImage::color_resolution_bits()` decodes the §18.c.iv
+  `Playback`. `GifFile::color_resolution_bits()` decodes the §18.c.iv
   Color Resolution byte into the bits-per-primary-colour of the *source*
   palette (raw + 1, range `1..=8`); `original_palette_color_count()` is
   the derived `2^(3 × bits)` colour count (`8..=16_777_216`), letting a
   renderer pick a display mode against the source's richness rather
-  than the per-frame palette truncation. `GifImage::frame_count()`
+  than the per-frame palette truncation. `GifFile::frame_count()`
   counts §20 Image blocks (no Plain Text, no Comment, no Application)
   for callers that need a single-number "how many images" without
   walking the iterator themselves.
 - Global / Local Color Tables (§19, §21).
-  `GifImage::frames_with_palette()` yields each §20 image-bearing
+  `GifFile::frames_with_palette()` yields each §20 image-bearing
   block paired with the colour table the decoder should render it
   against — Local Color Table when present (§21.a: "this color
   table temporarily becomes the active color table"), Global
   Color Table when the LCT flag is clear, `None` when neither
   table is attached (§13 / §21 fallback). The yielded palette
-  slice borrows from the `GifImage` so frame-walking consumers do
+  slice borrows from the `GifFile` so frame-walking consumers do
   not need to clone the palette or hand-roll the precedence
-  lookup. `GifImage::frames_with_graphic_control()` is the
+  lookup. `GifFile::frames_with_graphic_control()` is the
   §23-side companion: each §20 Image block paired with its
   attached §23 Graphic Control Extension (`None` when no GCE
   preceded it per §23.a "at most one Graphic Control Extension
@@ -50,28 +50,28 @@ Implements every block type defined by the CompuServe specifications:
   queries surface the spec's "ordered by decreasing importance"
   guarantee that palette-display-constrained renderers can use
   for initial-segment truncation:
-  `GifImage::has_sorted_global_palette()` is the GCT-level query
+  `GifFile::has_sorted_global_palette()` is the GCT-level query
   (`true` only when a §18 GCT is present *and* its §18.c.v Sort
-  Flag is set); `GifImage::frames_with_sorted_palette()` extends
+  Flag is set); `GifFile::frames_with_sorted_palette()` extends
   `frames_with_palette` with the active-table Sort Flag bit (LCT
   Sort Flag when an LCT applies per §21.a, GCT Sort Flag
   otherwise, `false` when neither table is attached);
-  `GifImage::all_frames_palettes_sorted()` reports whether the
+  `GifFile::all_frames_palettes_sorted()` reports whether the
   whole stream's active palettes are sorted in one query so a
   pipeline can gate initial-segment truncation without walking
   per-frame.
 - Image Descriptor + Table-Based Image Data (§20, §22). §20.c.vii
   Interlace Flag stream-level roll-up:
-  `GifImage::interlaced_frame_count()` counts §20 Image blocks whose
+  `GifFile::interlaced_frame_count()` counts §20 Image blocks whose
   Interlace Flag is set, `has_interlaced_frames()` is `true` as soon
   as one image carries it, and `all_frames_interlaced()` is the
   every-frame query (vacuously `true` for zero-frame streams, matching
   `all_frames_palettes_sorted()`'s shape). Lets a progressive-display
   renderer gate on a single query rather than walking every
-  `Frame::interlaced`; the decoded raster is always presented
+  `GifFrameData::interlaced`; the decoded raster is always presented
   de-interlaced regardless, so this only affects the policy decision
   on whether to enable an Appendix-E-aware progressive path. On the
-  *encode* side, `GifImage::set_frames_interlaced(bool)` stamps the
+  *encode* side, `GifFile::set_frames_interlaced(bool)` stamps the
   §20.c.vii Interlace Flag onto every §20 Image in one call (returning
   the count it changed; idempotent, non-image blocks skipped) so a
   stream produced by any construction path — the `from_rgba_*`
@@ -80,17 +80,17 @@ Implements every block type defined by the CompuServe specifications:
   flagged frame's rows into Appendix E four-pass order at serialisation
   while the composed RGBA output stays byte-identical (interlacing is a
   storage-order choice, not a pixel change).
-  `GifImage::frames_mut()` is the underlying mutable §20-Image iterator
+  `GifFile::frames_mut()` is the underlying mutable §20-Image iterator
   (the mutable companion to `frames()`) for other post-construction
   frame edits. §20.c.ix
   Size of Local Color Table surface:
-  `Frame::local_color_table_size_field()` returns the 3-bit encoded
+  `GifFrameData::local_color_table_size_field()` returns the 3-bit encoded
   field value (`0..=7`, smallest `N` such that `2^(N+1)` is ≥ the LCT
   entry count) per attached LCT, or `None` when §20.c.vi is clear (and
-  the field is undefined); `Frame::local_color_table_entry_count()` is
+  the field is undefined); `GifFrameData::local_color_table_entry_count()` is
   the `2^(N+1)` on-disk entry-count companion (range `2..=256`).
   Stream-level rollups:
-  `GifImage::frames_with_local_color_table_size()` and
+  `GifFile::frames_with_local_color_table_size()` and
   `frames_with_local_color_table_entry_count()` pair every §20 Image
   with its §20.c.ix field / on-disk entry count in source order;
   `max_local_color_table_size_field()` is the largest §20.c.ix across
@@ -98,7 +98,7 @@ Implements every block type defined by the CompuServe specifications:
   LCT), so a decoder allocating a reusable scratch LCT buffer can size
   it once up front rather than re-allocating per-frame. §20.a / §25.a
   "must fit within the boundaries of the Logical Screen" validation:
-  `GifImage::all_blocks_fit_screen()` reports whether every §20 Image
+  `GifFile::all_blocks_fit_screen()` reports whether every §20 Image
   and §25 Plain Text grid's placement rectangle stays inside the §18
   Logical Screen (right edge `left + width` ≤ Logical Screen Width and
   bottom edge `top + height` ≤ Logical Screen Height; edge sums widen
@@ -119,19 +119,19 @@ Implements every block type defined by the CompuServe specifications:
   (Header / §18 LSD / §23 GCE / §27 Trailer are structural fields or
   attached, never free-standing `Block`s). `Block::is_graphic_rendering()`
   / `is_special_purpose()` are the boolean forms;
-  `GifImage::graphic_rendering_block_count()` (§20 + §25, unlike
+  `GifFile::graphic_rendering_block_count()` (§20 + §25, unlike
   `frame_count()`'s §20-only count) and `special_purpose_block_count()`
   (§24 + §26) are the stream-level rollups — every block partitions into
   exactly one of the two, since no §12 Control block is ever a list
   entry. §11 "About Color Tables" palette-loader recognition:
-  `GifImage::is_palette_loader_stream()` is `true` for the §11
+  `GifFile::is_palette_loader_stream()` is `true` for the §11
   table-install shape (a §18 Global Color Table present with **no**
   graphic-rendering block — §12-transparent Comment / Application blocks
   do not disqualify it), the "Header, Logical Screen Descriptor, a
   Global Color Table and the GIF Trailer" stream §11 describes for
   loading a decoder with a palette ahead of subsequent tableless Data
   Streams. The strict `decode` entry point rejects an image-less stream,
-  so this arises from `decode_lenient` or a freshly-built `GifImage`.
+  so this arises from `decode_lenient` or a freshly-built `GifFile`.
 - Variable-Length-Code LZW compression (Appendix F). The codec pair
   ships in two flavours: the stateless `lzw::encode` / `lzw::decode`
   free functions for one-shot calls, and `lzw::LzwEncoder` which
@@ -161,7 +161,7 @@ Implements every block type defined by the CompuServe specifications:
 - Four-pass interlace transform (Appendix E)
 - Graphic Control Extension (§23) — disposal method, user-input flag,
   transparent index, delay time. §23.c.iv Disposal Method stream-level
-  roll-up: `GifImage::frame_disposals()` yields the GCE Disposal Method
+  roll-up: `GifFile::frame_disposals()` yields the GCE Disposal Method
   per graphic-rendering block in source order (no GCE attached →
   `DisposalMethod::None` per §23.c.iv value `0` "No disposal specified"),
   `uses_disposal(method)` / `all_frames_use_disposal(method)` are the
@@ -170,7 +170,7 @@ Implements every block type defined by the CompuServe specifications:
   `requires_canvas_snapshot()` reports whether any block selects
   `RestorePrevious` so a renderer can skip pre-allocating the §23.e.i
   snapshot buffer for streams that never use it.
-- Comment Extension (§24), with `GifImage::comments()` iterator and
+- Comment Extension (§24), with `GifFile::comments()` iterator and
   `concatenated_comment()` helper for the common "give me every comment
   in one buffer" path. `comments_are_7bit_ascii()` and
   `comments_in_recommended_position()` surface the §24.e.i / §24.e.ii
@@ -190,13 +190,13 @@ Implements every block type defined by the CompuServe specifications:
   pixel whose Global-Color-Table *index* matches the transparency
   index leaves the display-device pixel unmodified (the prior canvas
   shows through) in both `compose()` and the lazy `Playback`
-  iterator. `GifImage::plain_texts()` is the stream-level
+  iterator. `GifFile::plain_texts()` is the stream-level
   typed iterator: each §25 block paired with its attached §23 Graphic
   Control Extension (`(&PlainText, Option<GraphicControl>)`) in source
   order — the §25 companion to `frames_with_graphic_control()` so
   callers walking "every Plain Text block and the GCE that controls
   it" don't need to re-derive the §23 → §25 attachment from
-  `GifImage::blocks`. `plain_texts_are_printable()` reports whether
+  `GifFile::blocks`. `plain_texts_are_printable()` reports whether
   every payload byte sits in §25.e's recommended `0x20..=0xF7` range
   (anything outside would be substituted with a Space by a §25.e
   conforming renderer); `plain_texts_grid_fits_cells()` reports
@@ -212,7 +212,7 @@ Implements every block type defined by the CompuServe specifications:
   `min(text.len(), grid_cell_count())` is the §25.a "rendered until the
   end of data is reached or the character grid is filled" draw count.
   `text_overflows_grid()` and `has_empty_cells()` name the over- and
-  under-fill edges, and `GifImage::all_plain_texts_fit_grid()` rolls the
+  under-fill edges, and `GifFile::all_plain_texts_fit_grid()` rolls the
   overflow query up to the stream so a re-encoding pipeline can confirm
   no Plain Text data is silently dropped before round-tripping.
 - Application Extension (§26), with namespace classification.
@@ -222,7 +222,7 @@ Implements every block type defined by the CompuServe specifications:
   / EXIF) or `Unknown`, following each typed view's matching rule
   (auth-code-sensitive for all but EXIF, which matches identifier-only).
   `Application::kind()` / `is_recognized()` are the per-block shorthands;
-  `GifImage::application_kinds()` pairs every §26 block with its
+  `GifFile::application_kinds()` pairs every §26 block with its
   classification in source order, `unrecognized_application_extensions()`
   filters to the vendor-private blocks a re-encoding pipeline must
   preserve verbatim, and `find_application(identifier, auth_code)` is the
@@ -252,7 +252,7 @@ Implements every block type defined by the CompuServe specifications:
   `docs/image/gif/netscape2.0-loop-extension.md`. Each yielded
   `PlaybackFrame` carries its delay as a `Duration` for ergonomic
   `thread::sleep` calls.
-- Animation-timing accessors on `GifImage`. `frame_delays()` iterates
+- Animation-timing accessors on `GifFile`. `frame_delays()` iterates
   every graphic-rendering block's §23.c.vii Delay Time as a `Duration`
   (§20 Images and §25 Plain Text both count; no GCE or a 0 delay →
   `Duration::ZERO`), `is_animated()` is true only for multi-frame
@@ -311,10 +311,10 @@ Implements every block type defined by the CompuServe specifications:
   `interlaced(bool)` stamps the §20.c.vii Interlace Flag onto frames
   added after the call (captured per frame, so toggling between adds
   mixes interlaced and progressive frames — the fluent counterpart to
-  `GifImage::set_frames_interlaced`, default progressive).
+  `GifFile::set_frames_interlaced`, default progressive).
   `build()` validates placement (rectangles must fit the Logical
   Screen), index counts, palette-index range, and the §19 1..=256
-  palette-size limit, returning a `Gif89a` `GifImage` ready for
+  palette-size limit, returning a `Gif89a` `GifFile` ready for
   `encode`; the result's timeline accessors read back exactly what was
   set and a build → encode → decode round-trip is value-stable.
 - Structured views over the five ecosystem-defined Application
@@ -323,11 +323,11 @@ Implements every block type defined by the CompuServe specifications:
   *Looping* sub-block layout under a different identifier+auth, used
   by some pre-Netscape encoders), the Adobe XMP packet (`XMP Data`),
   the ICC colour profile (`ICCRGBG1`), and the EXIF metadata blob
-  (`Exif    `, Exif 2.3 §4.7.2). `GifImage::loop_count()` /
+  (`Exif    `, Exif 2.3 §4.7.2). `GifFile::loop_count()` /
   `xmp_packet()` / `icc_profile()` / `exif()` are convenience
   accessors over the same raw `Block::Application` data, which stays
-  in `GifImage::blocks` for byte-stable round-trip;
-  `GifImage::loop_count()` prefers NETSCAPE2.0 and falls back to
+  in `GifFile::blocks` for byte-stable round-trip;
+  `GifFile::loop_count()` prefers NETSCAPE2.0 and falls back to
   ANIMEXTS1.0 when NETSCAPE2.0 is absent. Because the decoder collapses
   the §15 sub-block boundaries into one flat `Application::data` buffer,
   `LoopControl::from_application` / `AnimextsLoopControl::from_application`
@@ -340,13 +340,13 @@ Implements every block type defined by the CompuServe specifications:
   occurrence, keeping the typed view stable and `to_application`
   round-trips byte-identical.
 - Encoder Global vs Local Color Table optimisation
-  (`GifImage::optimize_color_tables`) — when every image frame
+  (`GifFile::optimize_color_tables`) — when every image frame
   carries the same palette, hoists it into the §18 Global Color
   Table and clears the now-redundant §21 Local Color Tables, saving
   `3 × 2^(size_bits + 1)` bytes per frame. Pixels are unaffected
   (§21 says a frame with the LCT flag clear uses the §18 GCT).
 - Encoder inter-frame rect optimisation
-  (`GifImage::optimize_frame_rects`) — the §20-placement companion to
+  (`GifFile::optimize_frame_rects`) — the §20-placement companion to
   `optimize_color_tables`. Re-runs the §23 disposal-method state
   machine and crops every §20 Image frame to the bounding rectangle of
   the pixels it actually changes on the composed logical screen
@@ -366,7 +366,7 @@ Implements every block type defined by the CompuServe specifications:
   `decode` fuzz harness asserts `compose(before) == compose(after)` on
   every decodable fuzz input.
 - Truecolor RGBA → GIF encode path (`quantize` module +
-  `GifImage::from_rgba_frame` / `from_rgba_frames`). A GIF cannot carry
+  `GifFile::from_rgba_frame` / `from_rgba_frames`). A GIF cannot carry
   truecolor — §19/§21 cap a colour table at 256 entries and §22 stores
   one palette index per pixel — so an encoder fed arbitrary 24-bit RGB
   has to pick a representative palette and map every pixel to it. The
@@ -431,7 +431,7 @@ Implements every block type defined by the CompuServe specifications:
   byte-stable (Lloyd converges immediately) and lowers total error by
   5–12 % at a 16-colour budget on structured inputs. The default stays `0`,
   opt in with `.palette_refine_iterations(8)`.
-  `GifImage::from_rgba_frame` wraps a single frame into a §18 Logical
+  `GifFile::from_rgba_frame` wraps a single frame into a §18 Logical
   Screen with a §19 Global Color Table (attaching a §23 GCE carrying the
   reserved transparency index when the frame has transparent pixels,
   staying GIF87a when fully opaque); `from_rgba_frames` builds a
@@ -472,12 +472,12 @@ Implements every block type defined by the CompuServe specifications:
   the per-block "Required Version" table — §23 Graphic Control,
   §24 Comment, §25 Plain Text, and §26 Application Extensions all
   require 89a — and refuses to emit a `GIF87a`-labeled stream that
-  contains any of them. `GifImage::required_version()` returns the
+  contains any of them. `GifFile::required_version()` returns the
   minimum version that covers the block list, and
   `upgrade_version_if_needed()` bumps the declared version to that
   minimum in one call (it never *down*grades — a caller's explicit
   choice of `Gif89a` for a 87a-compatible payload is preserved).
-- Non-fatal conformance reporting. `GifImage::conformance_report()`
+- Non-fatal conformance reporting. `GifFile::conformance_report()`
   walks an in-memory image against the Appendix-B grammar and the
   §7–§26 field rules and returns a `ConformanceReport` — the diagnostic
   counterpart to `encode`'s fatal validation, and a *superset* of it.
@@ -496,7 +496,7 @@ Implements every block type defined by the CompuServe specifications:
   a Logical-Screen-Descriptor / Global-Color-Table stream-level issue),
   and a spec-cited `detail`; `ConformanceReport` exposes `is_clean()` /
   `has_errors()` / `errors()` / `recommendations()` / `count(severity)`
-  and a one-issue-per-line `Display`. `GifImage::validate_strict()` is
+  and a one-issue-per-line `Display`. `GifFile::validate_strict()` is
   the hard-gate convenience: `Ok(())` when no error-level issue is found
   (recommendations tolerated), else an `Error::InvalidInput` listing
   every error. Because the report is a superset of the encoder's checks,
@@ -512,19 +512,19 @@ panic-freedom on arbitrary bytes:
 - `decode_lenient_panic_free` — error-recovery `decode_lenient` entry
   point (different resync state machine).
 - `roundtrip` — decoder output round-trips through encoder + decoder
-  with `assert_eq!` on the resulting `GifImage`.
+  with `assert_eq!` on the resulting `GifFile`.
 - `decode` — end-to-end decode-side harness: chains `decode_lenient` +
   `decode_first_frame` + `decode` + `compose` + `Playback::frames` +
   `Playback::looping_frames` + the §26 Application Extension typed
   parsers + the §24 Comment Extension accessors + the §18.c.viii Pixel
   Aspect Ratio decoder + the §7 Required Version inference + an
-  encode-then-re-decode through every fuzz-derived `GifImage`. Also
+  encode-then-re-decode through every fuzz-derived `GifFile`. Also
   asserts (not just panic-freedom) that `optimize_frame_rects`
   preserves the composed output exactly on every decodable input —
   a `compose(before) != compose(after)` mismatch fails the run. Caps the
   composited canvas at 1 Mpx and the looping iterator at 64 frames so a
   `loop_count = Some(0)` (forever) stream doesn't pin the fuzzer.
-- `encode` — end-to-end encode-side harness: derives a `GifImage` from
+- `encode` — end-to-end encode-side harness: derives a `GifFile` from
   fuzz bytes via `AnimationBuilder` (rect placement, palette size,
   per-frame disposal, NETSCAPE2.0 / loop-forever behaviour), then
   drives `encode` → `decode` → `decode_lenient` → `decode_first_frame`
@@ -552,7 +552,7 @@ panic-freedom on arbitrary bytes:
   decoder-side harnesses can only emit a `Block::PlainText` when the
   fuzzer stumbles onto the `0x21 0x01 0x0C` extension-introducer
   prefix — so the §25 grammar is effectively unreached on truly
-  arbitrary input. This harness builds a `GifImage` whose `blocks`
+  arbitrary input. This harness builds a `GifFile` whose `blocks`
   are exclusively Plain Text Extensions (each optionally carrying a
   §23 GCE), then drives `encode` → `decode` (strict + lenient +
   cover-frame) → `compose` → `Playback`. Covers the §25.c.viii/ix

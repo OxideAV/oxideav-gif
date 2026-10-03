@@ -1,10 +1,10 @@
 //! Pure-Rust GIF87a / GIF89a codec.
 //!
-//! Decode a byte stream with [`decode`] and produce a [`GifImage`].
+//! Decode a byte stream with [`decode`] and produce a [`GifFile`].
 //! Use [`decode_first_frame`] when you only need the cover frame —
 //! it short-circuits at the first image-bearing block and skips the
 //! per-block dispatch overhead for everything that follows.
-//! Construct or modify a [`GifImage`] and serialise it with [`encode`].
+//! Construct or modify a [`GifFile`] and serialise it with [`encode`].
 //!
 //! ## Implemented (per CompuServe specifications)
 //!
@@ -32,24 +32,24 @@
 //! shapes that achieved cross-decoder de-facto interoperability:
 //!
 //! * NETSCAPE2.0 looping + buffering sub-blocks
-//!   ([`app_ext::LoopControl`]) — see also [`GifImage::loop_count`]
-//!   and [`GifImage::netscape_buffer_hint`].
+//!   ([`app_ext::LoopControl`]) — see also [`GifFile::loop_count`]
+//!   and [`GifFile::netscape_buffer_hint`].
 //! * ANIMEXTS1.0 looping ([`app_ext::AnimextsLoopControl`]) — older
 //!   Aldus-era variant that predates NETSCAPE2.0 and reuses the same
 //!   *Looping* sub-block layout under a different identifier+auth.
-//!   [`GifImage::loop_count`] falls back to it when NETSCAPE2.0 is
+//!   [`GifFile::loop_count`] falls back to it when NETSCAPE2.0 is
 //!   absent.
 //! * XMP packet ([`app_ext::XmpPacket`]) — see also
-//!   [`GifImage::xmp_packet`].
+//!   [`GifFile::xmp_packet`].
 //! * ICC colour profile ([`app_ext::IccProfile`]) — see also
-//!   [`GifImage::icc_profile`].
+//!   [`GifFile::icc_profile`].
 //! * EXIF metadata ([`app_ext::ExifMetadata`]) — see also
-//!   [`GifImage::exif`]. Carries a TIFF EXIF blob per Exif 2.3
+//!   [`GifFile::exif`]. Carries a TIFF EXIF blob per Exif 2.3
 //!   §4.7.2; the spec defines this for JPEG/TIFF and the GIF binding
 //!   is an ecosystem convention.
 //!
 //! These accessors layer on top of the raw block list — the
-//! [`Application`] block stays in [`GifImage::blocks`] regardless,
+//! [`Application`] block stays in [`GifFile::blocks`] regardless,
 //! preserving byte-stable round-trip.
 //!
 //! ## §7 Required Version enforcement on encode
@@ -61,15 +61,15 @@
 //! 89a for §23 Graphic Control / §24 Comment / §25 Plain Text / §26
 //! Application Extensions.
 //!
-//! [`encode`] enforces this on the encoder side: a [`GifImage`] declared
+//! [`encode`] enforces this on the encoder side: a [`GifFile`] declared
 //! [`Version::Gif87a`] that contains any 89a-only block is rejected with
 //! [`Error::InvalidInput`] before any bytes go to the wire — the
 //! alternative ("a `GIF87a` header followed by 89a-only block payloads")
 //! would be structurally invalid.
 //!
-//! Two recovery helpers ride on top: [`GifImage::required_version`]
+//! Two recovery helpers ride on top: [`GifFile::required_version`]
 //! returns the minimum version that covers the current block list, and
-//! [`GifImage::upgrade_version_if_needed`] bumps the declared version up
+//! [`GifFile::upgrade_version_if_needed`] bumps the declared version up
 //! to that minimum in one call. The upgrade helper never *down*grades:
 //! a caller's explicit choice of [`Version::Gif89a`] for an
 //! 87a-compatible payload is preserved.
@@ -79,11 +79,11 @@
 //! The CompuServe spec (§24.a) allows any number of Comment
 //! Extensions in the Data Stream and recommends (§24.e.i) that they
 //! contain 7-bit ASCII text and (§24.e.ii) that they appear at the
-//! beginning or end of the stream. [`GifImage::comments`] iterates the
-//! payloads in source order; [`GifImage::concatenated_comment`]
+//! beginning or end of the stream. [`GifFile::comments`] iterates the
+//! payloads in source order; [`GifFile::concatenated_comment`]
 //! returns every payload joined with a single LF (or `None` when no
-//! Comment Extension is present). [`GifImage::comments_are_7bit_ascii`]
-//! and [`GifImage::comments_in_recommended_position`] surface the
+//! Comment Extension is present). [`GifFile::comments_are_7bit_ascii`]
+//! and [`GifFile::comments_in_recommended_position`] surface the
 //! §24.e *recommendations* as boolean queries so a caller that wants
 //! to honour them strictly can gate on them; the encoder itself never
 //! enforces a recommendation.
@@ -103,7 +103,7 @@
 //!
 //! [`encode`] fatally rejects the small set of departures that make a
 //! stream un-encodable (§7 version mismatch, §19/§21 colour-table size,
-//! §20/§22 indices length). [`GifImage::conformance_report`] is the
+//! §20/§22 indices length). [`GifFile::conformance_report`] is the
 //! complementary *non-fatal* diagnostic surface: it walks an in-memory
 //! image against the Appendix-B grammar and the §7–§26 field rules and
 //! returns a [`ConformanceReport`] of every departure — a *superset* of
@@ -115,7 +115,7 @@
 //! carries a [`ConformanceRule`], a [`ConformanceSeverity`]
 //! (`Error` for requirements, `Recommendation` for recommendations), an
 //! offending `block_index`, and a spec-cited `detail`.
-//! [`GifImage::validate_strict`] is the hard-gate convenience that turns
+//! [`GifFile::validate_strict`] is the hard-gate convenience that turns
 //! the error-level issues into a single [`Error::InvalidInput`] while
 //! tolerating recommendations.
 //!
@@ -126,7 +126,7 @@
 //! plus a [`registry::register`] entry point against `oxideav-core`.
 //! With the feature off the crate ships only the standalone
 //! [`decode`] / [`encode`] / [`compose`] API plus the local
-//! [`GifImage`] / [`Error`] types, with no `oxideav-core` dep in the
+//! [`GifFile`] / [`Error`] types, with no `oxideav-core` dep in the
 //! tree. Image-library consumers should depend on `oxideav-gif` with
 //! `default-features = false`.
 
@@ -152,9 +152,9 @@ pub use compose::{compose, compose_frame_at_global, ComposedFrame, RgbaCanvas, S
 pub use conformance::{ConformanceIssue, ConformanceReport, ConformanceRule, ConformanceSeverity};
 pub use decoder::{decode, decode_first_frame, decode_lenient};
 pub use encoder::{encode, encode_with_options, EncodeOptions, LzwStrategy};
-pub use error::{Error, Result};
+pub use error::{Error, GifError, Result};
 pub use image::{
-    Application, Block, BlockClass, DisposalMethod, Frame, FramePresentation, GifImage,
+    Application, Block, BlockClass, DisposalMethod, FramePresentation, GifFile, GifFrameData,
     GraphicControl, PlainText, Rgb, Version,
 };
 pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};

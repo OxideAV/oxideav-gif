@@ -8,14 +8,14 @@ use core::time::Duration;
 
 use oxideav_gif::app_ext::LoopControl;
 use oxideav_gif::{
-    compose, decode, encode, Block, DisposalMethod, Frame, GifImage, GraphicControl, Playback, Rgb,
-    Version,
+    compose, decode, encode, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
+    Playback, Rgb, Version,
 };
 
 /// Build a 4×4 image with one global palette of 4 colours and the
 /// caller's blocks.
-fn base_image(blocks: Vec<Block>) -> GifImage {
-    GifImage {
+fn base_image(blocks: Vec<Block>) -> GifFile {
+    GifFile {
         version: Version::Gif89a,
         screen_width: 4,
         screen_height: 4,
@@ -33,8 +33,8 @@ fn base_image(blocks: Vec<Block>) -> GifImage {
     }
 }
 
-fn small_frame(left: u16, top: u16, fill: u8, gce: Option<GraphicControl>) -> Frame {
-    Frame {
+fn small_frame(left: u16, top: u16, fill: u8, gce: Option<GraphicControl>) -> GifFrameData {
+    GifFrameData {
         left,
         top,
         width: 2,

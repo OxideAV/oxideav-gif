@@ -4,19 +4,19 @@
 //! Each test builds a typed [`LoopControl`] / [`XmpPacket`] /
 //! [`IccProfile`], wraps it in a multi-frame GIF89a, encodes the
 //! whole stream, decodes it, and asserts both the structured
-//! accessors ([`GifImage::loop_count`] etc.) and the raw
+//! accessors ([`GifFile::loop_count`] etc.) and the raw
 //! [`Block::Application`] payload survive unchanged.
 
 use oxideav_gif::app_ext::{
     ExifMetadata, IccProfile, LoopControl, XmpPacket, EXIF_AUTH_CODE_DEFAULT, EXIF_IDENTIFIER,
 };
-use oxideav_gif::{decode, encode, Block, Frame, GifImage, Rgb, Version};
+use oxideav_gif::{decode, encode, Block, GifFile, GifFrameData, Rgb, Version};
 
-fn three_frame_gif(extra: Vec<Block>) -> GifImage {
+fn three_frame_gif(extra: Vec<Block>) -> GifFile {
     // Smallest legal palette per §18.c.vi (size field = 0 → 2 entries).
     let palette = vec![Rgb::new(0, 0, 0), Rgb::new(0xFF, 0xFF, 0xFF)];
 
-    let make_frame = |fill: u8| Frame {
+    let make_frame = |fill: u8| GifFrameData {
         left: 0,
         top: 0,
         width: 2,
@@ -35,7 +35,7 @@ fn three_frame_gif(extra: Vec<Block>) -> GifImage {
     blocks.push(Block::Image(make_frame(1)));
     blocks.push(Block::Image(make_frame(0)));
 
-    GifImage {
+    GifFile {
         version: Version::Gif89a,
         screen_width: 2,
         screen_height: 2,

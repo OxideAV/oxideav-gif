@@ -1,7 +1,7 @@
-//! High-level assembly of an animated [`GifImage`].
+//! High-level assembly of an animated [`GifFile`].
 //!
 //! The codec's [`crate::encoder`] serialises a fully-built
-//! [`GifImage`], but assembling a *valid animated* one by hand is
+//! [`GifFile`], but assembling a *valid animated* one by hand is
 //! fiddly: every frame needs a §23 Graphic Control Extension carrying
 //! its Delay Time and Disposal Method, the looping behaviour rides on
 //! the ecosystem NETSCAPE2.0 Application Extension (§26) rather than on
@@ -11,9 +11,9 @@
 //!
 //! [`AnimationBuilder`] folds those pieces into one fluent API. It is
 //! the encode-side counterpart to the timeline accessors on
-//! [`GifImage`] ([`GifImage::frame_delays`],
-//! [`GifImage::single_pass_duration`],
-//! [`GifImage::total_play_duration`]): what you set here is exactly what
+//! [`GifFile`] ([`GifFile::frame_delays`],
+//! [`GifFile::single_pass_duration`],
+//! [`GifFile::total_play_duration`]): what you set here is exactly what
 //! those readers report back after a decode round-trip.
 //!
 //! # Spec references
@@ -53,7 +53,7 @@
 
 use crate::app_ext::LoopControl;
 use crate::error::{Error, Result};
-use crate::image::{Block, DisposalMethod, Frame, GifImage, GraphicControl, Rgb, Version};
+use crate::image::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
 
 /// How a freshly-built animation should loop, mapped to the de-facto
 /// NETSCAPE2.0 *Looping* sub-block convention documented in
@@ -72,20 +72,20 @@ enum LoopBehaviour {
     Repeat(u16),
 }
 
-/// Fluent assembler for an animated [`GifImage`].
+/// Fluent assembler for an animated [`GifFile`].
 ///
 /// Construct with [`AnimationBuilder::new`], push frames with
 /// [`add_full_frame`](Self::add_full_frame) (a frame that fills the
 /// whole logical screen) or [`add_placed_frame`](Self::add_placed_frame)
 /// (a sub-rectangle), optionally pick the looping behaviour, then
-/// [`build`](Self::build) to get a validated [`GifImage`] ready for
+/// [`build`](Self::build) to get a validated [`GifFile`] ready for
 /// [`crate::encode`].
 ///
 /// Every frame is stored against the single Global Color Table supplied
 /// at construction (§18 / §21: a frame with the Local Color Table flag
 /// clear uses the GCT), so the builder never emits per-frame Local Color
 /// Tables. Callers that need per-frame palettes can construct
-/// [`GifImage`] directly.
+/// [`GifFile`] directly.
 #[derive(Debug, Clone)]
 pub struct AnimationBuilder {
     screen_width: u16,
@@ -98,7 +98,7 @@ pub struct AnimationBuilder {
     /// frame at add time so a caller can mix interlaced and progressive
     /// frames in one stream (§20.c.vii is a per-frame flag).
     interlace: bool,
-    frames: Vec<Frame>,
+    frames: Vec<GifFrameData>,
 }
 
 impl AnimationBuilder {
@@ -133,7 +133,7 @@ impl AnimationBuilder {
     /// [`add_placed_frame`](Self::add_placed_frame) calls produces a
     /// stream that mixes interlaced and progressive frames — §20.c.vii is
     /// a per-frame flag. Defaults to `false` (progressive). This is the
-    /// fluent counterpart to [`crate::GifImage::set_frames_interlaced`],
+    /// fluent counterpart to [`crate::GifFile::set_frames_interlaced`],
     /// which stamps a whole already-built stream at once.
     pub fn interlaced(mut self, on: bool) -> Self {
         self.interlace = on;
@@ -148,8 +148,8 @@ impl AnimationBuilder {
     }
 
     /// Loop forever: emit a NETSCAPE2.0 *Looping* sub-block with count
-    /// `0`. [`GifImage::loop_count`] reports `Some(0)` and
-    /// [`GifImage::total_play_duration`] reports `None` (never
+    /// `0`. [`GifFile::loop_count`] reports `Some(0)` and
+    /// [`GifFile::total_play_duration`] reports `None` (never
     /// terminates) for the result.
     pub fn loop_forever(mut self) -> Self {
         self.loop_behaviour = LoopBehaviour::Forever;
@@ -214,7 +214,7 @@ impl AnimationBuilder {
         disposal: DisposalMethod,
     ) -> Result<Self> {
         self.validate_frame(left, top, width, height, &indices)?;
-        self.frames.push(Frame {
+        self.frames.push(GifFrameData {
             left,
             top,
             width,
@@ -275,7 +275,7 @@ impl AnimationBuilder {
     }
 
     /// Finalise the builder into a validated, animation-ready
-    /// [`GifImage`].
+    /// [`GifFile`].
     ///
     /// The result is always [`Version::Gif89a`] (every frame carries a
     /// §23 GCE, which requires 89a per §7). When the loop behaviour is
@@ -289,7 +289,7 @@ impl AnimationBuilder {
     ///   a frameless "animation" is almost certainly a caller bug).
     /// * `InvalidInput` when the palette is empty or larger than 256
     ///   entries (§19 colour-table size limits).
-    pub fn build(self) -> Result<GifImage> {
+    pub fn build(self) -> Result<GifFile> {
         if self.frames.is_empty() {
             return Err(Error::InvalidInput(
                 "animation has no frames; add at least one before build()".into(),
@@ -338,7 +338,7 @@ impl AnimationBuilder {
             blocks.push(Block::Image(frame));
         }
 
-        Ok(GifImage {
+        Ok(GifFile {
             // §7 — every frame carries a §23 GCE, so the minimum
             // covering version is 89a.
             version: Version::Gif89a,

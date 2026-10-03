@@ -6,7 +6,7 @@
 //! pixels the `compose` / `Playback` state machine produces.
 //!
 //! These exercise the real container + LZW bytes (not just an in-memory
-//! `GifImage`), so a regression in encode, decode, or the seek maths is
+//! `GifFile`), so a regression in encode, decode, or the seek maths is
 //! caught at the boundary a player actually sees.
 
 use core::time::Duration;
@@ -28,7 +28,7 @@ fn palette() -> Vec<Rgb> {
 
 /// Build → encode → decode a three-frame 2×2 looping animation with
 /// distinct per-frame delays.
-fn roundtrip_three_frame(loop_count: Option<u16>) -> oxideav_gif::GifImage {
+fn roundtrip_three_frame(loop_count: Option<u16>) -> oxideav_gif::GifFile {
     let mut b = AnimationBuilder::new(2, 2, palette());
     b = match loop_count {
         None => b,

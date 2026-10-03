@@ -8,7 +8,8 @@
 //! field will hit.
 
 use oxideav_gif::{
-    compose, decode, encode, Block, DisposalMethod, Frame, GifImage, GraphicControl, Rgb, Version,
+    compose, decode, encode, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb,
+    Version,
 };
 
 /// 4-entry palette with the colours used by the disposal tests.
@@ -21,8 +22,15 @@ fn palette() -> Vec<Rgb> {
     ]
 }
 
-fn frame(left: u16, top: u16, w: u16, h: u16, fill: u8, gce: Option<GraphicControl>) -> Frame {
-    Frame {
+fn frame(
+    left: u16,
+    top: u16,
+    w: u16,
+    h: u16,
+    fill: u8,
+    gce: Option<GraphicControl>,
+) -> GifFrameData {
+    GifFrameData {
         left,
         top,
         width: w,
@@ -35,8 +43,8 @@ fn frame(left: u16, top: u16, w: u16, h: u16, fill: u8, gce: Option<GraphicContr
     }
 }
 
-fn image_with(blocks: Vec<Block>) -> GifImage {
-    GifImage {
+fn image_with(blocks: Vec<Block>) -> GifFile {
+    GifFile {
         version: Version::Gif89a,
         screen_width: 4,
         screen_height: 4,
@@ -211,8 +219,8 @@ fn disposal_3_restore_to_previous() {
 
 /// Build a 6×6 stream backed by `palette()` (background = palette[0]
 /// = black). Helper for the larger-screen edge-case tests.
-fn image_6x6_with(blocks: Vec<Block>) -> GifImage {
-    GifImage {
+fn image_6x6_with(blocks: Vec<Block>) -> GifFile {
+    GifFile {
         version: Version::Gif89a,
         screen_width: 6,
         screen_height: 6,
@@ -236,14 +244,14 @@ fn shaped_frame(
     h: u16,
     gce: Option<GraphicControl>,
     mut f: impl FnMut(u16, u16) -> u8,
-) -> Frame {
+) -> GifFrameData {
     let mut indices = Vec::with_capacity((w as usize) * (h as usize));
     for y in 0..h {
         for x in 0..w {
             indices.push(f(x, y));
         }
     }
-    Frame {
+    GifFrameData {
         left,
         top,
         width: w,
@@ -316,7 +324,7 @@ fn restore_background_with_no_gct_clears_to_transparent_black() {
     // wipe the rect to alpha=0 because background_color_rgba() can't
     // resolve a colour.
     let lp = palette();
-    let f1 = Frame {
+    let f1 = GifFrameData {
         left: 0,
         top: 0,
         width: 2,
@@ -335,7 +343,7 @@ fn restore_background_with_no_gct_clears_to_transparent_black() {
     // F2 must also carry a local palette — there is no GCT to fall
     // back on. Placed at (2,2) so its draw doesn't overlap F1's
     // (already-cleared) rect.
-    let f2 = Frame {
+    let f2 = GifFrameData {
         left: 2,
         top: 2,
         width: 2,
@@ -346,7 +354,7 @@ fn restore_background_with_no_gct_clears_to_transparent_black() {
         indices: vec![2; 4], // green
         graphic_control: None,
     };
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: 4,
         screen_height: 4,

@@ -4,7 +4,7 @@
 //! image and verify that decoding the result reproduces the original
 //! pixel raster, palette and header.
 
-use oxideav_gif::{decode, encode, Block, Frame, GifImage, Rgb, Version};
+use oxideav_gif::{decode, encode, Block, GifFile, GifFrameData, Rgb, Version};
 
 /// Reproducible xorshift32 — keeps the suite deterministic without a
 /// crate-level RNG dependency.
@@ -27,14 +27,14 @@ fn make_palette(rng: &mut Xs, n: usize) -> Vec<Rgb> {
         .collect()
 }
 
-fn make_gif(seed: u32, width: u16, height: u16, palette_size: usize, interlaced: bool) -> GifImage {
+fn make_gif(seed: u32, width: u16, height: u16, palette_size: usize, interlaced: bool) -> GifFile {
     let mut rng = Xs::new(seed);
     let palette = make_palette(&mut rng, palette_size);
     let mut indices = Vec::with_capacity((width as usize) * (height as usize));
     for _ in 0..(width as usize) * (height as usize) {
         indices.push((rng.next_u8() as usize % palette_size) as u8);
     }
-    GifImage {
+    GifFile {
         version: Version::Gif89a,
         screen_width: width,
         screen_height: height,
@@ -43,7 +43,7 @@ fn make_gif(seed: u32, width: u16, height: u16, palette_size: usize, interlaced:
         background_index: 0,
         pixel_aspect_ratio: 0,
         global_palette: Some(palette),
-        blocks: vec![Block::Image(Frame {
+        blocks: vec![Block::Image(GifFrameData {
             left: 0,
             top: 0,
             width,

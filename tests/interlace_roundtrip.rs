@@ -1,6 +1,6 @@
 //! End-to-end coverage for encode-side interlacing (§20.c.vii Interlace
 //! Flag + Appendix E four-pass row order), driven through the
-//! [`GifImage::set_frames_interlaced`] mutator.
+//! [`GifFile::set_frames_interlaced`] mutator.
 //!
 //! Interlacing is a *storage-order* choice, never a pixel change: the
 //! encoder re-shuffles each interlaced frame's rows into the Appendix E
@@ -12,7 +12,7 @@
 //! placement, transparency + disposal, and the `optimize_frame_rects`
 //! encoder pass.
 
-use oxideav_gif::{compose, decode, encode, AnimationBuilder, DisposalMethod, GifImage, Rgb};
+use oxideav_gif::{compose, decode, encode, AnimationBuilder, DisposalMethod, GifFile, Rgb};
 
 /// A 16-entry greyscale palette (plus one distinct colour for
 /// transparency corners) — enough distinct rows that Appendix E's row
@@ -39,7 +39,7 @@ fn varied_indices(w: u16, h: u16, palette_len: u8) -> Vec<u8> {
     out
 }
 
-fn single_frame(w: u16, h: u16) -> GifImage {
+fn single_frame(w: u16, h: u16) -> GifFile {
     let pal = palette16();
     AnimationBuilder::new(w, h, pal)
         .add_full_frame(varied_indices(w, h, 16), 10, DisposalMethod::None)
@@ -49,7 +49,7 @@ fn single_frame(w: u16, h: u16) -> GifImage {
 }
 
 /// Encoding an interlaced stream and decoding it must reproduce the exact
-/// same `GifImage` as the sequential source: the decoder de-interlaces
+/// same `GifFile` as the sequential source: the decoder de-interlaces
 /// back to row-major order and preserves the Interlace Flag, so the two
 /// images are equal field-for-field.
 #[test]

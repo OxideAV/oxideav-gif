@@ -1,7 +1,7 @@
-//! Integration coverage for [`GifImage::conformance_report`].
+//! Integration coverage for [`GifFile::conformance_report`].
 //!
 //! The unit tests in `src/conformance.rs` pin each individual rule on a
-//! hand-built `GifImage`. These integration tests pin the two
+//! hand-built `GifFile`. These integration tests pin the two
 //! cross-cutting properties the diagnostic surface must hold against
 //! the real encode/decode/build paths:
 //!
@@ -17,11 +17,11 @@
 
 use oxideav_gif::{
     decode, encode, AnimationBuilder, Block, ConformanceRule, ConformanceSeverity, DisposalMethod,
-    Frame, GifImage, GraphicControl, PlainText, Rgb, Version,
+    GifFile, GifFrameData, GraphicControl, PlainText, Rgb, Version,
 };
 
 /// A minimal well-formed GIF89a animation: 2×2, two frames, looping.
-fn builder_animation() -> GifImage {
+fn builder_animation() -> GifFile {
     let palette = vec![Rgb::new(0xFF, 0, 0), Rgb::new(0, 0xFF, 0)];
     AnimationBuilder::new(2, 2, palette)
         .loop_forever()
@@ -148,7 +148,7 @@ fn shared_rules_agree_with_encoder() {
 fn placement_and_pixel_range_are_diagnostic_only() {
     // Frame escaping the screen: encoder still emits bytes.
     let palette = vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)];
-    let escaping = GifImage {
+    let escaping = GifFile {
         version: Version::Gif89a,
         screen_width: 2,
         screen_height: 2,
@@ -157,7 +157,7 @@ fn placement_and_pixel_range_are_diagnostic_only() {
         background_index: 0,
         pixel_aspect_ratio: 0,
         global_palette: Some(palette.clone()),
-        blocks: vec![Block::Image(Frame {
+        blocks: vec![Block::Image(GifFrameData {
             left: 5, // 5 + 2 = 7 > screen width 2
             top: 0,
             width: 2,
@@ -184,7 +184,7 @@ fn placement_and_pixel_range_are_diagnostic_only() {
 #[test]
 fn recommendation_only_image_encodes() {
     let palette = vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)];
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: 2,
         screen_height: 2,
@@ -193,7 +193,7 @@ fn recommendation_only_image_encodes() {
         background_index: 0,
         pixel_aspect_ratio: 0,
         global_palette: Some(palette),
-        blocks: vec![Block::Image(Frame {
+        blocks: vec![Block::Image(GifFrameData {
             left: 0,
             top: 0,
             width: 2,
@@ -222,7 +222,7 @@ fn recommendation_only_image_encodes() {
 #[test]
 fn plain_text_index_bounds() {
     let palette = vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)];
-    let mk = |fg: u8, bg: u8| GifImage {
+    let mk = |fg: u8, bg: u8| GifFile {
         version: Version::Gif89a,
         screen_width: 16,
         screen_height: 16,

@@ -53,7 +53,7 @@
 
 use crate::error::{Error, Result};
 use crate::font;
-use crate::image::{Block, DisposalMethod, Frame, GifImage, PlainText, Rgb};
+use crate::image::{Block, DisposalMethod, GifFile, GifFrameData, PlainText, Rgb};
 
 /// One composited canvas — `screen_width × screen_height` RGBA pixels.
 ///
@@ -112,14 +112,14 @@ pub struct ComposedFrame {
 ///   active colour table.
 /// * A frame has neither a local palette nor a global one to fall
 ///   back on.
-pub fn compose(image: &GifImage) -> Result<Vec<ComposedFrame>> {
+pub fn compose(image: &GifFile) -> Result<Vec<ComposedFrame>> {
     let mut canvas = RgbaCanvas::new(image.screen_width, image.screen_height);
 
     // §18.c.iii / §18.c.vii — background colour is meaningful only if
     // a Global Color Table is present and the background index falls
     // inside it. Otherwise dispose-to-background clears to
     // fully-transparent black. The two-step resolution lives on
-    // `GifImage` so the composer and the lazy `Playback` iterator
+    // `GifFile` so the composer and the lazy `Playback` iterator
     // share one implementation.
     let background_rgba: [u8; 4] = image.background_color_rgba();
 
@@ -234,7 +234,7 @@ pub struct SeekResult {
     /// ANIMEXTS1.0 *Looping* semantics.
     pub pass: u64,
     /// Zero-based graphic-rendering-block ordinal of the resolved frame —
-    /// the same index [`crate::GifImage::frame_index_at_global`] returns
+    /// the same index [`crate::GifFile::frame_index_at_global`] returns
     /// and the position into the [`compose`] output `Vec`.
     pub frame_index: usize,
 }
@@ -245,7 +245,7 @@ pub struct SeekResult {
 /// the stream has no on-screen frame at that instant.
 ///
 /// This ties the time-domain seek of
-/// [`crate::GifImage::frame_index_at_global`] to actual pixels: it resolves
+/// [`crate::GifFile::frame_index_at_global`] to actual pixels: it resolves
 /// `global` to a `(pass, frame_index)` with that query, then returns the
 /// matching composited canvas from the [`compose`] state machine. A player
 /// scrubbing a timeline calls this with the wall-clock offset and blits the
@@ -257,7 +257,7 @@ pub struct SeekResult {
 /// escaping the logical screen, out-of-range palette index, missing colour
 /// table).
 pub fn compose_frame_at_global(
-    image: &GifImage,
+    image: &GifFile,
     global: core::time::Duration,
 ) -> Result<Option<SeekResult>> {
     let Some((pass, frame_index)) = image.frame_index_at_global(global) else {
@@ -284,10 +284,10 @@ struct CropPlan {
     height: u16,
 }
 
-/// Implementation behind [`GifImage::optimize_frame_rects`] — see the
+/// Implementation behind [`GifFile::optimize_frame_rects`] — see the
 /// public method for the full contract. Lives here because it re-runs
 /// the same §23 disposal-method state machine as [`compose`].
-pub(crate) fn optimize_frame_rects_impl(image: &mut GifImage) -> usize {
+pub(crate) fn optimize_frame_rects_impl(image: &mut GifFile) -> usize {
     // Phase 1 — walk the disposal state machine over the *unmodified*
     // stream and record the crop for every eligible frame. A stream
     // that doesn't compose (placement escapes the §18 screen, missing
@@ -341,7 +341,7 @@ pub(crate) fn optimize_frame_rects_impl(image: &mut GifImage) -> usize {
 ///   area used by the graphic must be restored to the background
 ///   color", so shrinking the rect would shrink the cleared region and
 ///   change what the next frame composes over.
-fn plan_frame_crops(image: &GifImage) -> Result<Vec<CropPlan>> {
+fn plan_frame_crops(image: &GifFile) -> Result<Vec<CropPlan>> {
     let mut canvas = RgbaCanvas::new(image.screen_width, image.screen_height);
     let background_rgba: [u8; 4] = image.background_color_rgba();
     let mut plans = Vec::new();
@@ -440,7 +440,7 @@ fn plan_frame_crops(image: &GifImage) -> Result<Vec<CropPlan>> {
 /// image.
 fn plan_for_frame(
     block_index: usize,
-    frame: &Frame,
+    frame: &GifFrameData,
     before: &[u8],
     after: &RgbaCanvas,
 ) -> Option<CropPlan> {
@@ -504,7 +504,7 @@ struct Rect {
 }
 
 enum BlockKind<'a> {
-    Image(&'a Frame),
+    Image(&'a GifFrameData),
     PlainText(&'a PlainText),
 }
 
@@ -512,7 +512,7 @@ enum BlockKind<'a> {
 // Helpers.
 // ---------------------------------------------------------------------
 
-fn check_rect_in_screen(image: &GifImage, rect: &Rect) -> Result<()> {
+fn check_rect_in_screen(image: &GifFile, rect: &Rect) -> Result<()> {
     let right = (rect.left as u32) + (rect.width as u32);
     let bottom = (rect.top as u32) + (rect.height as u32);
     if right > image.screen_width as u32 || bottom > image.screen_height as u32 {
@@ -526,7 +526,7 @@ fn check_rect_in_screen(image: &GifImage, rect: &Rect) -> Result<()> {
 
 fn render_frame(
     canvas: &mut RgbaCanvas,
-    frame: &Frame,
+    frame: &GifFrameData,
     global_palette: Option<&[Rgb]>,
 ) -> Result<()> {
     let palette: &[Rgb] = frame
@@ -691,7 +691,7 @@ fn palette_index_to_rgba(palette: &[Rgb], idx: u8) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::{Block, Frame, GifImage, GraphicControl, Rgb, Version};
+    use crate::image::{Block, GifFile, GifFrameData, GraphicControl, Rgb, Version};
 
     /// Pull the RGBA quadruple at canvas pixel `(x, y)`.
     fn px(c: &RgbaCanvas, x: u16, y: u16) -> [u8; 4] {
@@ -714,8 +714,8 @@ mod tests {
     }
 
     /// Build a 2×2 single-colour frame placed inside a larger canvas.
-    fn small_frame(left: u16, top: u16, fill: u8, gce: Option<GraphicControl>) -> Frame {
-        Frame {
+    fn small_frame(left: u16, top: u16, fill: u8, gce: Option<GraphicControl>) -> GifFrameData {
+        GifFrameData {
             left,
             top,
             width: 2,
@@ -728,8 +728,8 @@ mod tests {
         }
     }
 
-    fn base_image(blocks: Vec<Block>) -> GifImage {
-        GifImage {
+    fn base_image(blocks: Vec<Block>) -> GifFile {
+        GifFile {
             version: Version::Gif89a,
             screen_width: 4,
             screen_height: 4,
@@ -912,7 +912,7 @@ mod tests {
     fn disposal_restore_background_no_palette_clears_transparent() {
         // Frame must carry its own local palette since stream has none.
         let local = palette_4();
-        let f1 = Frame {
+        let f1 = GifFrameData {
             left: 0,
             top: 0,
             width: 2,
@@ -928,7 +928,7 @@ mod tests {
                 delay_centis: 0,
             }),
         };
-        let f2 = Frame {
+        let f2 = GifFrameData {
             left: 2,
             top: 2,
             width: 2,
@@ -939,7 +939,7 @@ mod tests {
             indices: vec![2; 4], // green
             graphic_control: None,
         };
-        let img = GifImage {
+        let img = GifFile {
             version: Version::Gif89a,
             screen_width: 4,
             screen_height: 4,
@@ -1073,7 +1073,7 @@ mod tests {
             bg_color_index: 2,
             text: b"A".to_vec(),
         };
-        let img = GifImage {
+        let img = GifFile {
             version: Version::Gif89a,
             screen_width: 8,
             screen_height: 8,
@@ -1126,7 +1126,7 @@ mod tests {
             bg_color_index: 2,
             text: b"#".to_vec(),
         };
-        let img = GifImage {
+        let img = GifFile {
             version: Version::Gif89a,
             screen_width: 8,
             screen_height: 8,
@@ -1145,7 +1145,7 @@ mod tests {
                         delay_centis: 0,
                     }),
                 },
-                Block::Image(Frame {
+                Block::Image(GifFrameData {
                     left: 0,
                     top: 0,
                     width: 8,
@@ -1188,7 +1188,7 @@ mod tests {
             bg_color_index: 2,
             text: b"A".to_vec(),
         };
-        let img = GifImage {
+        let img = GifFile {
             version: Version::Gif89a,
             screen_width: 8,
             screen_height: 8,
@@ -1223,7 +1223,7 @@ mod tests {
         bg_index: u8,
         transparent_index: Option<u8>,
     ) -> RgbaCanvas {
-        let prior = Frame {
+        let prior = GifFrameData {
             left: 0,
             top: 0,
             width: 8,
@@ -1245,7 +1245,7 @@ mod tests {
             bg_color_index: bg_index,
             text: b"A".to_vec(),
         };
-        let img = GifImage {
+        let img = GifFile {
             version: Version::Gif89a,
             screen_width: 8,
             screen_height: 8,

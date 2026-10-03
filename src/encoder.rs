@@ -1,7 +1,9 @@
 //! GIF87a / GIF89a top-level encoder.
 
 use crate::error::{Error, Result};
-use crate::image::{Application, Block, Frame, GifImage, GraphicControl, PlainText, Rgb, Version};
+use crate::image::{
+    Application, Block, GifFile, GifFrameData, GraphicControl, PlainText, Rgb, Version,
+};
 use crate::interlace::interlace_row_order;
 use crate::lzw;
 
@@ -38,17 +40,17 @@ pub struct EncodeOptions {
     pub lzw_strategy: LzwStrategy,
 }
 
-/// Serialise a [`GifImage`] into a byte stream conforming to the
+/// Serialise a [`GifFile`] into a byte stream conforming to the
 /// `<GIF Data Stream>` grammar in Appendix B.
 ///
 /// Uses the default [`EncodeOptions`] (deferred-clear LZW). Call
 /// [`encode_with_options`] to select a different Appendix-F table-full
 /// strategy.
-pub fn encode(image: &GifImage) -> Result<Vec<u8>> {
+pub fn encode(image: &GifFile) -> Result<Vec<u8>> {
     encode_with_options(image, EncodeOptions::default())
 }
 
-/// Serialise a [`GifImage`] like [`encode`], but with caller-chosen
+/// Serialise a [`GifFile`] like [`encode`], but with caller-chosen
 /// [`EncodeOptions`].
 ///
 /// The output is byte-identical to [`encode`] whenever
@@ -56,7 +58,7 @@ pub fn encode(image: &GifImage) -> Result<Vec<u8>> {
 /// LZW dictionary reaches its 4096-entry ceiling — the
 /// [`LzwStrategy`] choice only changes the bytes for table-filling
 /// frames. Every produced stream decodes to the same pixels.
-pub fn encode_with_options(image: &GifImage, options: EncodeOptions) -> Result<Vec<u8>> {
+pub fn encode_with_options(image: &GifFile, options: EncodeOptions) -> Result<Vec<u8>> {
     validate(image)?;
 
     let mut out = Vec::new();
@@ -106,7 +108,7 @@ pub fn encode_with_options(image: &GifImage, options: EncodeOptions) -> Result<V
 // Validation.
 // ---------------------------------------------------------------------
 
-fn validate(image: &GifImage) -> Result<()> {
+fn validate(image: &GifFile) -> Result<()> {
     if image.color_resolution > 7 {
         return Err(Error::InvalidInput(format!(
             "color_resolution {} exceeds 3-bit field range",
@@ -123,7 +125,7 @@ fn validate(image: &GifImage) -> Result<()> {
     // GCE), we cannot honour the request: the resulting stream would be
     // structurally invalid (a `GIF87a` header followed by a 89a-only
     // block payload). Refuse with `InvalidInput` so the caller fixes the
-    // mismatch — either by calling [`crate::GifImage::upgrade_version_if_needed`]
+    // mismatch — either by calling [`crate::GifFile::upgrade_version_if_needed`]
     // first or by removing the offending block.
     let required = image.required_version();
     if required > image.version {
@@ -135,7 +137,7 @@ fn validate(image: &GifImage) -> Result<()> {
             .unwrap_or("unknown");
         return Err(Error::InvalidInput(format!(
             "stream declared as GIF87a but contains a {offender} block (Required Version: GIF89a). \
-             Call GifImage::upgrade_version_if_needed() or remove the block."
+             Call GifFile::upgrade_version_if_needed() or remove the block."
         )));
     }
     for block in &image.blocks {
@@ -193,7 +195,7 @@ fn write_header(out: &mut Vec<u8>, version: Version) {
     out.extend_from_slice(&version.ascii());
 }
 
-fn write_logical_screen_descriptor(out: &mut Vec<u8>, image: &GifImage) -> Result<()> {
+fn write_logical_screen_descriptor(out: &mut Vec<u8>, image: &GifFile) -> Result<()> {
     write_u16_le(out, image.screen_width);
     write_u16_le(out, image.screen_height);
 
@@ -234,7 +236,7 @@ fn write_color_table(out: &mut Vec<u8>, palette: &[Rgb]) -> Result<()> {
 
 fn write_image_block(
     out: &mut Vec<u8>,
-    frame: &Frame,
+    frame: &GifFrameData,
     global_palette: Option<&[Rgb]>,
     lzw_strategy: LzwStrategy,
 ) -> Result<()> {
@@ -422,10 +424,12 @@ fn bits_required_for(n: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::{Application, DisposalMethod, Frame as GifFrame, GraphicControl, PlainText};
+    use crate::image::{
+        Application, DisposalMethod, GifFrameData as GifFrame, GraphicControl, PlainText,
+    };
 
-    fn one_pixel_image(version: Version, blocks: Vec<Block>) -> GifImage {
-        GifImage {
+    fn one_pixel_image(version: Version, blocks: Vec<Block>) -> GifFile {
+        GifFile {
             version,
             screen_width: 1,
             screen_height: 1,
@@ -615,7 +619,7 @@ mod tests {
     /// pseudo-random byte sequence the early dictionary cannot code well.
     /// Large enough (192×192 = 36 864 px) to fill the dictionary, so the
     /// deferred-clear vs clear-on-full split is exercised.
-    fn regime_change_image() -> GifImage {
+    fn regime_change_image() -> GifFile {
         let palette: Vec<Rgb> = (0..256u32)
             .map(|i| Rgb::new(i as u8, (i ^ 0x5A) as u8, (i.wrapping_mul(7)) as u8))
             .collect();
@@ -634,7 +638,7 @@ mod tests {
             state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
             indices.push((state >> 16) as u8);
         }
-        GifImage {
+        GifFile {
             version: Version::Gif89a,
             screen_width: w,
             screen_height: h,
@@ -667,7 +671,7 @@ mod tests {
         assert_eq!(baseline, via_options);
     }
 
-    /// Both strategies decode to the same `GifImage` (identical pixels).
+    /// Both strategies decode to the same `GifFile` (identical pixels).
     /// The choice is purely a compressed-size trade-off; pixel output is
     /// invariant because `lzw::decode` honours a mid-stream Clear.
     #[test]

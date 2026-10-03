@@ -62,7 +62,7 @@
 //! ## Round-tripping
 //!
 //! Decoders preserve the raw [`crate::Application`] block in
-//! [`crate::GifImage::blocks`] regardless of whether the caller
+//! [`crate::GifFile::blocks`] regardless of whether the caller
 //! invokes the typed accessors below. The accessors are layered on
 //! top — they do not consume or rewrite the block list. This means a
 //! decode → re-encode round-trip is byte-stable for streams that
@@ -72,7 +72,7 @@
 //! Encoders that want to *produce* these blocks from typed input call
 //! the `to_application` constructors below to get a
 //! [`crate::Application`] suitable for insertion into
-//! [`crate::GifImage::blocks`].
+//! [`crate::GifFile::blocks`].
 
 use crate::image::Application;
 
@@ -468,7 +468,7 @@ pub enum ApplicationKind {
     /// Any Application Extension whose identifier+auth code does not
     /// match one of the recognised ecosystem namespaces above. The raw
     /// [`Application`] is still preserved in
-    /// [`crate::GifImage::blocks`] for byte-stable round-trip.
+    /// [`crate::GifFile::blocks`] for byte-stable round-trip.
     Unknown,
 }
 

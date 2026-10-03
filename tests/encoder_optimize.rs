@@ -1,6 +1,6 @@
 //! Encoder Global vs Local Color Table optimisation.
 //!
-//! [`GifImage::optimize_color_tables`] hoists a per-frame palette into
+//! [`GifFile::optimize_color_tables`] hoists a per-frame palette into
 //! the §18 Global Color Table when every frame carries the same
 //! palette, removing the redundant §21 Local Color Table on each
 //! frame. The on-wire savings are `3 × 2^(size_bits + 1) + 1` bytes
@@ -12,10 +12,10 @@
 //! must be identical before and after, since §21 says a frame with
 //! the LCT flag clear uses the §18 Global Color Table.
 
-use oxideav_gif::{compose, decode, encode, Block, Frame, GifImage, Rgb, Version};
+use oxideav_gif::{compose, decode, encode, Block, GifFile, GifFrameData, Rgb, Version};
 
-fn frame_with_local(palette: Vec<Rgb>, fill: u8) -> Frame {
-    Frame {
+fn frame_with_local(palette: Vec<Rgb>, fill: u8) -> GifFrameData {
+    GifFrameData {
         left: 0,
         top: 0,
         width: 4,
@@ -43,8 +43,8 @@ fn shared_palette() -> Vec<Rgb> {
     ]
 }
 
-fn three_frame_image(global: Option<Vec<Rgb>>, frames: Vec<Frame>) -> GifImage {
-    GifImage {
+fn three_frame_image(global: Option<Vec<Rgb>>, frames: Vec<GifFrameData>) -> GifFile {
+    GifFile {
         version: Version::Gif89a,
         screen_width: 4,
         screen_height: 4,

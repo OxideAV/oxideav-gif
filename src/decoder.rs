@@ -6,7 +6,8 @@
 
 use crate::error::{Error, Result};
 use crate::image::{
-    Application, Block, DisposalMethod, Frame, GifImage, GraphicControl, PlainText, Rgb, Version,
+    Application, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, PlainText, Rgb,
+    Version,
 };
 use crate::interlace::interlace_row_order;
 use crate::lzw;
@@ -32,7 +33,7 @@ mod label {
 }
 
 /// Read a GIF Data Stream from `bytes` and return only the first
-/// image-bearing block, packaged as a [`GifImage`] containing exactly
+/// image-bearing block, packaged as a [`GifFile`] containing exactly
 /// one [`Block::Image`].
 ///
 /// Walks the §B grammar header → Logical Screen Descriptor → §15
@@ -57,7 +58,7 @@ mod label {
 /// when the consumer only wants the first one. `decode_first_frame`
 /// stops at the first image and never allocates the trailing block
 /// list.
-pub fn decode_first_frame(bytes: &[u8]) -> Result<GifImage> {
+pub fn decode_first_frame(bytes: &[u8]) -> Result<GifFile> {
     let mut p = Parser::new(bytes);
     let version = p.read_header()?;
     let (screen_width, screen_height, packed, background_index, pixel_aspect_ratio) =
@@ -83,7 +84,7 @@ pub fn decode_first_frame(bytes: &[u8]) -> Result<GifImage> {
             }
             label::IMAGE_SEPARATOR => {
                 let frame = p.read_image_descriptor_and_data(pending_gce.take())?;
-                return Ok(GifImage {
+                return Ok(GifFile {
                     version,
                     screen_width,
                     screen_height,
@@ -139,8 +140,8 @@ pub fn decode_first_frame(bytes: &[u8]) -> Result<GifImage> {
     }
 }
 
-/// Read a GIF Data Stream from `bytes` and return it as a [`GifImage`].
-pub fn decode(bytes: &[u8]) -> Result<GifImage> {
+/// Read a GIF Data Stream from `bytes` and return it as a [`GifFile`].
+pub fn decode(bytes: &[u8]) -> Result<GifFile> {
     decode_with(bytes, RecoveryMode::Strict)
 }
 
@@ -149,7 +150,7 @@ pub fn decode(bytes: &[u8]) -> Result<GifImage> {
 /// / §19 Global Color Table prefix, it skips ahead to the next §20
 /// Image Separator or §27 Trailer instead of returning an error.
 ///
-/// Recovered blocks are appended to the resulting [`GifImage`] in
+/// Recovered blocks are appended to the resulting [`GifFile`] in
 /// source order; corrupted bytes are simply dropped. The header, LSD,
 /// and GCT are still required to parse cleanly — a truncated header
 /// has no recoverable image data behind it, so the function still
@@ -181,7 +182,7 @@ pub fn decode(bytes: &[u8]) -> Result<GifImage> {
 /// stream on re-encode. Lenient mode is opt-in for consumers (viewers,
 /// thumbnailers, recovery tools) that prefer "show what we can" over
 /// "all or nothing".
-pub fn decode_lenient(bytes: &[u8]) -> Result<GifImage> {
+pub fn decode_lenient(bytes: &[u8]) -> Result<GifFile> {
     decode_with(bytes, RecoveryMode::Lenient)
 }
 
@@ -191,7 +192,7 @@ enum RecoveryMode {
     Lenient,
 }
 
-fn decode_with(bytes: &[u8], mode: RecoveryMode) -> Result<GifImage> {
+fn decode_with(bytes: &[u8], mode: RecoveryMode) -> Result<GifFile> {
     let mut p = Parser::new(bytes);
     let version = p.read_header()?;
     let (screen_width, screen_height, packed, background_index, pixel_aspect_ratio) =
@@ -335,7 +336,7 @@ fn decode_with(bytes: &[u8], mode: RecoveryMode) -> Result<GifImage> {
         }
     }
 
-    Ok(GifImage {
+    Ok(GifFile {
         version,
         screen_width,
         screen_height,
@@ -505,7 +506,7 @@ impl<'a> Parser<'a> {
     fn read_image_descriptor_and_data(
         &mut self,
         graphic_control: Option<GraphicControl>,
-    ) -> Result<Frame> {
+    ) -> Result<GifFrameData> {
         // Consume the image separator.
         let sep = self.read_byte()?;
         debug_assert_eq!(sep, label::IMAGE_SEPARATOR);
@@ -571,7 +572,7 @@ impl<'a> Parser<'a> {
             raw_indices
         };
 
-        Ok(Frame {
+        Ok(GifFrameData {
             left,
             top,
             width,
@@ -678,10 +679,10 @@ mod tests {
     use super::*;
     use crate::app_ext::{ExifMetadata, XmpPacket};
     use crate::encoder::encode;
-    use crate::image::{Block, Frame as GifFrame, GifImage, Rgb, Version};
+    use crate::image::{Block, GifFile, GifFrameData as GifFrame, Rgb, Version};
 
-    fn one_frame_image_no_extensions() -> GifImage {
-        GifImage {
+    fn one_frame_image_no_extensions() -> GifFile {
+        GifFile {
             version: Version::Gif89a,
             screen_width: 2,
             screen_height: 2,
@@ -721,7 +722,7 @@ mod tests {
 
     /// Fast-path skips Comment / Application / Plain Text blocks that
     /// sit between the LSD and the first image. The skipped blocks
-    /// must NOT appear in the returned `GifImage`.
+    /// must NOT appear in the returned `GifFile`.
     #[test]
     fn fast_path_skips_extensions_before_image() {
         let mut img = one_frame_image_no_extensions();
@@ -770,7 +771,7 @@ mod tests {
 
     /// Fast-path on a stream with zero image blocks (only the trailer
     /// after the LSD) reports `InvalidData` rather than producing an
-    /// empty `GifImage`.
+    /// empty `GifFile`.
     #[test]
     fn fast_path_errors_on_image_free_stream() {
         // Hand-rolled minimal stream: header + LSD + trailer, no GCT.

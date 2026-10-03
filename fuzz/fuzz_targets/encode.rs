@@ -4,7 +4,7 @@
 //!
 //! Sibling to `fuzz/fuzz_targets/decode.rs` (decode-side end-to-end).
 //! The decode-side fuzzer drives `decode` then `encode`-on-decoder-
-//! output; this one inverts the relationship: it builds a `GifImage`
+//! output; this one inverts the relationship: it builds a `GifFile`
 //! out of arbitrary fuzz bytes via `AnimationBuilder`, encodes it, then
 //! sanity-checks the encoded bytes through every entry point so panics
 //! in the encoder LZW / sub-block / version-required paths surface
@@ -30,7 +30,7 @@ use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
     compose, decode, decode_first_frame, decode_lenient, encode, image::Rgb, playback::Playback,
     quantize_frames_shared, quantize_rgba_with_options, AnimationBuilder, BoxPriority,
-    DisposalMethod, Dither, GifImage, QuantizeOptions,
+    DisposalMethod, Dither, GifFile, QuantizeOptions,
 };
 
 // Cap downstream work on suspiciously large screens so the harness
@@ -304,7 +304,7 @@ fuzz_target!(|data: &[u8]| {
         // stream the decoder accepts.
         if qw <= u16::MAX as usize && qh <= u16::MAX as usize {
             let (cw, ch) = (qw as u16, qh as u16);
-            if let Ok(img) = GifImage::from_rgba_frame_with_options(&frame_a, cw, ch, opts) {
+            if let Ok(img) = GifFile::from_rgba_frame_with_options(&frame_a, cw, ch, opts) {
                 if let Ok(b) = encode(&img) {
                     assert!(decode(&b).is_ok(), "dithered still rejected by decoder");
                 }
@@ -314,7 +314,7 @@ fuzz_target!(|data: &[u8]| {
                 (&frame_b[..], 7u16, DisposalMethod::Keep),
             ];
             if let Ok(img) =
-                GifImage::from_rgba_frames_shared_palette(&frames, cw, ch, opts, Some(0))
+                GifFile::from_rgba_frames_shared_palette(&frames, cw, ch, opts, Some(0))
             {
                 if let Ok(b) = encode(&img) {
                     assert!(

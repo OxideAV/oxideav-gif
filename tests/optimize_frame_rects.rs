@@ -1,6 +1,6 @@
 //! Encoder-side inter-frame rect optimisation tests.
 //!
-//! [`GifImage::optimize_frame_rects`] crops each §20 Image frame to
+//! [`GifFile::optimize_frame_rects`] crops each §20 Image frame to
 //! the bounding rectangle of pixels it actually changes on the
 //! composed logical screen (§20.c.ii–v placement, §23.c.iv disposal,
 //! §23.c.viii transparency). The invariant under test throughout:
@@ -8,8 +8,8 @@
 //! anything a viewer displays.
 
 use oxideav_gif::{
-    compose, decode, encode, Block, DisposalMethod, Frame, GifImage, GraphicControl, PlainText,
-    Rgb, Version,
+    compose, decode, encode, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
+    PlainText, Rgb, Version,
 };
 
 fn palette_4() -> Vec<Rgb> {
@@ -21,8 +21,8 @@ fn palette_4() -> Vec<Rgb> {
     ]
 }
 
-fn base_image(screen: u16, blocks: Vec<Block>) -> GifImage {
-    GifImage {
+fn base_image(screen: u16, blocks: Vec<Block>) -> GifFile {
+    GifFile {
         version: Version::Gif89a,
         screen_width: screen,
         screen_height: screen,
@@ -35,9 +35,9 @@ fn base_image(screen: u16, blocks: Vec<Block>) -> GifImage {
     }
 }
 
-fn full_frame(screen: u16, indices: Vec<u8>, gce: Option<GraphicControl>) -> Frame {
+fn full_frame(screen: u16, indices: Vec<u8>, gce: Option<GraphicControl>) -> GifFrameData {
     assert_eq!(indices.len(), (screen as usize) * (screen as usize));
-    Frame {
+    GifFrameData {
         left: 0,
         top: 0,
         width: screen,
@@ -60,14 +60,14 @@ fn gce(disposal: DisposalMethod, transparent_index: Option<u8>) -> GraphicContro
 }
 
 /// Pull the rect of the §20 Image at block position `i`.
-fn rect_of(img: &GifImage, i: usize) -> (u16, u16, u16, u16) {
+fn rect_of(img: &GifFile, i: usize) -> (u16, u16, u16, u16) {
     match &img.blocks[i] {
         Block::Image(f) => (f.left, f.top, f.width, f.height),
         other => panic!("block {i} is not an image: {other:?}"),
     }
 }
 
-fn assert_compose_equal(before: &GifImage, after: &GifImage) {
+fn assert_compose_equal(before: &GifFile, after: &GifFile) {
     assert_eq!(
         compose(before).unwrap(),
         compose(after).unwrap(),
@@ -290,7 +290,7 @@ fn plain_text_blocks_participate_but_stay_untouched() {
 #[test]
 fn non_composing_stream_left_untouched() {
     // (3,3) + 4×4 escapes the 4×4 logical screen.
-    let f = Frame {
+    let f = GifFrameData {
         left: 3,
         top: 3,
         width: 4,

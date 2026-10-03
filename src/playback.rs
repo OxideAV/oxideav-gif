@@ -1,4 +1,4 @@
-//! Animation playback iterators over a parsed [`crate::GifImage`].
+//! Animation playback iterators over a parsed [`crate::GifFile`].
 //!
 //! [`crate::compose::compose`] eagerly composites every image-bearing
 //! block in the stream into a `Vec<ComposedFrame>`, which is fine for
@@ -17,7 +17,7 @@
 //!
 //! * [`Playback::looping_frames`] — yields the same sequence honouring
 //!   the NETSCAPE2.0 *Looping* sub-block (see
-//!   [`crate::GifImage::loop_count`]):
+//!   [`crate::GifFile::loop_count`]):
 //!     - no NETSCAPE2.0 block → play exactly once (one pass).
 //!     - `loop_count == Some(0)` → play forever.
 //!     - `loop_count == Some(N)` → play `N + 1` times in total per the
@@ -33,19 +33,19 @@ use core::time::Duration;
 use crate::compose::RgbaCanvas;
 use crate::error::{Error, Result};
 use crate::font;
-use crate::image::{Block, DisposalMethod, Frame, GifImage, PlainText, Rgb};
+use crate::image::{Block, DisposalMethod, GifFile, GifFrameData, PlainText, Rgb};
 
-/// Playback handle for a parsed [`GifImage`]. Cheap to construct;
+/// Playback handle for a parsed [`GifFile`]. Cheap to construct;
 /// holds a borrow of the image plus enough state to walk the §23
 /// disposal-method state machine without re-allocating per iteration.
 pub struct Playback<'a> {
-    image: &'a GifImage,
+    image: &'a GifFile,
 }
 
 impl<'a> Playback<'a> {
     /// Bind a [`Playback`] to `image`. The image is borrowed for the
     /// lifetime of every iterator subsequently spawned.
-    pub fn new(image: &'a GifImage) -> Self {
+    pub fn new(image: &'a GifFile) -> Self {
         Self { image }
     }
 
@@ -93,7 +93,7 @@ fn centis_to_duration(centis: u16) -> Duration {
 /// Walks `image.blocks` once, advancing the canvas state machine on
 /// each call to [`Iterator::next`].
 pub struct FrameIter<'a> {
-    image: &'a GifImage,
+    image: &'a GifFile,
     canvas: RgbaCanvas,
     background_rgba: [u8; 4],
     /// Cursor into `image.blocks`. Bumped past every block, not just
@@ -105,7 +105,7 @@ pub struct FrameIter<'a> {
 }
 
 impl<'a> FrameIter<'a> {
-    fn new(image: &'a GifImage) -> Self {
+    fn new(image: &'a GifFile) -> Self {
         let canvas = blank_canvas(image.screen_width, image.screen_height);
         let background_rgba = compute_background_rgba(image);
         Self {
@@ -230,7 +230,7 @@ struct Rect {
 }
 
 enum Kind<'a> {
-    Image(&'a Frame),
+    Image(&'a GifFrameData),
     PlainText(&'a PlainText),
 }
 
@@ -242,7 +242,7 @@ enum Kind<'a> {
 /// sub-block. Lazily restarts the underlying [`FrameIter`] when one
 /// pass ends.
 pub struct LoopingFrameIter<'a> {
-    image: &'a GifImage,
+    image: &'a GifFile,
     inner: FrameIter<'a>,
     /// Total passes the consumer should see: `Some(n)` for finite
     /// playback (consumer should see exactly `n` complete passes),
@@ -262,7 +262,7 @@ pub struct LoopingFrameIter<'a> {
 }
 
 impl<'a> LoopingFrameIter<'a> {
-    fn new(image: &'a GifImage) -> Self {
+    fn new(image: &'a GifFile) -> Self {
         let total_passes = match image.loop_count() {
             None => Some(1),
             Some(0) => None,
@@ -337,15 +337,15 @@ impl<'a> Iterator for LoopingFrameIter<'a> {
 // a `clone()` when the consumer only reads the canvas borrow.
 // ---------------------------------------------------------------------
 
-fn compute_background_rgba(image: &GifImage) -> [u8; 4] {
+fn compute_background_rgba(image: &GifFile) -> [u8; 4] {
     // §18.c.iii / §18.c.vii — background colour index is meaningful
     // only with a Global Color Table and an in-range index. Both
-    // checks live on `GifImage` so the lazy iterator here and the
+    // checks live on `GifFile` so the lazy iterator here and the
     // eager `compose` path share one resolver.
     image.background_color_rgba()
 }
 
-fn check_rect_in_screen(image: &GifImage, rect: &Rect) -> Result<()> {
+fn check_rect_in_screen(image: &GifFile, rect: &Rect) -> Result<()> {
     let right = (rect.left as u32) + (rect.width as u32);
     let bottom = (rect.top as u32) + (rect.height as u32);
     if right > image.screen_width as u32 || bottom > image.screen_height as u32 {
@@ -359,7 +359,7 @@ fn check_rect_in_screen(image: &GifImage, rect: &Rect) -> Result<()> {
 
 fn render_frame(
     canvas: &mut RgbaCanvas,
-    frame: &Frame,
+    frame: &GifFrameData,
     global_palette: Option<&[Rgb]>,
 ) -> Result<()> {
     let palette: &[Rgb] = frame
@@ -513,7 +513,7 @@ fn blank_canvas(width: u16, height: u16) -> RgbaCanvas {
 mod tests {
     use super::*;
     use crate::app_ext::LoopControl;
-    use crate::image::{Block, Frame, GifImage, GraphicControl, Rgb, Version};
+    use crate::image::{Block, GifFile, GifFrameData, GraphicControl, Rgb, Version};
 
     fn palette_4() -> Vec<Rgb> {
         vec![
@@ -524,8 +524,8 @@ mod tests {
         ]
     }
 
-    fn small_frame(left: u16, top: u16, fill: u8, gce: Option<GraphicControl>) -> Frame {
-        Frame {
+    fn small_frame(left: u16, top: u16, fill: u8, gce: Option<GraphicControl>) -> GifFrameData {
+        GifFrameData {
             left,
             top,
             width: 2,
@@ -538,8 +538,8 @@ mod tests {
         }
     }
 
-    fn base_image(blocks: Vec<Block>) -> GifImage {
-        GifImage {
+    fn base_image(blocks: Vec<Block>) -> GifFile {
+        GifFile {
             version: Version::Gif89a,
             screen_width: 4,
             screen_height: 4,
@@ -759,7 +759,7 @@ mod tests {
             bg_color_index: 2, // green (declared transparent)
             text: b"A".to_vec(),
         };
-        let img = GifImage {
+        let img = GifFile {
             version: Version::Gif89a,
             screen_width: 8,
             screen_height: 8,
@@ -769,7 +769,7 @@ mod tests {
             pixel_aspect_ratio: 0,
             global_palette: Some(palette_4()),
             blocks: vec![
-                Block::Image(Frame {
+                Block::Image(GifFrameData {
                     left: 0,
                     top: 0,
                     width: 8,

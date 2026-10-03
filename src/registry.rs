@@ -29,7 +29,7 @@ use oxideav_core::{
 
 use crate::compose::{compose, RgbaCanvas};
 use crate::error::Error as GifError;
-use crate::image::{Block, Frame as GifFrame, GifImage, Rgb, Version};
+use crate::image::{Block, GifFile, GifFrameData as GifFrame, Rgb, Version};
 
 /// Canonical codec id for GIF image frames.
 pub const CODEC_ID_STR: &str = "gif";
@@ -39,6 +39,10 @@ impl From<GifError> for CoreError {
         match e {
             GifError::InvalidData(s) => CoreError::InvalidData(s),
             GifError::Unsupported(s) => CoreError::Unsupported(s),
+            GifError::LimitExceeded(s) => {
+                CoreError::InvalidData(format!("gif: limit exceeded: {s}"))
+            }
+            GifError::Io(e) => CoreError::Io(e),
             GifError::UnexpectedEof => {
                 CoreError::InvalidData("gif: unexpected end of stream".into())
             }
@@ -230,7 +234,7 @@ impl Encoder for GifEncoder {
             delay_centis: 0,
         });
 
-        let image = GifImage {
+        let image = GifFile {
             version: Version::Gif89a,
             screen_width: width as u16,
             screen_height: height as u16,

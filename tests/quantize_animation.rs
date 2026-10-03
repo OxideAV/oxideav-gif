@@ -1,11 +1,11 @@
 //! Integration test for the truecolor RGBA → GIF encode path.
 //!
-//! Exercises the `quantize` module + the `GifImage::from_rgba_frame` /
+//! Exercises the `quantize` module + the `GifFile::from_rgba_frame` /
 //! `from_rgba_frames` constructors end-to-end: arbitrary RGBA frames in,
 //! a conformant GIF89a byte stream out, decoded + composed back to RGBA,
 //! and the composed output checked against the source colours.
 
-use oxideav_gif::{compose, decode, encode, DisposalMethod, GifImage, Playback, Rgb};
+use oxideav_gif::{compose, decode, encode, DisposalMethod, GifFile, Playback, Rgb};
 
 /// Build a `width * height` solid-colour RGBA frame.
 fn solid(width: usize, height: usize, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
@@ -24,7 +24,7 @@ fn single_truecolor_still_round_trips_to_a_decodable_gif() {
             rgba.extend_from_slice(&[v, 0, 255 - v, 255]);
         }
     }
-    let img = GifImage::from_rgba_frame(&rgba, w as u16, h as u16, 256).unwrap();
+    let img = GifFile::from_rgba_frame(&rgba, w as u16, h as u16, 256).unwrap();
     let bytes = encode(&img).unwrap();
     assert!(bytes.starts_with(b"GIF89a") || bytes.starts_with(b"GIF87a"));
 
@@ -53,7 +53,7 @@ fn high_color_count_still_quantises_within_palette_limit() {
             rgba.extend_from_slice(&[(x * 10) as u8, (y * 15) as u8, ((x + y) * 6) as u8, 255]);
         }
     }
-    let img = GifImage::from_rgba_frame(&rgba, w as u16, h as u16, 256).unwrap();
+    let img = GifFile::from_rgba_frame(&rgba, w as u16, h as u16, 256).unwrap();
     let pal_len = img.global_palette.as_ref().unwrap().len();
     assert!(pal_len <= 256, "palette {pal_len} exceeds §19 limit");
 
@@ -84,7 +84,7 @@ fn multi_frame_animation_composes_each_frame_to_its_source_colour() {
         (&green, 20, DisposalMethod::Keep),
         (&blue, 30, DisposalMethod::Keep),
     ];
-    let img = GifImage::from_rgba_frames(&frames, w as u16, h as u16, 256, Some(0)).unwrap();
+    let img = GifFile::from_rgba_frames(&frames, w as u16, h as u16, 256, Some(0)).unwrap();
     // Loops forever (NETSCAPE2.0).
     assert_eq!(img.loop_count(), Some(0));
 
@@ -132,7 +132,7 @@ fn animated_frames_with_transparency_show_prior_canvas_through() {
         (&red, 10, DisposalMethod::None),
         (&overlay, 10, DisposalMethod::None),
     ];
-    let img = GifImage::from_rgba_frames(&frames, w as u16, h as u16, 256, None).unwrap();
+    let img = GifFile::from_rgba_frames(&frames, w as u16, h as u16, 256, None).unwrap();
     let bytes = encode(&img).unwrap();
     let decoded = decode(&bytes).unwrap();
     assert!(decoded.has_transparency());
@@ -172,7 +172,7 @@ fn quantizer_keeps_a_repeated_palette_foldable_into_a_global_table() {
         (&a, 10, DisposalMethod::None),
         (&b, 10, DisposalMethod::None),
     ];
-    let mut img = GifImage::from_rgba_frames(&frames, w as u16, h as u16, 256, None).unwrap();
+    let mut img = GifFile::from_rgba_frames(&frames, w as u16, h as u16, 256, None).unwrap();
 
     // Both frames must quantise to an identical 2-entry palette for the
     // hoist to succeed; median cut over 2 distinct colours is exact.
@@ -212,7 +212,7 @@ fn dithered_still_round_trips_to_a_decodable_gif() {
         }
     }
     let opts = QuantizeOptions::with_max_colors(8).dither(Dither::FloydSteinberg);
-    let img = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, opts).unwrap();
+    let img = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, opts).unwrap();
     // Median cut keeps at most 8 entries; dithering only stipples between
     // them, so the palette stays within budget.
     let frame = img.frames().next().unwrap();
@@ -262,7 +262,7 @@ fn every_dither_variant_round_trips_to_a_decodable_gif() {
         Dither::OrderedBayer8x8,
     ] {
         let opts = QuantizeOptions::with_max_colors(8).dither(d);
-        let img = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, opts).unwrap();
+        let img = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, opts).unwrap();
         let pal = img.global_palette.as_ref().unwrap().clone();
         assert!(pal.len() <= 8, "{d:?} palette exceeds budget");
         let bytes = encode(&img).unwrap();
@@ -301,8 +301,8 @@ fn serpentine_dither_round_trips_through_the_encode_constructor() {
     let raster = QuantizeOptions::with_max_colors(4).dither(Dither::FloydSteinberg);
     let serp = raster.serpentine(true);
 
-    let img_r = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, raster).unwrap();
-    let img_s = GifImage::from_rgba_frame_with_options(&rgba, w as u16, h as u16, serp).unwrap();
+    let img_r = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, raster).unwrap();
+    let img_s = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, serp).unwrap();
     let bytes_r = encode(&img_r).unwrap();
     let bytes_s = encode(&img_s).unwrap();
     assert_ne!(
@@ -346,7 +346,7 @@ fn shared_palette_animation_dithers_with_each_kernel() {
         Dither::OrderedBayer8x8,
     ] {
         let opts = QuantizeOptions::with_max_colors(32).dither(d);
-        let img = GifImage::from_rgba_frames_shared_palette(&frames, w, h, opts, Some(0)).unwrap();
+        let img = GifFile::from_rgba_frames_shared_palette(&frames, w, h, opts, Some(0)).unwrap();
         // Shared palette → one GCT, no per-frame LCTs.
         assert!(img.global_palette.is_some(), "{d:?} no GCT");
         for f in img.frames() {
@@ -370,7 +370,7 @@ fn dithered_animation_round_trips_and_composes() {
         (&f1[..], 10u16, DisposalMethod::None),
     ];
     let opts = QuantizeOptions::with_max_colors(16).dither(Dither::FloydSteinberg);
-    let img = GifImage::from_rgba_frames_with_options(&frames, w, h, opts, Some(0)).unwrap();
+    let img = GifFile::from_rgba_frames_with_options(&frames, w, h, opts, Some(0)).unwrap();
     let bytes = encode(&img).unwrap();
     let decoded = decode(&bytes).unwrap();
     let eager = compose(&decoded).unwrap();
@@ -399,7 +399,7 @@ fn shared_palette_animation_uses_one_gct_and_no_lcts() {
         (&green[..], 10u16, DisposalMethod::Keep),
         (&blue[..], 10u16, DisposalMethod::Keep),
     ];
-    let img = GifImage::from_rgba_frames_shared_palette(
+    let img = GifFile::from_rgba_frames_shared_palette(
         &frames,
         w,
         h,
@@ -455,8 +455,8 @@ fn shared_palette_is_smaller_than_per_frame_lcts() {
         (&b[..], 10u16, DisposalMethod::Keep),
     ];
     let opts = QuantizeOptions::with_max_colors(64);
-    let per_frame = GifImage::from_rgba_frames(&frames, w, h, 64, Some(0)).unwrap();
-    let shared = GifImage::from_rgba_frames_shared_palette(&frames, w, h, opts, Some(0)).unwrap();
+    let per_frame = GifFile::from_rgba_frames(&frames, w, h, 64, Some(0)).unwrap();
+    let shared = GifFile::from_rgba_frames_shared_palette(&frames, w, h, opts, Some(0)).unwrap();
     let per_frame_bytes = encode(&per_frame).unwrap();
     let shared_bytes = encode(&shared).unwrap();
     assert!(

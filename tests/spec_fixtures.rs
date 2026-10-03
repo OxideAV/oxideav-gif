@@ -7,7 +7,7 @@
 //! according to the rules in §13 / §15 / §18 / §20 / §22 / §23 / §27
 //! and Appendix F.
 
-use oxideav_gif::{decode, encode, Block, DisposalMethod, GifImage, GraphicControl, Rgb, Version};
+use oxideav_gif::{decode, encode, Block, DisposalMethod, GifFile, GraphicControl, Rgb, Version};
 
 /// 1×1 pixel image, GIF87a, single colour palette of two entries
 /// (smallest legal palette per §18.c.vi: actual entries = 2^(field+1),
@@ -159,7 +159,7 @@ fn two_by_two_gif89a_with_gce_decodes_and_roundtrips() {
 fn comment_extension_split_payload_roundtrips() {
     let mut payload = vec![b'a'; 255];
     payload.extend_from_slice(b"; tail\n");
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: 1,
         screen_height: 1,
@@ -180,7 +180,7 @@ fn comment_extension_split_payload_roundtrips() {
 #[test]
 fn application_extension_roundtrips() {
     use oxideav_gif::Application;
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: 1,
         screen_height: 1,
@@ -204,7 +204,7 @@ fn application_extension_roundtrips() {
 /// Appendix E row order matches between the two paths.
 #[test]
 fn interlaced_image_roundtrip() {
-    use oxideav_gif::Frame;
+    use oxideav_gif::GifFrameData;
     let w = 16u16;
     let h = 20u16;
     let palette: Vec<Rgb> = (0u8..16)
@@ -223,7 +223,7 @@ fn interlaced_image_roundtrip() {
             indices.push(((y as usize + x as usize) % 16) as u8);
         }
     }
-    let frame = Frame {
+    let frame = GifFrameData {
         left: 0,
         top: 0,
         width: w,
@@ -234,7 +234,7 @@ fn interlaced_image_roundtrip() {
         indices: indices.clone(),
         graphic_control: None,
     };
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: w,
         screen_height: h,
@@ -256,15 +256,15 @@ fn interlaced_image_roundtrip() {
 /// second one carrying its own GCE with a non-default disposal.
 #[test]
 fn multi_frame_stream_roundtrips() {
-    use oxideav_gif::Frame;
+    use oxideav_gif::GifFrameData;
     let palette = vec![
         Rgb::new(0, 0, 0),
         Rgb::new(0xFF, 0, 0),
         Rgb::new(0, 0xFF, 0),
         Rgb::new(0, 0, 0xFF),
     ];
-    let make_frame = |fill: u8, gce: Option<GraphicControl>| -> Frame {
-        Frame {
+    let make_frame = |fill: u8, gce: Option<GraphicControl>| -> GifFrameData {
+        GifFrameData {
             left: 0,
             top: 0,
             width: 4,
@@ -276,7 +276,7 @@ fn multi_frame_stream_roundtrips() {
             graphic_control: gce,
         }
     };
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: 4,
         screen_height: 4,
@@ -313,9 +313,9 @@ fn multi_frame_stream_roundtrips() {
 /// the decoded image as on the original.
 #[test]
 fn comment_accessors_roundtrip_through_encode_decode() {
-    use oxideav_gif::Frame;
+    use oxideav_gif::GifFrameData;
     let palette = vec![Rgb::new(0, 0, 0), Rgb::new(0xFF, 0xFF, 0xFF)];
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: 1,
         screen_height: 1,
@@ -327,7 +327,7 @@ fn comment_accessors_roundtrip_through_encode_decode() {
         blocks: vec![
             // §24.e.ii — leading position is recommended.
             Block::Comment(b"authored by oxideav-gif".to_vec()),
-            Block::Image(Frame {
+            Block::Image(GifFrameData {
                 left: 0,
                 top: 0,
                 width: 1,
@@ -368,7 +368,7 @@ fn comment_accessors_roundtrip_through_encode_decode() {
 /// `<Data>` elements when only a global palette load is intended.
 #[test]
 fn header_only_stream_roundtrips() {
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif87a,
         screen_width: 0,
         screen_height: 0,
@@ -387,7 +387,7 @@ fn header_only_stream_roundtrips() {
 /// Trailer ends the stream — bytes past 0x3B are ignored.
 #[test]
 fn trailing_garbage_after_trailer_is_ignored() {
-    let mut bytes = encode(&GifImage {
+    let mut bytes = encode(&GifFile {
         version: Version::Gif87a,
         screen_width: 0,
         screen_height: 0,

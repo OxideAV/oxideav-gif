@@ -1,7 +1,7 @@
 #![no_main]
 
-//! For any `decode`-able input, re-encoding the resulting `GifImage`
-//! and decoding the result must yield the same `GifImage`. This proves
+//! For any `decode`-able input, re-encoding the resulting `GifFile`
+//! and decoding the result must yield the same `GifFile`. This proves
 //! the encoder is a left inverse of the decoder on the decoder's
 //! image of valid inputs.
 

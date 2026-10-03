@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_gif::{encode, Block, Frame, GifImage, Rgb, Version};
+use oxideav_gif::{encode, Block, GifFile, GifFrameData, Rgb, Version};
 
 fn build_sample_gif() -> Vec<u8> {
     let palette = vec![
@@ -32,7 +32,7 @@ fn build_sample_gif() -> Vec<u8> {
             indices.push(((x + y) % 4) as u8);
         }
     }
-    let img = GifImage {
+    let img = GifFile {
         version: Version::Gif89a,
         screen_width: w,
         screen_height: h,
@@ -41,7 +41,7 @@ fn build_sample_gif() -> Vec<u8> {
         background_index: 0,
         pixel_aspect_ratio: 0,
         global_palette: Some(palette),
-        blocks: vec![Block::Image(Frame {
+        blocks: vec![Block::Image(GifFrameData {
             left: 0,
             top: 0,
             width: w,
