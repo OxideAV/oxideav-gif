@@ -32,35 +32,37 @@
 //! # When the bit-width grows
 //!
 //! Appendix F.4: "Whenever the LZW code value would exceed the current
-//! code length, the code length is increased by one." Reading
-//! `would exceed` strictly: a value `v` exceeds a width of `w` bits the
-//! moment `v >= 2^w`. So the width transition `w → w + 1` happens at the
-//! point at which a code of value `2^w` first becomes possible to emit.
+//! code length, the code length is increased by one." The *code value*
+//! that grows is the index of the dictionary entry just assigned: once
+//! an entry with index 2^w exists, a w-bit field can no longer name
+//! every entry, so the width becomes w + 1 for every code that follows.
 //!
-//! Encoder side: codes 0..=(2^w − 1) fit in `w` bits. Once an entry is
-//! assigned the index 2^w − 1, the encoder's next assignable index
-//! becomes 2^w which would not fit. So the encoder bumps the width the
-//! instant it has assigned an index equal to (2^w − 1).
+//! Encoder side: the encoder emits a code and then assigns the next
+//! entry. It bumps the width the instant the assigned index equals
+//! 2^w — the code it just emitted went out at w bits, the next one goes
+//! out at w + 1.
 //!
 //! Decoder side: the decoder is intrinsically one entry behind the
-//! encoder during in-loop emission — the decoder's first non-Clear
-//! code adds no entry (there is no prior `prev_code`), so after K
-//! received codes the decoder has assigned K − 1 entries while the
-//! encoder has assigned K. The encoder's bump after assigning entry
-//! 2^w − 1 therefore lines up with the decoder's bump after assigning
-//! entry 2^w − 2. Equivalently the decoder bumps when its post-add
-//! `next_code` reaches 2^w − 1, while the encoder bumps when its
-//! post-add `next_code` reaches 2^w.
+//! encoder — its first non-Clear code adds no entry (there is no prior
+//! `prev_code`), so after K received codes the decoder has assigned
+//! K − 1 entries while the encoder has assigned K. The encoder's bump
+//! after assigning entry 2^w therefore lines up with the decoder's bump
+//! after assigning entry 2^w − 1: the decoder reads a code, assigns an
+//! entry, and widens when that entry's index is 2^w − 1 (equivalently,
+//! when its post-add `next_code` reaches 2^w). This is the rule every
+//! interoperating GIF reader applies; the stream written under it was
+//! verified against two independent black-box decoders in both
+//! directions (round 466).
 //!
 //! The encoder mirrors the decoder's "one extra entry" at end-of-input
 //! by performing one phantom dictionary extension during its final
-//! flush (see [`crate::encode_file`] — the post-loop block adds a `(prev, prev's
-//! own first byte)` entry just like the decoder would on receipt of
-//! `prev`). Without that phantom add the two sides would desync at the
-//! exact moment the encoder's penultimate in-loop assignment lands on
-//! `2^w − 2` (decoder bumps; encoder doesn't), and the encoder's EOI
-//! would be written at the old width while the decoder reads at the
-//! new one.
+//! flush (see [`crate::encode_file`] — the post-loop block accounts for the
+//! `(prev, prev's own first byte)` entry the decoder adds on receipt of
+//! `prev`; that entry's index is the encoder's `next_code`). Without
+//! that phantom add the two sides would desync at the exact moment the
+//! decoder's final assignment lands on `2^w − 1` (decoder bumps;
+//! encoder doesn't), and the encoder's EOI would be written at the old
+//! width while the decoder reads at the new one.
 //!
 //! At `w == 12` no further widening occurs; behaviour from then on
 //! follows the deferred-clear rule on the cover sheet.
@@ -274,7 +276,7 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
                 // emitted code is read by the decoder at the new width.
                 let assigned = next_code;
                 next_code += 1;
-                if assigned == (1u16 << width) - 1 && width < MAX_CODE_WIDTH {
+                if assigned == (1u16 << width) && width < MAX_CODE_WIDTH {
                     width += 1;
                 }
                 // Cover-sheet "deferred clear": at next_code ==
@@ -290,18 +292,15 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
     }
 
     // Final pending prefix. The decoder, on receiving this code, will
-    // add a dictionary entry (prev_code + first_byte_of_this) and may
-    // bump its width when that assignment lands on `2^W − 2`. Mirror
+    // add a dictionary entry (prev_code + first_byte_of_this) at index
+    // `next_code` and may bump its width when that lands on `2^W − 1`. Mirror
     // that here so the encoder's `width` advances in lock-step;
     // otherwise the EOI emission below would go out at the old width
     // while the decoder reads at the new one. We do not actually need
     // the dictionary entry's contents (no further compression
     // happens), only the bump-trigger side-effect.
     writer.write(prev, width);
-    if next_code < MAX_TABLE_SIZE as u16
-        && next_code == (1u16 << width) - 1
-        && width < MAX_CODE_WIDTH
-    {
+    if next_code < MAX_TABLE_SIZE as u16 && next_code == (1u16 << width) && width < MAX_CODE_WIDTH {
         width += 1;
     }
 
@@ -403,7 +402,7 @@ pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec
             table[key] = next_code + 1;
             let assigned = next_code;
             next_code += 1;
-            if assigned == (1u16 << width) - 1 && width < MAX_CODE_WIDTH {
+            if assigned == (1u16 << width) && width < MAX_CODE_WIDTH {
                 width += 1;
             }
 
@@ -434,10 +433,7 @@ pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec
 
     // Final pending prefix + phantom width bump (see [`crate::encode_file`]).
     writer.write(prev, width);
-    if next_code < MAX_TABLE_SIZE as u16
-        && next_code == (1u16 << width) - 1
-        && width < MAX_CODE_WIDTH
-    {
+    if next_code < MAX_TABLE_SIZE as u16 && next_code == (1u16 << width) && width < MAX_CODE_WIDTH {
         width += 1;
     }
 
@@ -575,7 +571,7 @@ impl LzwEncoder {
                     // module-level doc-comment for the derivation.
                     let assigned = next_code;
                     next_code += 1;
-                    if assigned == (1u16 << width) - 1 && width < MAX_CODE_WIDTH {
+                    if assigned == (1u16 << width) && width < MAX_CODE_WIDTH {
                         width += 1;
                     }
                     // Cover-sheet "deferred clear": at next_code ==
@@ -592,7 +588,8 @@ impl LzwEncoder {
 
         // Final pending prefix. The decoder, on receiving this code,
         // will add a dictionary entry (prev_code + first_byte_of_this)
-        // and may bump its width when that assignment lands on `2^W − 2`.
+        // at index `next_code` and may bump its width when that lands
+        // on `2^W − 1`.
         // Mirror that here so the encoder's `width` advances in
         // lock-step; otherwise the EOI emission below would go out at
         // the old width while the decoder reads at the new one. We do
@@ -600,7 +597,7 @@ impl LzwEncoder {
         // compression happens), only the bump-trigger side-effect.
         writer.write(prev, width);
         if next_code < MAX_TABLE_SIZE as u16
-            && next_code == (1u16 << width) - 1
+            && next_code == (1u16 << width)
             && width < MAX_CODE_WIDTH
         {
             width += 1;
@@ -792,14 +789,13 @@ pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<V
                 suffix[next_code as usize] = entry_first_byte;
                 let assigned = next_code;
                 next_code += 1;
-                // Decoder bump rule: assigned == 2^W − 2 (one entry
-                // earlier than the encoder's own bump trigger). See the
-                // module-level `When the bit-width grows` derivation —
-                // the decoder lags the encoder by one assignment in
-                // normal flow because the decoder's first non-Clear
-                // code adds no entry; so a decoder threshold of
-                // `2^W − 2` lines up with the encoder's `2^W − 1`.
-                let threshold = (1u16 << width).wrapping_sub(2);
+                // Decoder bump rule: assigned == 2^W − 1 (one entry
+                // earlier than the encoder's own bump trigger at 2^W).
+                // See the module-level `When the bit-width grows`
+                // derivation — the decoder lags the encoder by one
+                // assignment in normal flow because the decoder's first
+                // non-Clear code adds no entry.
+                let threshold = (1u16 << width) - 1;
                 if assigned == threshold && width < MAX_CODE_WIDTH {
                     width += 1;
                 }
@@ -834,13 +830,17 @@ mod tests {
         //
         // Emission sequence per the encoder state machine
         // (Appendix F):
-        //   Clear=4 (w=3), 0 (w=3), 1 (w=3),
-        //   2 (w=4), 3, 6, 8, 10, 9, 7, 3, EOI=5 (all w=4)
+        //   Clear=4 (w=3), 0 (w=3), 1 (w=3), 2 (w=3),
+        //   3, 6, 8, 10, 9, 7, 3 (all w=4), EOI=5 (w=5)
         //
-        // Width bump after assigning entry 7 (= 2^3 − 1).
-        // Bits packed right-to-left per "BUILD 8-BIT BYTES".
-        // Total bits = 3*3 + 9*4 = 45 → 6 bytes (last has 3 trailing zero bits).
-        const EXPECTED: [u8; 6] = [0x44, 0x64, 0x0C, 0x35, 0x6F, 0x0A];
+        // Width bump 3 → 4 after assigning entry 8 (= 2^3); the final
+        // `3` makes the decoder assign entry 15 (= 2^4 − 1), so EOI goes
+        // out at 5 bits. Bits packed right-to-left per "BUILD 8-BIT
+        // BYTES". Total bits = 4*3 + 7*4 + 5 = 45 → 6 bytes (last has
+        // 3 trailing zero bits). The whole-file form of this raster
+        // decodes identically through two independent black-box GIF
+        // readers.
+        const EXPECTED: [u8; 6] = [0x44, 0x34, 0x86, 0x9A, 0x37, 0x05];
         let pixels: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let encoded = encode(2, &pixels).unwrap();
         assert_eq!(encoded.as_slice(), &EXPECTED);

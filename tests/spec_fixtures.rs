@@ -81,23 +81,26 @@ fn one_by_one_gif87a_decodes_and_roundtrips() {
 /// Pixels: 0, 1, 2, 3 (top-left, top-right, bottom-left, bottom-right).
 /// LZW Minimum Code Size = 2 (4-entry palette ⇒ 2 bits, ties Appendix F floor).
 ///
-/// LZW emission for `[0,1,2,3]`:
-///   Clear (= 4) at w=3, 0 at w=3, 1 at w=3,
-///   bump w → 4 after assigning entry 7,
-///   2 at w=4, 3 at w=4, EOI (= 5) at w=4.
-/// Total bits = 3*3 + 3*4 = 21 bits → 3 bytes.
+/// LZW emission for `[0,1,2,3]` (Appendix F.4: the code length grows
+/// when a code value would exceed it — i.e. once dictionary entry 2^w
+/// has been assigned; the decoder, one entry behind, widens after
+/// assigning 2^w − 1):
+///   Clear (= 4) at w=3, 0 at w=3, 1 at w=3, 2 at w=3,
+///   bump w → 4 after assigning entry 8 (= 2^3),
+///   3 at w=4, EOI (= 5) at w=4 (the decoder assigns entry 9 on `3`).
+/// Total bits = 4*3 + 2*4 = 20 bits → 3 bytes.
 #[test]
 fn two_by_two_gif89a_with_gce_decodes_and_roundtrips() {
     // Walk the LZW bit stream:
     //   bits[0..3]   = Clear (4) packed LSB-first → (0,0,1)
     //   bits[3..6]   = 0                          → (0,0,0)
     //   bits[6..9]   = 1                          → (1,0,0)
-    //   bits[9..13]  = 2 at w=4                   → (0,1,0,0)
-    //   bits[13..17] = 3 at w=4                   → (1,1,0,0)
-    //   bits[17..21] = EOI=5 at w=4               → (1,0,1,0)
+    //   bits[9..12]  = 2                          → (0,1,0)
+    //   bits[12..16] = 3 at w=4                   → (1,1,0,0)
+    //   bits[16..20] = EOI=5 at w=4               → (1,0,1,0)
     // Byte 0 = bits[0..8]   = (0,0,1,0,0,0,1,0)   = 0x44
-    // Byte 1 = bits[8..16]  = (0,0,1,0,0,1,1,0)   = 0x64
-    // Byte 2 = bits[16..24] = (0,1,0,1,0,0,0,0)   = 0x0A (3 trailing zeros)
+    // Byte 1 = bits[8..16]  = (0,0,1,0,1,1,0,0)   = 0x34
+    // Byte 2 = bits[16..24] = (1,0,1,0,0,0,0,0)   = 0x05 (4 trailing zeros)
     #[rustfmt::skip]
     const FIXTURE: &[u8] = &[
         // Header §17 — GIF89a
@@ -131,7 +134,7 @@ fn two_by_two_gif89a_with_gce_decodes_and_roundtrips() {
         // LZW Minimum Code Size §22.c.i
         0x02,
         // Sub-block §15: 3 bytes
-        0x03, 0x44, 0x64, 0x0A,
+        0x03, 0x44, 0x34, 0x05,
         0x00,                       // §16 terminator
         // Trailer §27
         0x3B,

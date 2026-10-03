@@ -109,6 +109,35 @@
   `ColorSignal`). CI gains the inline `ci-standalone` job
   (`--no-default-features` clippy + tests).
 
+### Fixed
+
+- **LZW code-width switch was one code early on both sides — streams
+  written by this crate were misdecoded by every other GIF reader past
+  the first dictionary growth, and streams written by other encoders
+  failed here with `LZW code N exceeds dictionary size`.** Appendix F.4
+  ("whenever the LZW code value would exceed the current code length,
+  the code length is increased by one") is the index of the dictionary
+  entry just assigned: the encoder widens once it has assigned entry
+  2^w (the code it just emitted went out at w bits), and the decoder —
+  one entry behind — widens once it has assigned entry 2^w − 1. The
+  codec applied both thresholds one entry early (encoder at 2^w − 1,
+  decoder at 2^w − 2) and so round-tripped with itself only. All three
+  encoder paths (`lzw::encode`, `encode_with_clear_on_full`,
+  `LzwEncoder::encode_frame`), their end-of-input phantom bump and the
+  decoder are corrected; the hand-derived fixtures in `lzw` tests,
+  `tests/spec_fixtures.rs` and `tests/conformance_report.rs` are
+  re-derived under the corrected rule (`[0,1,2,3]` at code size 2 is
+  `44 34 05`, not `44 64 0A`). Verified in both directions against two
+  independent black-box GIF readers: our output for 2×2 / 4×4 / 37×23
+  (interlaced, transparent, 256 colours) / 300×300 noise (table
+  overflow under both `LzwStrategy` values) decodes pixel-identically
+  there, and a 200-colour GIF written by one of them now decodes
+  pixel-identically here. Encoded bytes change for every raster that
+  grows its dictionary past 2^w − 1 entries (i.e. nearly all of them);
+  decoded pixels of every stream this crate wrote before this fix are
+  unchanged *only* when read by this crate's old decoder — re-encode
+  such files.
+
 ### Deprecated
 
 - `decode_first_frame` → `parse_first_frame`, `decode_lenient` →

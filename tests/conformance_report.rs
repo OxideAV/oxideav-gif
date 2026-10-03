@@ -82,8 +82,9 @@ fn decoded_multi_block_stream_is_conformant() {
         // Image Descriptor §20 — full screen, no LCT, not interlaced
         0x2C, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00,
         // Table-Based Image Data §22 — mcs 2 then one §15 sub-block,
-        // decoding to indices [0,1,2,3] (the proven 2×2 fixture stream).
-        0x02, 0x03, 0x44, 0x64, 0x0A, 0x00,
+        // decoding to indices [0,1,2,3]: Clear(4) 0 1 2 at 3 bits, then
+        // 3 and EOI(5) at 4 bits (entry 8 = 2^3 was assigned after `2`).
+        0x02, 0x03, 0x44, 0x34, 0x05, 0x00,
         // Trailer §27
         0x3B,
     ];
