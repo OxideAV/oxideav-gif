@@ -5,7 +5,7 @@
 //! a conformant GIF89a byte stream out, decoded + composed back to RGBA,
 //! and the composed output checked against the source colours.
 
-use oxideav_gif::{compose, decode, encode, DisposalMethod, GifFile, Playback, Rgb};
+use oxideav_gif::{compose, encode_file, parse, DisposalMethod, GifFile, Playback, Rgb};
 
 /// Build a `width * height` solid-colour RGBA frame.
 fn solid(width: usize, height: usize, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
@@ -25,10 +25,10 @@ fn single_truecolor_still_round_trips_to_a_decodable_gif() {
         }
     }
     let img = GifFile::from_rgba_frame(&rgba, w as u16, h as u16, 256).unwrap();
-    let bytes = encode(&img).unwrap();
+    let bytes = encode_file(&img).unwrap();
     assert!(bytes.starts_with(b"GIF89a") || bytes.starts_with(b"GIF87a"));
 
-    let decoded = decode(&bytes).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let composed = compose(&decoded).unwrap();
     assert_eq!(composed.len(), 1);
     let canvas = &composed[0].canvas;
@@ -57,8 +57,8 @@ fn high_color_count_still_quantises_within_palette_limit() {
     let pal_len = img.global_palette.as_ref().unwrap().len();
     assert!(pal_len <= 256, "palette {pal_len} exceeds §19 limit");
 
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let composed = compose(&decoded).unwrap();
     assert_eq!(composed.len(), 1);
     // Quantisation is lossy, but the composed canvas must still be the
@@ -88,8 +88,8 @@ fn multi_frame_animation_composes_each_frame_to_its_source_colour() {
     // Loops forever (NETSCAPE2.0).
     assert_eq!(img.loop_count(), Some(0));
 
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     assert_eq!(decoded.frame_count(), 3);
     assert_eq!(decoded.loop_count(), Some(0));
 
@@ -133,8 +133,8 @@ fn animated_frames_with_transparency_show_prior_canvas_through() {
         (&overlay, 10, DisposalMethod::None),
     ];
     let img = GifFile::from_rgba_frames(&frames, w as u16, h as u16, 256, None).unwrap();
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     assert!(decoded.has_transparency());
 
     let composed = compose(&decoded).unwrap();
@@ -189,8 +189,8 @@ fn quantizer_keeps_a_repeated_palette_foldable_into_a_global_table() {
     }
 
     // Still composes correctly after the optimisation.
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let composed = compose(&decoded).unwrap();
     assert_eq!(composed.len(), 2);
 }
@@ -220,8 +220,8 @@ fn dithered_still_round_trips_to_a_decodable_gif() {
     assert!(pal.len() <= 8);
     assert!(frame.indices.iter().all(|&i| (i as usize) < pal.len()));
 
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let composed = compose(&decoded).unwrap();
     assert_eq!(composed.len(), 1);
     let canvas = &composed[0].canvas;
@@ -265,8 +265,8 @@ fn every_dither_variant_round_trips_to_a_decodable_gif() {
         let img = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, opts).unwrap();
         let pal = img.global_palette.as_ref().unwrap().clone();
         assert!(pal.len() <= 8, "{d:?} palette exceeds budget");
-        let bytes = encode(&img).unwrap();
-        let decoded = decode(&bytes).unwrap();
+        let bytes = encode_file(&img).unwrap();
+        let decoded = parse(&bytes).unwrap();
         let composed = compose(&decoded).unwrap();
         assert_eq!(composed.len(), 1, "{d:?}");
         let canvas = &composed[0].canvas;
@@ -303,8 +303,8 @@ fn serpentine_dither_round_trips_through_the_encode_constructor() {
 
     let img_r = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, raster).unwrap();
     let img_s = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, serp).unwrap();
-    let bytes_r = encode(&img_r).unwrap();
-    let bytes_s = encode(&img_s).unwrap();
+    let bytes_r = encode_file(&img_r).unwrap();
+    let bytes_s = encode_file(&img_s).unwrap();
     assert_ne!(
         bytes_r, bytes_s,
         "serpentine flag must change the encoded LZW stream"
@@ -313,7 +313,7 @@ fn serpentine_dither_round_trips_through_the_encode_constructor() {
     // Both decode + compose to an in-palette canvas.
     for (bytes, img) in [(&bytes_s, &img_s), (&bytes_r, &img_r)] {
         let pal = img.global_palette.as_ref().unwrap();
-        let composed = compose(&decode(bytes).unwrap()).unwrap();
+        let composed = compose(&parse(bytes).unwrap()).unwrap();
         assert_eq!(composed.len(), 1);
         for px in composed[0].canvas.pixels.chunks_exact(4) {
             assert!(pal.contains(&Rgb::new(px[0], px[1], px[2])));
@@ -352,8 +352,8 @@ fn shared_palette_animation_dithers_with_each_kernel() {
         for f in img.frames() {
             assert!(f.local_palette.is_none(), "{d:?} unexpected LCT");
         }
-        let bytes = encode(&img).unwrap();
-        let decoded = decode(&bytes).unwrap();
+        let bytes = encode_file(&img).unwrap();
+        let decoded = parse(&bytes).unwrap();
         let composed = compose(&decoded).unwrap();
         assert_eq!(composed.len(), 2, "{d:?}");
     }
@@ -371,8 +371,8 @@ fn dithered_animation_round_trips_and_composes() {
     ];
     let opts = QuantizeOptions::with_max_colors(16).dither(Dither::FloydSteinberg);
     let img = GifFile::from_rgba_frames_with_options(&frames, w, h, opts, Some(0)).unwrap();
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let eager = compose(&decoded).unwrap();
     assert_eq!(eager.len(), 2);
     // Lazy Playback parity with eager compose.
@@ -421,8 +421,8 @@ fn shared_palette_animation_uses_one_gct_and_no_lcts() {
     }
 
     // Round-trips, and each frame composes back to its source colour.
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     assert_eq!(decoded.frame_count(), 3);
     let composed = compose(&decoded).unwrap();
     assert_eq!(composed.len(), 3);
@@ -457,8 +457,8 @@ fn shared_palette_is_smaller_than_per_frame_lcts() {
     let opts = QuantizeOptions::with_max_colors(64);
     let per_frame = GifFile::from_rgba_frames(&frames, w, h, 64, Some(0)).unwrap();
     let shared = GifFile::from_rgba_frames_shared_palette(&frames, w, h, opts, Some(0)).unwrap();
-    let per_frame_bytes = encode(&per_frame).unwrap();
-    let shared_bytes = encode(&shared).unwrap();
+    let per_frame_bytes = encode_file(&per_frame).unwrap();
+    let shared_bytes = encode_file(&shared).unwrap();
     assert!(
         shared_bytes.len() <= per_frame_bytes.len(),
         "shared {} should be <= per-frame {}",
@@ -466,7 +466,7 @@ fn shared_palette_is_smaller_than_per_frame_lcts() {
         per_frame_bytes.len()
     );
     // And the shared one still decodes to two frames.
-    let decoded = decode(&shared_bytes).unwrap();
+    let decoded = parse(&shared_bytes).unwrap();
     assert_eq!(decoded.frame_count(), 2);
     assert!(decoded.global_palette.is_some());
 }

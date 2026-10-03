@@ -8,7 +8,7 @@ use core::time::Duration;
 
 use oxideav_gif::app_ext::LoopControl;
 use oxideav_gif::{
-    compose, decode, encode, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
+    compose, encode_file, parse, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
     Playback, Rgb, Version,
 };
 
@@ -79,8 +79,8 @@ fn playback_frames_match_eager_compose_via_roundtrip() {
         Block::Image(small_frame(2, 2, 2, None)),
     ]);
 
-    let bytes = encode(&img).unwrap();
-    let parsed = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let parsed = parse(&bytes).unwrap();
 
     let eager = compose(&parsed).unwrap();
     let lazy: Vec<_> = Playback::new(&parsed)
@@ -115,8 +115,8 @@ fn looping_frames_honour_netscape_count_via_roundtrip() {
         Block::Image(small_frame(2, 2, 2, None)),
     ]);
 
-    let bytes = encode(&img).unwrap();
-    let parsed = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let parsed = parse(&bytes).unwrap();
 
     let collected: Vec<_> = Playback::new(&parsed)
         .looping_frames()
@@ -135,8 +135,8 @@ fn looping_frames_default_one_pass_via_roundtrip() {
         Block::Image(small_frame(0, 0, 1, None)),
         Block::Image(small_frame(2, 2, 2, None)),
     ]);
-    let bytes = encode(&img).unwrap();
-    let parsed = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let parsed = parse(&bytes).unwrap();
     let collected: Vec<_> = Playback::new(&parsed)
         .looping_frames()
         .collect::<oxideav_gif::Result<Vec<_>>>()

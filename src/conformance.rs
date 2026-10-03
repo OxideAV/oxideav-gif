@@ -4,7 +4,7 @@
 //! The [`crate::encoder`] enforces the small set of constraints whose
 //! violation makes a stream *un-encodable* (palette length, declared
 //! version vs. block content, `indices.len() == width × height`). Those
-//! are fatal: [`crate::encode`] returns [`Error::InvalidInput`] before
+//! are fatal: [`crate::encode_file`] returns [`crate::Error::InvalidInput`] before
 //! a byte goes to the wire.
 //!
 //! This module is the complementary *diagnostic* surface: it walks a
@@ -77,7 +77,7 @@ pub enum ConformanceSeverity {
     Error,
     /// A departure from a spec *recommendation*. The stream is still
     /// processable, but it ignores guidance the spec offers for
-    /// interoperability (e.g. §23.e.ii "the encoder [should] not set
+    /// interoperability (e.g. §23.e.ii "the encoder \[should\] not set
     /// the User Input Flag without a Delay Time specified").
     Recommendation,
 }
@@ -239,7 +239,7 @@ impl GifFile {
     ///
     /// This never mutates `self` and never fails — it returns the
     /// (possibly empty) list of departures. It is the diagnostic
-    /// counterpart to [`crate::encode`]'s fatal validation: a clean
+    /// counterpart to [`crate::encode_file`]'s fatal validation: a clean
     /// report (`report.is_clean()`) implies `encode` will not reject
     /// the image, but a report with only
     /// [`ConformanceSeverity::Recommendation`] issues *also* encodes
@@ -442,7 +442,7 @@ impl GifFile {
 
     /// Gate on the *error*-level conformance issues: returns `Ok(())`
     /// when [`Self::conformance_report`] finds no
-    /// [`ConformanceSeverity::Error`], else [`Error::InvalidInput`]
+    /// [`ConformanceSeverity::Error`], else [`crate::Error::InvalidInput`]
     /// carrying every error issue (one per line, recommendations
     /// excluded).
     ///
@@ -454,7 +454,7 @@ impl GifFile {
     /// per-issue `block_index` / `rule`) calls `conformance_report`
     /// directly.
     ///
-    /// Note this is a *superset* of [`crate::encode`]'s fatal checks —
+    /// Note this is a *superset* of [`crate::encode_file`]'s fatal checks —
     /// it also rejects §20.a placement / §22 pixel-range / §23.c.viii
     /// transparent-index departures that `encode` itself tolerates — so
     /// `validate_strict().is_ok()` implies `encode` accepts the image,

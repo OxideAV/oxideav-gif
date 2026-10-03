@@ -30,7 +30,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_gif::{encode, image::Rgb, AnimationBuilder, DisposalMethod};
+use oxideav_gif::{encode_file, image::Rgb, AnimationBuilder, DisposalMethod};
 
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;
@@ -76,7 +76,7 @@ fn bench_encode_still_320x240_256pal(c: &mut Criterion) {
     g.throughput(Throughput::Bytes((320 * 240) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("still/320x240/pal=255"), |b| {
-        b.iter(|| encode(criterion::black_box(&img)).expect("encode"));
+        b.iter(|| encode_file(criterion::black_box(&img)).expect("encode"));
     });
     g.finish();
 }
@@ -93,7 +93,7 @@ fn bench_encode_still_64x64_8pal(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_still_64x64_8pal");
     g.throughput(Throughput::Bytes((64 * 64) as u64));
     g.bench_function(BenchmarkId::from_parameter("still/64x64/pal=8"), |b| {
-        b.iter(|| encode(criterion::black_box(&img)).expect("encode"));
+        b.iter(|| encode_file(criterion::black_box(&img)).expect("encode"));
     });
     g.finish();
 }
@@ -113,7 +113,7 @@ fn bench_encode_anim_64x64_8f(c: &mut Criterion) {
     g.throughput(Throughput::Bytes((64 * 64 * 8) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("anim/64x64/8f"), |b| {
-        b.iter(|| encode(criterion::black_box(&img)).expect("encode"));
+        b.iter(|| encode_file(criterion::black_box(&img)).expect("encode"));
     });
     g.finish();
 }
@@ -133,7 +133,7 @@ fn bench_encode_anim_320x240_4f(c: &mut Criterion) {
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.sample_size(10);
     g.bench_function(BenchmarkId::from_parameter("anim/320x240/4f"), |b| {
-        b.iter(|| encode(criterion::black_box(&img)).expect("encode"));
+        b.iter(|| encode_file(criterion::black_box(&img)).expect("encode"));
     });
     g.finish();
 }

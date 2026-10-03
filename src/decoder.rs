@@ -11,6 +11,7 @@ use crate::image::{
 };
 use crate::interlace::interlace_row_order;
 use crate::lzw;
+use crate::options::DecodeOptions;
 
 /// Byte values referenced by the spec.
 mod label {
@@ -37,7 +38,7 @@ mod label {
 /// one [`Block::Image`].
 ///
 /// Walks the §B grammar header → Logical Screen Descriptor → §15
-/// data sub-blocks the same way [`decode`] does, but short-circuits
+/// data sub-blocks the same way [`crate::parse`] does, but short-circuits
 /// the moment the first §20 Image Descriptor finishes. Trailing
 /// §24 Comment / §25 Plain Text / §26 Application Extension blocks
 /// (and the §27 Trailer) are intentionally not consumed — the caller
@@ -47,19 +48,27 @@ mod label {
 /// Returns [`Error::InvalidData`] when the stream contains no image
 /// block at all (only extensions, then the trailer).
 ///
-/// Use [`decode`] when you need the full block list (animation
+/// Use [`parse`] when you need the full block list (animation
 /// frames, comments, application extensions).
 ///
-/// # Why this is faster than `decode().frames().next()`
+/// # Why this is faster than `parse().frames().next()`
 ///
-/// `decode()` allocates a [`Vec<Block>`] sized to every block in the
+/// `parse()` allocates a [`Vec<Block>`] sized to every block in the
 /// stream, walks every comment / application block past the first
 /// image, and re-runs the LZW decoder on every animation frame even
-/// when the consumer only wants the first one. `decode_first_frame`
+/// when the consumer only wants the first one. `parse_first_frame`
 /// stops at the first image and never allocates the trailing block
 /// list.
-pub fn decode_first_frame(bytes: &[u8]) -> Result<GifFile> {
-    let mut p = Parser::new(bytes);
+pub fn parse_first_frame(bytes: &[u8]) -> Result<GifFile> {
+    parse_first_frame_with(bytes, &DecodeOptions::default())
+}
+
+/// [`parse_first_frame`] under explicit [`DecodeOptions`] limits. The
+/// `strict` / `lenient` flags are ignored here: the fast path is
+/// always the structural (non-recovering) parser, and the conformance
+/// walk needs the whole block list.
+pub fn parse_first_frame_with(bytes: &[u8], opts: &DecodeOptions) -> Result<GifFile> {
+    let mut p = Parser::new(bytes, opts);
     let version = p.read_header()?;
     let (screen_width, screen_height, packed, background_index, pixel_aspect_ratio) =
         p.read_logical_screen_descriptor()?;
@@ -79,7 +88,7 @@ pub fn decode_first_frame(bytes: &[u8]) -> Result<GifFile> {
         match intro {
             label::TRAILER => {
                 return Err(Error::InvalidData(
-                    "decode_first_frame: stream contains no image block".into(),
+                    "parse_first_frame: stream contains no image block".into(),
                 ));
             }
             label::IMAGE_SEPARATOR => {
@@ -140,9 +149,42 @@ pub fn decode_first_frame(bytes: &[u8]) -> Result<GifFile> {
     }
 }
 
-/// Read a GIF Data Stream from `bytes` and return it as a [`GifFile`].
-pub fn decode(bytes: &[u8]) -> Result<GifFile> {
-    decode_with(bytes, RecoveryMode::Strict)
+/// Read a GIF Data Stream from `bytes` and return it as a [`GifFile`]
+/// — every block, every colour table, every §22 index raster — under
+/// [`DecodeOptions::default`] (structural parse, 1 GiB byte limit).
+///
+/// This is the depth entry point; the image-crate contract's
+/// [`crate::parse`] composes the first frame of this model onto the
+/// Logical Screen.
+pub fn parse(bytes: &[u8]) -> Result<GifFile> {
+    parse_with(bytes, &DecodeOptions::default())
+}
+
+/// [`parse`] under explicit [`DecodeOptions`]: limits are enforced
+/// before every allocation, `lenient` selects the recovery parser of
+/// [`parse_lenient`], and `strict` runs
+/// [`GifFile::validate_strict`] on the parsed stream.
+pub fn parse_with(bytes: &[u8], opts: &DecodeOptions) -> Result<GifFile> {
+    if opts.strict && opts.lenient {
+        return Err(Error::invalid_input(
+            "DecodeOptions: strict and lenient are mutually exclusive",
+        ));
+    }
+    let mode = if opts.lenient {
+        RecoveryMode::Lenient
+    } else {
+        RecoveryMode::Strict
+    };
+    let file = parse_mode(bytes, mode, opts)?;
+    if opts.strict {
+        // The conformance walk reports encoder-side `InvalidInput`;
+        // on the decode path the same departures are `InvalidData`.
+        file.validate_strict().map_err(|e| match e {
+            Error::InvalidInput(msg) => Error::InvalidData(msg),
+            other => other,
+        })?;
+    }
+    Ok(file)
 }
 
 /// Read a GIF Data Stream in *lenient* mode — when the parser hits a
@@ -161,7 +203,7 @@ pub fn decode(bytes: &[u8]) -> Result<GifFile> {
 /// Real-world streams can be truncated by network resets, corrupted
 /// by transcoders that miscount sub-block lengths, or stitched
 /// together by tools that produce malformed application extensions.
-/// Strict mode (the [`decode`] entry point) refuses these inputs;
+/// Strict mode (the [`crate::parse`] entry point) refuses these inputs;
 /// lenient mode lets a viewer recover whatever image-bearing blocks
 /// are still readable behind a broken extension or a malformed prior
 /// frame.
@@ -177,13 +219,28 @@ pub fn decode(bytes: &[u8]) -> Result<GifFile> {
 ///
 /// # Why a separate entry point
 ///
-/// Production decoders should default to strict ([`decode`]) so a
+/// Production decoders should default to strict ([`parse`]) so a
 /// corrupted stream doesn't silently round-trip to a *different*
 /// stream on re-encode. Lenient mode is opt-in for consumers (viewers,
 /// thumbnailers, recovery tools) that prefer "show what we can" over
-/// "all or nothing".
+/// "all or nothing". Equivalent to [`parse_with`] with
+/// [`DecodeOptions::with_lenient`]`(true)`.
+pub fn parse_lenient(bytes: &[u8]) -> Result<GifFile> {
+    parse_with(bytes, &DecodeOptions::default().with_lenient(true))
+}
+
+// ---- Pre-contract names, kept for one release -------------------------
+
+/// The pre-contract name of [`parse_first_frame`].
+#[deprecated(note = "use oxideav_gif::parse_first_frame (IMAGE_CRATE_API)")]
+pub fn decode_first_frame(bytes: &[u8]) -> Result<GifFile> {
+    parse_first_frame(bytes)
+}
+
+/// The pre-contract name of [`parse_lenient`].
+#[deprecated(note = "use oxideav_gif::parse_lenient (IMAGE_CRATE_API)")]
 pub fn decode_lenient(bytes: &[u8]) -> Result<GifFile> {
-    decode_with(bytes, RecoveryMode::Lenient)
+    parse_lenient(bytes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,8 +249,8 @@ enum RecoveryMode {
     Lenient,
 }
 
-fn decode_with(bytes: &[u8], mode: RecoveryMode) -> Result<GifFile> {
-    let mut p = Parser::new(bytes);
+fn parse_mode(bytes: &[u8], mode: RecoveryMode, opts: &DecodeOptions) -> Result<GifFile> {
+    let mut p = Parser::new(bytes, opts);
     let version = p.read_header()?;
     let (screen_width, screen_height, packed, background_index, pixel_aspect_ratio) =
         p.read_logical_screen_descriptor()?;
@@ -237,6 +294,9 @@ fn decode_with(bytes: &[u8], mode: RecoveryMode) -> Result<GifFile> {
             label::IMAGE_SEPARATOR => {
                 match p.read_image_descriptor_and_data(pending_gce.take()) {
                     Ok(frame) => blocks.push(Block::Image(frame)),
+                    // A DecodeOptions limit is a caller policy, not a
+                    // malformed block: it is never recovered from.
+                    Err(e @ Error::LimitExceeded(_)) => return Err(e),
                     Err(e) => match mode {
                         RecoveryMode::Strict => return Err(e),
                         // §22 LZW corruption / image-descriptor
@@ -350,17 +410,153 @@ fn decode_with(bytes: &[u8], mode: RecoveryMode) -> Result<GifFile> {
 }
 
 // ---------------------------------------------------------------------
+// Header walk for the image-crate contract (`info` / `decode`).
+// ---------------------------------------------------------------------
+
+/// What [`scan`] learns from a structural walk of the stream.
+pub(crate) struct Scan {
+    /// A *partial* [`GifFile`]: header / Logical Screen fields, every
+    /// §26 Application Extension in source order, and the first §20
+    /// image (raster expanded only when asked, otherwise `indices` is
+    /// empty). Comments, Plain Text blocks and later images are not
+    /// materialised. Never hand this to a caller as a `GifFile`.
+    pub(crate) file: GifFile,
+    /// Number of §20 image blocks seen.
+    pub(crate) image_count: u32,
+    /// Number of §25 Plain Text blocks seen.
+    pub(crate) plain_text_count: u32,
+}
+
+/// Walk the stream like [`parse`] but without expanding any LZW raster
+/// except (when `expand_first`) the first image's. The §17 header, §18
+/// Logical Screen Descriptor and §19 Global Color Table must parse;
+/// so must every block up to and including the first image. Past that
+/// point a structural fault ends the walk and the counts so far are
+/// returned — the same success domain as [`parse_first_frame`].
+pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Result<Scan> {
+    let mut p = Parser::new(bytes, opts);
+    let version = p.read_header()?;
+    let (screen_width, screen_height, packed, background_index, pixel_aspect_ratio) =
+        p.read_logical_screen_descriptor()?;
+    let global_table_flag = (packed & 0b1000_0000) != 0;
+    let color_resolution = (packed >> 4) & 0b0000_0111;
+    let global_palette_sorted = (packed & 0b0000_1000) != 0;
+    let global_table_size_bits = packed & 0b0000_0111;
+    let global_palette = if global_table_flag {
+        Some(p.read_color_table(global_table_size_bits)?)
+    } else {
+        None
+    };
+
+    let mut blocks = Vec::new();
+    let mut pending_gce: Option<GraphicControl> = None;
+    let mut image_count = 0u32;
+    let mut plain_text_count = 0u32;
+
+    // Every structural step after the first image is "best effort": an
+    // `Err` ends the walk instead of failing it.
+    macro_rules! step {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(e) => {
+                    if image_count == 0 {
+                        return Err(e);
+                    }
+                    break;
+                }
+            }
+        };
+    }
+
+    loop {
+        let intro = step!(p.peek_byte());
+        match intro {
+            label::TRAILER => break,
+            label::IMAGE_SEPARATOR => {
+                if image_count == 0 && expand_first {
+                    let frame = p.read_image_descriptor_and_data(pending_gce.take())?;
+                    blocks.push(Block::Image(frame));
+                } else {
+                    let frame = step!(p.skip_image_descriptor_and_data(pending_gce.take()));
+                    if image_count == 0 {
+                        blocks.push(Block::Image(frame));
+                    }
+                }
+                image_count += 1;
+            }
+            label::EXTENSION_INTRODUCER => {
+                p.advance(1);
+                let label = step!(p.read_byte());
+                match label {
+                    label::GRAPHIC_CONTROL => {
+                        pending_gce = Some(step!(p.read_graphic_control_extension()));
+                    }
+                    label::COMMENT => {
+                        step!(p.skip_data_sub_blocks());
+                    }
+                    label::PLAIN_TEXT => {
+                        let _ = step!(p.read_plain_text_extension());
+                        pending_gce = None;
+                        plain_text_count += 1;
+                    }
+                    label::APPLICATION => {
+                        let app = step!(p.read_application_extension());
+                        blocks.push(Block::Application(app));
+                    }
+                    other => {
+                        step!(Err(Error::Unsupported(format!(
+                            "unknown extension label 0x{other:02X}"
+                        ))));
+                    }
+                }
+            }
+            other => {
+                step!(Err(Error::InvalidData(format!(
+                    "expected block introducer, got byte 0x{other:02X}"
+                ))));
+            }
+        }
+    }
+
+    Ok(Scan {
+        file: GifFile {
+            version,
+            screen_width,
+            screen_height,
+            color_resolution,
+            global_palette_sorted,
+            background_index,
+            pixel_aspect_ratio,
+            global_palette,
+            blocks,
+        },
+        image_count,
+        plain_text_count,
+    })
+}
+
+// ---------------------------------------------------------------------
 // Parser internals.
 // ---------------------------------------------------------------------
 
 struct Parser<'a> {
     src: &'a [u8],
     pos: usize,
+    /// Caller limits, checked before every raster allocation.
+    opts: &'a DecodeOptions,
+    /// Running total of expanded §22 raster bytes, for `max_bytes`.
+    decoded_total: u64,
 }
 
 impl<'a> Parser<'a> {
-    fn new(src: &'a [u8]) -> Self {
-        Self { src, pos: 0 }
+    fn new(src: &'a [u8], opts: &'a DecodeOptions) -> Self {
+        Self {
+            src,
+            pos: 0,
+            opts,
+            decoded_total: 0,
+        }
     }
 
     fn remaining(&self) -> usize {
@@ -441,6 +637,10 @@ impl<'a> Parser<'a> {
         let packed = self.read_byte()?;
         let bg = self.read_byte()?;
         let aspect = self.read_byte()?;
+        // DecodeOptions: the Logical Screen is the size of every image
+        // this crate hands back; refuse before any block is parsed.
+        self.opts
+            .check_screen(u32::from(w), u32::from(h), u64::from(w) * u64::from(h))?;
         Ok((w, h, packed, bg, aspect))
     }
 
@@ -503,6 +703,46 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a §20 Image Descriptor (+ §21 Local Color Table) and walk
+    /// past its §22 data sub-blocks **without** expanding the LZW
+    /// stream. The returned record has an empty `indices` raster; it is
+    /// only used by the contract's header walk ([`scan`]).
+    fn skip_image_descriptor_and_data(
+        &mut self,
+        graphic_control: Option<GraphicControl>,
+    ) -> Result<GifFrameData> {
+        let sep = self.read_byte()?;
+        debug_assert_eq!(sep, label::IMAGE_SEPARATOR);
+        let left = self.read_u16_le()?;
+        let top = self.read_u16_le()?;
+        let width = self.read_u16_le()?;
+        let height = self.read_u16_le()?;
+        let packed = self.read_byte()?;
+        let local_flag = (packed & 0b1000_0000) != 0;
+        let interlaced = (packed & 0b0100_0000) != 0;
+        let palette_sorted = (packed & 0b0010_0000) != 0;
+        let local_size_bits = packed & 0b0000_0111;
+        let local_palette = if local_flag {
+            Some(self.read_color_table(local_size_bits)?)
+        } else {
+            None
+        };
+        // §22 — LZW Minimum Code Size byte, then the sub-block chain.
+        let _min_code_size = self.read_byte()?;
+        self.skip_data_sub_blocks()?;
+        Ok(GifFrameData {
+            left,
+            top,
+            width,
+            height,
+            local_palette,
+            palette_sorted,
+            interlaced,
+            indices: Vec::new(),
+            graphic_control,
+        })
+    }
+
     fn read_image_descriptor_and_data(
         &mut self,
         graphic_control: Option<GraphicControl>,
@@ -542,6 +782,15 @@ impl<'a> Parser<'a> {
         let pixels_expected = (width as usize)
             .checked_mul(height as usize)
             .ok_or_else(|| Error::InvalidData("image width × height overflows".into()))?;
+
+        // DecodeOptions: bound the raster about to be allocated, and
+        // the running total across the stream, before the LZW
+        // expansion commits memory.
+        self.opts
+            .check_pixels(u32::from(width), u32::from(height))?;
+        self.opts.check_bytes(pixels_expected as u64)?;
+        self.decoded_total = self.decoded_total.saturating_add(pixels_expected as u64);
+        self.opts.check_bytes(self.decoded_total)?;
 
         let raw_indices = lzw::decode(min_code_size, &raw, pixels_expected)?;
         if raw_indices.len() != pixels_expected {
@@ -678,7 +927,7 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::*;
     use crate::app_ext::{ExifMetadata, XmpPacket};
-    use crate::encoder::encode;
+    use crate::encoder::encode_file as encode;
     use crate::image::{Block, GifFile, GifFrameData as GifFrame, Rgb, Version};
 
     fn one_frame_image_no_extensions() -> GifFile {
@@ -714,7 +963,7 @@ mod tests {
     #[test]
     fn fast_path_returns_single_image_block() {
         let bytes = encode(&one_frame_image_no_extensions()).unwrap();
-        let img = decode_first_frame(&bytes).unwrap();
+        let img = parse_first_frame(&bytes).unwrap();
         assert_eq!(img.blocks.len(), 1);
         let f = img.frames().next().unwrap();
         assert_eq!(f.indices, vec![0, 1, 2, 3]);
@@ -739,7 +988,7 @@ mod tests {
             frame_block,
         ];
         let bytes = encode(&img).unwrap();
-        let cover = decode_first_frame(&bytes).unwrap();
+        let cover = parse_first_frame(&bytes).unwrap();
         // Only the image block survives.
         assert_eq!(cover.blocks.len(), 1);
         assert!(matches!(cover.blocks[0], Block::Image(_)));
@@ -761,7 +1010,7 @@ mod tests {
             });
         }
         let bytes = encode(&img).unwrap();
-        let cover = decode_first_frame(&bytes).unwrap();
+        let cover = parse_first_frame(&bytes).unwrap();
         let f = cover.frames().next().unwrap();
         let gce = f.graphic_control.as_ref().unwrap();
         assert_eq!(gce.disposal, DisposalMethod::RestoreBackground);
@@ -779,7 +1028,7 @@ mod tests {
         bytes.extend_from_slice(b"GIF89a");
         bytes.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0]); // 1×1, no GCT
         bytes.push(0x3B); // Trailer
-        let err = decode_first_frame(&bytes).unwrap_err();
+        let err = parse_first_frame(&bytes).unwrap_err();
         match err {
             Error::InvalidData(s) => assert!(s.contains("no image block")),
             _ => panic!("unexpected error: {err:?}"),
@@ -792,8 +1041,8 @@ mod tests {
     fn lenient_matches_strict_on_well_formed_stream() {
         let img = one_frame_image_no_extensions();
         let bytes = encode(&img).unwrap();
-        let strict = decode(&bytes).unwrap();
-        let lenient = decode_lenient(&bytes).unwrap();
+        let strict = parse(&bytes).unwrap();
+        let lenient = parse_lenient(&bytes).unwrap();
         assert_eq!(strict, lenient);
     }
 
@@ -842,11 +1091,11 @@ mod tests {
         bytes[min_code_size_off] = 9;
 
         // Strict decode should fail.
-        let strict = decode(&bytes);
+        let strict = parse(&bytes);
         assert!(strict.is_err(), "strict should reject");
 
         // Lenient decode should recover the second frame.
-        let lenient = decode_lenient(&bytes).unwrap();
+        let lenient = parse_lenient(&bytes).unwrap();
         let frames: Vec<_> = lenient.frames().collect();
         assert_eq!(frames.len(), 1, "expected to recover the second frame");
         assert_eq!(frames[0].indices, vec![3, 2, 1, 0]);
@@ -863,7 +1112,7 @@ mod tests {
                                                    // already ended the parse before the trailer — but it more
                                                    // often won't, depending on the stream. Lenient must always
                                                    // succeed.
-        let lenient = decode_lenient(truncated).unwrap();
+        let lenient = parse_lenient(truncated).unwrap();
         assert_eq!(lenient.blocks.len(), 1);
     }
 
@@ -901,7 +1150,7 @@ mod tests {
         spliced.extend_from_slice(&bytes[insertion_point..]);
         bytes = spliced;
 
-        let lenient = decode_lenient(&bytes).unwrap();
+        let lenient = parse_lenient(&bytes).unwrap();
         let frames: Vec<_> = lenient.frames().collect();
         // Both frames recovered despite the garbage in between.
         assert_eq!(frames.len(), 2);
@@ -917,7 +1166,7 @@ mod tests {
         bytes.extend_from_slice(b"89a"); // garbage signature
         bytes.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0]);
         bytes.push(0x3B);
-        assert!(decode_lenient(&bytes).is_err());
+        assert!(parse_lenient(&bytes).is_err());
     }
 
     /// Fast-path agrees with the full decoder on the first frame's
@@ -940,8 +1189,8 @@ mod tests {
             graphic_control: None,
         }));
         let bytes = encode(&img).unwrap();
-        let full = decode(&bytes).unwrap();
-        let fast = decode_first_frame(&bytes).unwrap();
+        let full = parse(&bytes).unwrap();
+        let fast = parse_first_frame(&bytes).unwrap();
         assert_eq!(fast.blocks.len(), 1);
         assert!(full.blocks.len() > 1);
         // Same first frame content.

@@ -12,7 +12,7 @@
 //! placement, transparency + disposal, and the `optimize_frame_rects`
 //! encoder pass.
 
-use oxideav_gif::{compose, decode, encode, AnimationBuilder, DisposalMethod, GifFile, Rgb};
+use oxideav_gif::{compose, encode_file, parse, AnimationBuilder, DisposalMethod, GifFile, Rgb};
 
 /// A 16-entry greyscale palette (plus one distinct colour for
 /// transparency corners) — enough distinct rows that Appendix E's row
@@ -59,8 +59,8 @@ fn interlaced_encode_decode_is_field_stable() {
     assert_eq!(changed, 1);
     assert!(img.has_interlaced_frames());
 
-    let bytes = encode(&img).expect("encode interlaced");
-    let decoded = decode(&bytes).expect("decode interlaced");
+    let bytes = encode_file(&img).expect("encode interlaced");
+    let decoded = parse(&bytes).expect("decode interlaced");
     assert_eq!(decoded, img, "interlaced round-trip is field-stable");
     // The decoded frame's flag survives and its raster is de-interlaced
     // back to the original row-major order.
@@ -82,21 +82,21 @@ fn interlacing_changes_bytes_but_not_pixels() {
     let mut interlaced = sequential.clone();
     interlaced.set_frames_interlaced(true);
 
-    let seq_bytes = encode(&sequential).expect("encode sequential");
-    let int_bytes = encode(&interlaced).expect("encode interlaced");
+    let seq_bytes = encode_file(&sequential).expect("encode sequential");
+    let int_bytes = encode_file(&interlaced).expect("encode interlaced");
     assert_ne!(
         seq_bytes, int_bytes,
         "row permutation must alter the compressed payload"
     );
 
-    let seq_px = decode(&seq_bytes)
+    let seq_px = parse(&seq_bytes)
         .unwrap()
         .frames()
         .next()
         .unwrap()
         .indices
         .clone();
-    let int_px = decode(&int_bytes)
+    let int_px = parse(&int_bytes)
         .unwrap()
         .frames()
         .next()
@@ -122,8 +122,8 @@ fn appendix_e_pass_boundaries_roundtrip() {
                 .expect("build");
             img.set_frames_interlaced(true);
 
-            let bytes = encode(&img).expect("encode");
-            let decoded = decode(&bytes).expect("decode");
+            let bytes = encode_file(&img).expect("encode");
+            let decoded = parse(&bytes).expect("decode");
             assert_eq!(
                 decoded.frames().next().unwrap().indices,
                 original,
@@ -147,7 +147,7 @@ fn placed_interlaced_frame_roundtrips() {
         .expect("build");
     img.set_frames_interlaced(true);
 
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
     let f = decoded.frames().next().unwrap();
     assert_eq!((f.left, f.top, f.width, f.height), (4, 3, 6, 9));
     assert!(f.interlaced);
@@ -198,8 +198,8 @@ fn interlaced_animation_composites_identically() {
     );
 
     // Same through a full encode → decode → compose trip.
-    let seq_rt = compose(&decode(&encode(&sequential).unwrap()).unwrap()).unwrap();
-    let int_rt = compose(&decode(&encode(&interlaced).unwrap()).unwrap()).unwrap();
+    let seq_rt = compose(&parse(&encode_file(&sequential).unwrap()).unwrap()).unwrap();
+    let int_rt = compose(&parse(&encode_file(&interlaced).unwrap()).unwrap()).unwrap();
     assert_eq!(seq_rt, int_rt, "round-tripped compose stays equal");
     assert_eq!(
         seq_frames, seq_rt,
@@ -236,6 +236,6 @@ fn optimize_frame_rects_preserves_interlaced_compose() {
     );
 
     // Still encodes and decodes to the same composited output.
-    let rt = compose(&decode(&encode(&img).unwrap()).unwrap()).unwrap();
+    let rt = compose(&parse(&encode_file(&img).unwrap()).unwrap()).unwrap();
     assert_eq!(after, rt, "optimized interlaced stream round-trips");
 }

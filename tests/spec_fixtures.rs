@@ -7,7 +7,9 @@
 //! according to the rules in §13 / §15 / §18 / §20 / §22 / §23 / §27
 //! and Appendix F.
 
-use oxideav_gif::{decode, encode, Block, DisposalMethod, GifFile, GraphicControl, Rgb, Version};
+use oxideav_gif::{
+    encode_file, parse, Block, DisposalMethod, GifFile, GraphicControl, Rgb, Version,
+};
 
 /// 1×1 pixel image, GIF87a, single colour palette of two entries
 /// (smallest legal palette per §18.c.vi: actual entries = 2^(field+1),
@@ -54,7 +56,7 @@ fn one_by_one_gif87a_decodes_and_roundtrips() {
         0x3B,
     ];
 
-    let img = decode(FIXTURE).expect("1×1 GIF decodes");
+    let img = parse(FIXTURE).expect("1×1 GIF decodes");
     assert_eq!(img.version, Version::Gif87a);
     assert_eq!(img.screen_width, 1);
     assert_eq!(img.screen_height, 1);
@@ -68,8 +70,8 @@ fn one_by_one_gif87a_decodes_and_roundtrips() {
     assert_eq!(frame.indices, vec![0]);
 
     // Round-trip back to bytes.
-    let re_encoded = encode(&img).expect("round-trip encode");
-    let img2 = decode(&re_encoded).expect("re-decoded");
+    let re_encoded = encode_file(&img).expect("round-trip encode");
+    let img2 = parse(&re_encoded).expect("re-decoded");
     assert_eq!(img2, img);
 }
 
@@ -135,7 +137,7 @@ fn two_by_two_gif89a_with_gce_decodes_and_roundtrips() {
         0x3B,
     ];
 
-    let img = decode(FIXTURE).expect("2×2 GIF decodes");
+    let img = parse(FIXTURE).expect("2×2 GIF decodes");
     assert_eq!(img.version, Version::Gif89a);
     assert_eq!(img.screen_width, 2);
     assert_eq!(img.screen_height, 2);
@@ -148,8 +150,8 @@ fn two_by_two_gif89a_with_gce_decodes_and_roundtrips() {
     assert_eq!(gce.delay_centis, 5);
 
     // Round-trip equality.
-    let re_encoded = encode(&img).expect("encode round-trip");
-    let img2 = decode(&re_encoded).expect("decode round-trip");
+    let re_encoded = encode_file(&img).expect("encode round-trip");
+    let img2 = parse(&re_encoded).expect("decode round-trip");
     assert_eq!(img2, img);
 }
 
@@ -170,8 +172,8 @@ fn comment_extension_split_payload_roundtrips() {
         global_palette: Some(vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]),
         blocks: vec![Block::Comment(payload.clone())],
     };
-    let bytes = encode(&img).unwrap();
-    let img2 = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let img2 = parse(&bytes).unwrap();
     assert_eq!(img2.blocks, vec![Block::Comment(payload)]);
 }
 
@@ -195,8 +197,8 @@ fn application_extension_roundtrips() {
             data: b"hello, world".to_vec(),
         })],
     };
-    let bytes = encode(&img).unwrap();
-    let img2 = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let img2 = parse(&bytes).unwrap();
     assert_eq!(img2, img);
 }
 
@@ -245,8 +247,8 @@ fn interlaced_image_roundtrip() {
         global_palette: Some(palette),
         blocks: vec![Block::Image(frame)],
     };
-    let bytes = encode(&img).unwrap();
-    let img2 = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let img2 = parse(&bytes).unwrap();
     let frame2 = img2.frames().next().unwrap();
     assert!(frame2.interlaced);
     assert_eq!(frame2.indices, indices, "de-interlaced raster differs");
@@ -299,8 +301,8 @@ fn multi_frame_stream_roundtrips() {
             Block::Image(make_frame(2, None)),
         ],
     };
-    let bytes = encode(&img).unwrap();
-    let img2 = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let img2 = parse(&bytes).unwrap();
     assert_eq!(img2, img);
 }
 
@@ -342,8 +344,8 @@ fn comment_accessors_roundtrip_through_encode_decode() {
             Block::Comment(b"end of stream".to_vec()),
         ],
     };
-    let bytes = encode(&img).unwrap();
-    let img2 = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let img2 = parse(&bytes).unwrap();
     let collected: Vec<&[u8]> = img2.comments().collect();
     assert_eq!(
         collected,
@@ -379,15 +381,15 @@ fn header_only_stream_roundtrips() {
         global_palette: None,
         blocks: vec![],
     };
-    let bytes = encode(&img).unwrap();
-    let img2 = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let img2 = parse(&bytes).unwrap();
     assert_eq!(img2, img);
 }
 
 /// Trailer ends the stream — bytes past 0x3B are ignored.
 #[test]
 fn trailing_garbage_after_trailer_is_ignored() {
-    let mut bytes = encode(&GifFile {
+    let mut bytes = encode_file(&GifFile {
         version: Version::Gif87a,
         screen_width: 0,
         screen_height: 0,
@@ -400,5 +402,5 @@ fn trailing_garbage_after_trailer_is_ignored() {
     })
     .unwrap();
     bytes.extend_from_slice(b"trailing junk");
-    decode(&bytes).expect("trailing data after trailer must not break decode");
+    parse(&bytes).expect("trailing data after trailer must not break decode");
 }

@@ -52,8 +52,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
-    compose, decode, decode_first_frame, decode_lenient, encode,
+    compose, encode_file,
     image::{Block, GifFile, GraphicControl, PlainText, Rgb},
+    parse, parse_first_frame, parse_lenient,
     playback::Playback,
     DisposalMethod, Version,
 };
@@ -259,7 +260,7 @@ fuzz_target!(|data: &[u8]| {
     // `write_plain_text_extension`; an `Err` here means the encoder
     // rejected the synthesised parameter combination, which is in
     // scope as "non-panic" behaviour.
-    let Ok(bytes) = encode(&img) else {
+    let Ok(bytes) = encode_file(&img) else {
         return;
     };
 
@@ -270,7 +271,7 @@ fuzz_target!(|data: &[u8]| {
     // trip equality assertion belongs in the dedicated roundtrip
     // harness; here a decode failure is a finding (because we just
     // wrote those bytes ourselves).
-    let decoded = match decode(&bytes) {
+    let decoded = match parse(&bytes) {
         Ok(i) => i,
         Err(e) => panic!("Plain-Text-only encoder output rejected by strict decoder: {e}"),
     };
@@ -279,8 +280,8 @@ fuzz_target!(|data: &[u8]| {
     // bytes. Cover-frame in particular short-circuits at the first
     // §20 image-bearing block; an all-PlainText stream has none, so
     // `decode_first_frame` should return `Err` (not panic).
-    let _ = decode_lenient(&bytes);
-    let _ = decode_first_frame(&bytes);
+    let _ = parse_lenient(&bytes);
+    let _ = parse_first_frame(&bytes);
 
     // Compose — drives `render_plain_text` against the decoded image.
     // The §23 disposal-method state machine fires per Plain Text

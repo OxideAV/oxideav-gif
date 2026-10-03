@@ -43,7 +43,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_gif::{
-    decode, decode_first_frame, decode_lenient, encode, image::Rgb, AnimationBuilder,
+    encode_file, image::Rgb, parse, parse_first_frame, parse_lenient, AnimationBuilder,
     DisposalMethod,
 };
 
@@ -96,7 +96,7 @@ fn build_still(width: u16, height: u16, palette_size: u8) -> Vec<u8> {
         .expect("add still frame")
         .build()
         .expect("build still");
-    encode(&img).expect("encode still")
+    encode_file(&img).expect("encode still")
 }
 
 /// Encode an animation of `frame_count` frames at `width × height`
@@ -125,7 +125,7 @@ fn build_animation(width: u16, height: u16, palette_size: u8, frame_count: u32) 
             .expect("add animation frame");
     }
     let img = builder.build().expect("build animation");
-    encode(&img).expect("encode animation")
+    encode_file(&img).expect("encode animation")
 }
 
 fn bench_decode_still_320x240_256pal(c: &mut Criterion) {
@@ -133,7 +133,7 @@ fn bench_decode_still_320x240_256pal(c: &mut Criterion) {
     let mut g = c.benchmark_group("decode_still_320x240_256pal");
     g.throughput(Throughput::Bytes((320 * 240) as u64));
     g.bench_function(BenchmarkId::from_parameter("still/320x240/pal=255"), |b| {
-        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| parse(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
@@ -143,7 +143,7 @@ fn bench_decode_still_64x64_8pal(c: &mut Criterion) {
     let mut g = c.benchmark_group("decode_still_64x64_8pal");
     g.throughput(Throughput::Bytes((64 * 64) as u64));
     g.bench_function(BenchmarkId::from_parameter("still/64x64/pal=8"), |b| {
-        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| parse(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
@@ -154,7 +154,7 @@ fn bench_decode_anim_64x64_8f(c: &mut Criterion) {
     // Throughput = total source bytes across all frames.
     g.throughput(Throughput::Bytes((64 * 64 * 8) as u64));
     g.bench_function(BenchmarkId::from_parameter("anim/64x64/8f"), |b| {
-        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| parse(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
@@ -164,7 +164,7 @@ fn bench_decode_lenient_anim_64x64_8f(c: &mut Criterion) {
     let mut g = c.benchmark_group("decode_lenient_anim_64x64_8f");
     g.throughput(Throughput::Bytes((64 * 64 * 8) as u64));
     g.bench_function(BenchmarkId::from_parameter("anim-lenient/64x64/8f"), |b| {
-        b.iter(|| decode_lenient(criterion::black_box(&bytes)).expect("decode_lenient"));
+        b.iter(|| parse_lenient(criterion::black_box(&bytes)).expect("decode_lenient"));
     });
     g.finish();
 }
@@ -175,7 +175,7 @@ fn bench_decode_first_frame_anim_64x64_8f(c: &mut Criterion) {
     // First-frame fast-path: only the first 64×64 frame is touched.
     g.throughput(Throughput::Bytes((64 * 64) as u64));
     g.bench_function(BenchmarkId::from_parameter("first-frame/64x64/8f"), |b| {
-        b.iter(|| decode_first_frame(criterion::black_box(&bytes)).expect("decode_first_frame"));
+        b.iter(|| parse_first_frame(criterion::black_box(&bytes)).expect("decode_first_frame"));
     });
     g.finish();
 }

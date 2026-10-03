@@ -35,7 +35,7 @@
 //! ```
 //!
 //! Reserved values 4–7 are treated identically to 0 (the decoder maps
-//! them to [`DisposalMethod::None`] in [`crate::DisposalMethod::from_bits`]).
+//! them to [`DisposalMethod::None`] in `DisposalMethod::from_bits`).
 //!
 //! # Background-color handling
 //!

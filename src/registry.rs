@@ -130,7 +130,7 @@ impl Decoder for GifDecoder {
     }
 
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
-        let image = crate::decode(&packet.data)?;
+        let image = crate::parse(&packet.data)?;
         let composed = compose(&image)?;
         for (idx, frame) in composed.into_iter().enumerate() {
             self.queued
@@ -256,7 +256,7 @@ impl Encoder for GifEncoder {
             })],
         };
 
-        let bytes = crate::encode(&image)?;
+        let bytes = crate::encode_file(&image)?;
         let pkt = Packet::new(0u32, TimeBase::new(1, 1), bytes);
         self.pending.push_back(pkt);
         Ok(())
@@ -472,7 +472,7 @@ mod tests {
         assert!(pkt.data.starts_with(b"GIF"));
         // The produced stream decodes, and its §19 palette is within
         // the 256-entry limit.
-        let decoded = crate::decode(&pkt.data).unwrap();
+        let decoded = crate::parse(&pkt.data).unwrap();
         let pal = decoded.global_palette.as_ref().unwrap();
         assert!(pal.len() <= 256);
         assert_eq!(decoded.screen_width as usize, w);
@@ -499,7 +499,7 @@ mod tests {
         });
         enc.send_frame(&frame).unwrap();
         let pkt = enc.receive_packet().unwrap();
-        let decoded = crate::decode(&pkt.data).unwrap();
+        let decoded = crate::parse(&pkt.data).unwrap();
         // The frame carries a §23 GCE with a §23.c.viii Transparency
         // Index, and the transparent pixel decodes to alpha 0 through
         // the compositor.

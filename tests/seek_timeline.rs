@@ -11,8 +11,8 @@
 
 use core::time::Duration;
 use oxideav_gif::{
-    compose, compose_frame_at_global, decode, encode, AnimationBuilder, DisposalMethod, Playback,
-    Rgb,
+    compose, compose_frame_at_global, encode_file, parse, AnimationBuilder, DisposalMethod,
+    Playback, Rgb,
 };
 
 /// A 2×2 four-colour palette: index 0 black (background), 1 red, 2 green,
@@ -48,8 +48,8 @@ fn roundtrip_three_frame(loop_count: Option<u16>) -> oxideav_gif::GifFile {
         .build()
         .unwrap();
 
-    let bytes = encode(&img).unwrap();
-    decode(&bytes).unwrap()
+    let bytes = encode_file(&img).unwrap();
+    parse(&bytes).unwrap()
 }
 
 #[test]
@@ -143,8 +143,8 @@ fn frames_bounding_box_after_roundtrip() {
         .unwrap()
         .build()
         .unwrap();
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     assert_eq!(decoded.frames_bounding_box(), Some((1, 1, 3, 2)));
     assert!(decoded.frames_inhabit_subregion());
 }

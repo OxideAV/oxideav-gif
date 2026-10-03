@@ -10,7 +10,7 @@
 use oxideav_gif::app_ext::{
     ExifMetadata, IccProfile, LoopControl, XmpPacket, EXIF_AUTH_CODE_DEFAULT, EXIF_IDENTIFIER,
 };
-use oxideav_gif::{decode, encode, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{encode_file, parse, Block, GifFile, GifFrameData, Rgb, Version};
 
 fn three_frame_gif(extra: Vec<Block>) -> GifFile {
     // Smallest legal palette per §18.c.vi (size field = 0 → 2 entries).
@@ -56,8 +56,8 @@ fn netscape_loop_5_roundtrip() {
     };
     let img = three_frame_gif(vec![Block::Application(lc.to_application())]);
 
-    let bytes = encode(&img).expect("encode");
-    let decoded = decode(&bytes).expect("decode");
+    let bytes = encode_file(&img).expect("encode");
+    let decoded = parse(&bytes).expect("decode");
 
     assert_eq!(decoded.loop_count(), Some(5));
     assert_eq!(decoded.netscape_buffer_hint(), None);
@@ -72,7 +72,7 @@ fn netscape_loop_forever_roundtrip() {
         buffer_size: None,
     };
     let img = three_frame_gif(vec![Block::Application(lc.to_application())]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
     assert_eq!(decoded.loop_count(), Some(0));
 }
 
@@ -83,7 +83,7 @@ fn netscape_loop_plus_buffer_roundtrip() {
         buffer_size: Some(0x0001_0000),
     };
     let img = three_frame_gif(vec![Block::Application(lc.to_application())]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
     assert_eq!(decoded.loop_count(), Some(42));
     assert_eq!(decoded.netscape_buffer_hint(), Some(0x0001_0000));
 }
@@ -91,7 +91,7 @@ fn netscape_loop_plus_buffer_roundtrip() {
 #[test]
 fn no_netscape_block_yields_none_loop_count() {
     let img = three_frame_gif(vec![]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
     assert_eq!(decoded.loop_count(), None);
 }
 
@@ -116,7 +116,7 @@ fn xmp_packet_roundtrip() {
     };
 
     let img = three_frame_gif(vec![Block::Application(xmp.to_application())]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
 
     assert_eq!(decoded.xmp_packet(), Some(packet.as_slice()));
     assert_eq!(decoded, img);
@@ -132,7 +132,7 @@ fn icc_profile_roundtrip() {
         bytes: profile.clone(),
     };
     let img = three_frame_gif(vec![Block::Application(icc.to_application())]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
 
     assert_eq!(decoded.icc_profile(), Some(profile.as_slice()));
     assert_eq!(decoded, img);
@@ -151,7 +151,7 @@ fn exif_blob_roundtrip() {
     ];
     let exif = ExifMetadata::new(blob.clone());
     let img = three_frame_gif(vec![Block::Application(exif.to_application())]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
     assert_eq!(decoded.exif(), Some(blob.as_slice()));
     assert_eq!(decoded, img);
 }
@@ -164,7 +164,7 @@ fn exif_block_emitted_at_correct_byte_layout() {
     let blob = vec![b'I', b'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00];
     let exif = ExifMetadata::new(blob.clone());
     let img = three_frame_gif(vec![Block::Application(exif.to_application())]);
-    let bytes = encode(&img).unwrap();
+    let bytes = encode_file(&img).unwrap();
     // 0x21 (Extension Introducer) | 0xFF (Application label) | 0x0B
     // (block size, fixed 11) | "Exif    " (8-byte identifier) |
     // EXIF_AUTH_CODE_DEFAULT (3 bytes).
@@ -188,8 +188,8 @@ fn exif_with_nondefault_auth_code_roundtrips() {
         data: b"II*\0\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(),
     };
     let img = three_frame_gif(vec![Block::Application(app.clone())]);
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let parsed = ExifMetadata::from_application(&app).unwrap();
     let app2 = decoded
         .application_extensions()
@@ -220,7 +220,7 @@ fn netscape_xmp_icc_coexist() {
         Block::Application(xmp.to_application()),
         Block::Application(icc.to_application()),
     ]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
 
     assert_eq!(decoded.loop_count(), Some(3));
     assert_eq!(decoded.netscape_buffer_hint(), Some(1024));
@@ -241,7 +241,7 @@ fn unrelated_application_extension_is_invisible_to_typed_accessors() {
         data: b"private payload".to_vec(),
     };
     let img = three_frame_gif(vec![Block::Application(app)]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
     assert_eq!(decoded.loop_count(), None);
     assert_eq!(decoded.netscape_buffer_hint(), None);
     assert_eq!(decoded.xmp_packet(), None);
@@ -259,7 +259,7 @@ fn netscape_block_emitted_at_correct_byte_layout() {
         buffer_size: None,
     };
     let img = three_frame_gif(vec![Block::Application(lc.to_application())]);
-    let bytes = encode(&img).unwrap();
+    let bytes = encode_file(&img).unwrap();
 
     // Search for the 19-byte signature: 0x21 0xFF 0x0B "NETSCAPE"
     // "2.0" 0x03 0x01 LE16(5) 0x00.
@@ -299,7 +299,7 @@ fn application_kind_classification_and_lookup_survive_roundtrip() {
         Block::Application(xmp),
         private,
     ]);
-    let decoded = decode(&encode(&img).unwrap()).unwrap();
+    let decoded = parse(&encode_file(&img).unwrap()).unwrap();
 
     // application_kinds yields each block paired with its namespace
     // classification, in source order.

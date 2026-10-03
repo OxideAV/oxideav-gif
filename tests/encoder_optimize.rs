@@ -12,7 +12,7 @@
 //! must be identical before and after, since §21 says a frame with
 //! the LCT flag clear uses the §18 Global Color Table.
 
-use oxideav_gif::{compose, decode, encode, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{compose, encode_file, parse, Block, GifFile, GifFrameData, Rgb, Version};
 
 fn frame_with_local(palette: Vec<Rgb>, fill: u8) -> GifFrameData {
     GifFrameData {
@@ -70,9 +70,9 @@ fn hoist_shared_lct_shrinks_stream_and_preserves_pixels() {
             frame_with_local(pal.clone(), 2),
         ],
     );
-    let before = encode(&img).expect("baseline encode");
+    let before = encode_file(&img).expect("baseline encode");
     assert!(img.optimize_color_tables(), "hoist should succeed");
-    let after = encode(&img).expect("hoisted encode");
+    let after = encode_file(&img).expect("hoisted encode");
 
     // We removed 2 LCTs (the third frame's "LCT" becomes the GCT we
     // didn't have before). Each LCT is 24 bytes (8-entry palette);
@@ -88,8 +88,8 @@ fn hoist_shared_lct_shrinks_stream_and_preserves_pixels() {
 
     // Pixels are unchanged: §21 says a frame with the LCT flag clear
     // uses the §18 GCT, and we hoisted the same palette.
-    let composed_before = compose(&decode(&before).unwrap()).unwrap();
-    let composed_after = compose(&decode(&after).unwrap()).unwrap();
+    let composed_before = compose(&parse(&before).unwrap()).unwrap();
+    let composed_after = compose(&parse(&after).unwrap()).unwrap();
     assert_eq!(composed_before, composed_after);
 }
 
@@ -107,9 +107,9 @@ fn differing_palettes_refuse_to_hoist() {
             frame_with_local(pal_b, 1),
         ],
     );
-    let before = encode(&img).unwrap();
+    let before = encode_file(&img).unwrap();
     assert!(!img.optimize_color_tables(), "must refuse mixed palettes");
-    let after = encode(&img).unwrap();
+    let after = encode_file(&img).unwrap();
     assert_eq!(before, after, "refused hoist must not perturb the stream");
 }
 
@@ -126,10 +126,10 @@ fn redundant_lcts_clear_against_existing_gct() {
             frame_with_local(pal, 2),
         ],
     );
-    let before_pixels = compose(&decode(&encode(&img).unwrap()).unwrap()).unwrap();
+    let before_pixels = compose(&parse(&encode_file(&img).unwrap()).unwrap()).unwrap();
     assert!(img.optimize_color_tables(), "hoist should succeed");
-    let after_bytes = encode(&img).unwrap();
-    let after_pixels = compose(&decode(&after_bytes).unwrap()).unwrap();
+    let after_bytes = encode_file(&img).unwrap();
+    let after_pixels = compose(&parse(&after_bytes).unwrap()).unwrap();
     assert_eq!(before_pixels, after_pixels);
     // Every frame's LCT is now cleared.
     for f in img.frames() {

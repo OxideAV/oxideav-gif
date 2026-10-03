@@ -8,7 +8,7 @@
 //! anything a viewer displays.
 
 use oxideav_gif::{
-    compose, decode, encode, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
+    compose, encode_file, parse, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
     PlainText, Rgb, Version,
 };
 
@@ -99,7 +99,7 @@ fn shrinks_to_changed_patch() {
         ],
     );
     let original = img.clone();
-    let bytes_before = encode(&img).unwrap();
+    let bytes_before = encode_file(&img).unwrap();
 
     assert_eq!(img.optimize_frame_rects(), 1);
     assert_eq!(rect_of(&img, 1), (5, 3, 2, 2));
@@ -112,7 +112,7 @@ fn shrinks_to_changed_patch() {
     assert_eq!(rect_of(&img, 0), (0, 0, 8, 8));
 
     assert_compose_equal(&original, &img);
-    let bytes_after = encode(&img).unwrap();
+    let bytes_after = encode_file(&img).unwrap();
     assert!(
         bytes_after.len() < bytes_before.len(),
         "expected size win: {} -> {}",
@@ -120,7 +120,7 @@ fn shrinks_to_changed_patch() {
         bytes_after.len()
     );
     // The optimised stream still round-trips exactly.
-    assert_eq!(decode(&bytes_after).unwrap(), img);
+    assert_eq!(parse(&bytes_after).unwrap(), img);
 }
 
 /// An exact-duplicate frame changes nothing → 1×1 crop at its original
@@ -367,12 +367,12 @@ fn randomized_compose_equivalence() {
             0,
             "seed {seed}: pass must be idempotent (first call shrank {shrunk})"
         );
-        let bytes_before = encode(&original).unwrap();
-        let bytes_after = encode(&optimized).unwrap();
+        let bytes_before = encode_file(&original).unwrap();
+        let bytes_after = encode_file(&optimized).unwrap();
         assert!(
             bytes_after.len() <= bytes_before.len(),
             "seed {seed}: optimisation grew the stream"
         );
-        assert_eq!(decode(&bytes_after).unwrap(), optimized, "seed {seed}");
+        assert_eq!(parse(&bytes_after).unwrap(), optimized, "seed {seed}");
     }
 }

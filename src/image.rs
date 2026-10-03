@@ -535,7 +535,7 @@ impl GifFile {
     /// Interlacing is a §20.c.vii / Appendix-E *storage-order* choice, not
     /// a pixel change: the encoder re-shuffles each interlaced frame's rows
     /// into the four-pass order at serialisation time
-    /// ([`crate::encode`]), and the decoder presents every frame already
+    /// ([`crate::encode_file`]), and the decoder presents every frame already
     /// de-interlaced regardless. So toggling this flag leaves the composed
     /// RGBA output byte-identical while switching the on-disk layout to (or
     /// from) the progressive-display order a renderer can paint in four
@@ -545,7 +545,7 @@ impl GifFile {
     /// friends) and [`crate::builder::AnimationBuilder`] emit
     /// non-interlaced frames by default; this is the one-call way to opt a
     /// whole stream — however it was produced — into interlaced emission
-    /// before [`crate::encode`]. Pass `false` to clear the flag again (for
+    /// before [`crate::encode_file`]. Pass `false` to clear the flag again (for
     /// instance to strip interlacing off a decoded stream before
     /// re-encoding it in the simpler sequential layout).
     ///
@@ -1473,12 +1473,12 @@ impl GifFile {
     /// [`crate::quantize::ALPHA_OPAQUE_THRESHOLD`]) a §23 Graphic Control
     /// Extension is attached carrying the §23.c.viii Transparency Index
     /// the quantiser reserved, so the resulting stream renders the
-    /// transparency through [`crate::compose`] / [`crate::encode`]
+    /// transparency through [`crate::compose`] / [`crate::encode_file`]
     /// unchanged. A fully-opaque frame attaches no GCE and stays a valid
     /// GIF87a-compatible payload (the returned version is 87a unless a
     /// GCE was needed for transparency).
     ///
-    /// The returned image is ready for [`crate::encode`]; a build →
+    /// The returned image is ready for [`crate::encode_file`]; a build →
     /// encode → decode round-trip reproduces the quantised palette +
     /// indices exactly.
     ///
@@ -1588,7 +1588,7 @@ impl GifFile {
     /// `docs/image/gif/netscape2.0-loop-extension.md`); a looping value
     /// emits a §26 NETSCAPE2.0 Application Extension ahead of the frames.
     /// The returned image is always GIF89a (it carries §23 GCEs) and is
-    /// ready for [`crate::encode`].
+    /// ready for [`crate::encode_file`].
     ///
     /// # Errors
     ///
@@ -1707,7 +1707,7 @@ impl GifFile {
     /// `frames` is a slice of `(rgba, delay_centis, disposal)` tuples in
     /// playback order; `loop_count` threads the NETSCAPE2.0 looping
     /// behaviour exactly as in [`Self::from_rgba_frames`]. The returned
-    /// image is GIF89a and ready for [`crate::encode`].
+    /// image is GIF89a and ready for [`crate::encode_file`].
     ///
     /// # Errors
     ///
@@ -1791,7 +1791,7 @@ impl GifFile {
     /// all the blocks used in the Data Stream." This helper exists so a
     /// caller that mixed 89a-only blocks into an [`Version::Gif87a`]
     /// scaffold can fix the declared version in one call before encode
-    /// — otherwise [`crate::encode`] rejects the input.
+    /// — otherwise [`crate::encode_file`] rejects the input.
     ///
     /// This never *down*grades. A stream declared `Gif89a` with only
     /// 87a-required blocks stays `Gif89a` (downgrading would be a
@@ -1935,9 +1935,9 @@ impl GifFile {
     ///
     /// A metadata-only stream (only §24 Comment / §26 Application
     /// Extensions before the §27 Trailer) returns `0`. The strict
-    /// [`crate::decode`] entry point rejects that shape per §12 ("a
+    /// [`crate::parse`] entry point rejects that shape per §12 ("a
     /// Data Stream shall contain at least one image"); the lenient
-    /// [`crate::decode_lenient`] entry point can produce it after
+    /// [`crate::parse_lenient`] entry point can produce it after
     /// scanning past corrupted image data.
     pub fn frame_count(&self) -> usize {
         self.frames().count()
@@ -1993,8 +1993,8 @@ impl GifFile {
     /// present *and* the stream has no §20 Image and no §25 Plain Text
     /// Extension (§24 Comment / §26 Application Extension blocks are
     /// §12 "transparent" and do not disqualify the loader shape). The
-    /// strict [`crate::decode`] entry point rejects an image-less
-    /// stream, so this shape arises from [`crate::decode_lenient`] or
+    /// strict [`crate::parse`] entry point rejects an image-less
+    /// stream, so this shape arises from [`crate::parse_lenient`] or
     /// from a freshly-built [`GifFile`]; the query lets a multi-stream
     /// consumer recognise a table-install stream before discarding it
     /// as "frameless".
@@ -5708,8 +5708,8 @@ mod tests {
             }
         }
         let img = GifFile::from_rgba_frame(&rgba, 4, 4, 256).unwrap();
-        let bytes = crate::encode(&img).unwrap();
-        let back = crate::decode(&bytes).unwrap();
+        let bytes = crate::encode_file(&img).unwrap();
+        let back = crate::parse(&bytes).unwrap();
         assert_eq!(back.screen_width, 4);
         assert_eq!(back.screen_height, 4);
         assert_eq!(back.frame_count(), 1);

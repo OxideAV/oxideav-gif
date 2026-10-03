@@ -19,7 +19,7 @@ use crate::lzw;
 pub enum LzwStrategy {
     /// Freeze the full dictionary and keep emitting 12-bit codes against
     /// it until end-of-image (the §F cover-sheet *deferred clear* rule).
-    /// This is the historical default and keeps [`encode`]'s output
+    /// This is the historical default and keeps [`crate::encode_file`]'s output
     /// byte-stable.
     #[default]
     DeferredClear,
@@ -31,34 +31,123 @@ pub enum LzwStrategy {
     ClearOnFull,
 }
 
-/// Encoder tuning knobs. Construct with [`EncodeOptions::default`] (which
-/// reproduces [`encode`] exactly) and override individual fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Encoder tuning knobs for every encode entry point
+/// ([`crate::encode_file`], [`crate::encode_rgb8`], [`crate::encode_rgba8`],
+/// [`crate::encode_animation`], [`encode_file_with`]).
+///
+/// Construct with [`EncodeOptions::default`] (which reproduces
+/// [`encode_file`] exactly for a [`GifFile`]) and adjust with the
+/// `with_*` builders. Behaviour variants are fields, never function
+/// suffixes (image-crate contract).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EncodeOptions {
     /// Which Appendix-F table-full strategy to apply to every image
     /// frame's LZW stream. Defaults to [`LzwStrategy::DeferredClear`].
     pub lzw_strategy: LzwStrategy,
+    /// Store the image rows in the four-pass Appendix E interlace
+    /// order (§20.c.vii Interlace Flag). Applies to images the encoder
+    /// builds from pixels ([`crate::encode_file`] of a [`crate::GifImage`],
+    /// the raw paths, [`crate::encode_animation`]); a [`GifFile`] keeps
+    /// its per-frame flags. Default `false`.
+    pub interlace: bool,
+    /// Quantiser settings (colour budget, dither, box priority, Lloyd
+    /// refinement) for `Rgb24` / `Rgba` input that has to be reduced
+    /// to a colour table. Default: 256 colours, no dither, median cut
+    /// with extent priority — a deterministic reduction.
+    pub quantize: crate::quantize::QuantizeOptions,
+    /// NETSCAPE2.0 loop count written by [`crate::encode_animation`]:
+    /// `None` plays once (no Application Extension), `Some(0)` loops
+    /// forever, `Some(n)` repeats `n` times. Default `Some(0)`.
+    pub loop_count: Option<u16>,
+    /// Write the ICC / Exif / XMP Application Extensions from the
+    /// image's [`crate::Metadata`]. Default `true`.
+    pub embed_metadata: bool,
+}
+
+impl EncodeOptions {
+    /// The defaults (see the field docs).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the Appendix-F table-full strategy.
+    pub fn with_lzw_strategy(mut self, lzw_strategy: LzwStrategy) -> Self {
+        self.lzw_strategy = lzw_strategy;
+        self
+    }
+
+    /// Set the Appendix E interlace flag for encoder-built images.
+    pub fn with_interlace(mut self, interlace: bool) -> Self {
+        self.interlace = interlace;
+        self
+    }
+
+    /// Set the quantiser settings for truecolour input.
+    pub fn with_quantize(mut self, quantize: crate::quantize::QuantizeOptions) -> Self {
+        self.quantize = quantize;
+        self
+    }
+
+    /// Set the colour budget (`1..=256`) for truecolour input.
+    pub fn with_max_colors(mut self, max_colors: usize) -> Self {
+        self.quantize.max_colors = max_colors;
+        self
+    }
+
+    /// Set the dither mode for truecolour input.
+    pub fn with_dither(mut self, dither: crate::quantize::Dither) -> Self {
+        self.quantize.dither = dither;
+        self
+    }
+
+    /// Set (or clear) the animation loop count.
+    pub fn with_loop_count(mut self, loop_count: impl Into<Option<u16>>) -> Self {
+        self.loop_count = loop_count.into();
+        self
+    }
+
+    /// Set whether ICC / Exif / XMP metadata is written.
+    pub fn with_embed_metadata(mut self, embed_metadata: bool) -> Self {
+        self.embed_metadata = embed_metadata;
+        self
+    }
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self {
+            lzw_strategy: LzwStrategy::DeferredClear,
+            interlace: false,
+            quantize: crate::quantize::QuantizeOptions::default(),
+            loop_count: Some(0),
+            embed_metadata: true,
+        }
+    }
 }
 
 /// Serialise a [`GifFile`] into a byte stream conforming to the
 /// `<GIF Data Stream>` grammar in Appendix B.
 ///
 /// Uses the default [`EncodeOptions`] (deferred-clear LZW). Call
-/// [`encode_with_options`] to select a different Appendix-F table-full
-/// strategy.
-pub fn encode(image: &GifFile) -> Result<Vec<u8>> {
-    encode_with_options(image, EncodeOptions::default())
+/// [`encode_file_with`] to select a different Appendix-F table-full
+/// strategy. This is the depth entry point; the image-crate contract's
+/// [`crate::encode_file`] builds a single-image [`GifFile`] from a
+/// [`crate::GifImage`] and serialises it here.
+pub fn encode_file(file: &GifFile) -> Result<Vec<u8>> {
+    encode_file_with(file, &EncodeOptions::default())
 }
 
-/// Serialise a [`GifFile`] like [`encode`], but with caller-chosen
-/// [`EncodeOptions`].
+/// Serialise a [`GifFile`] like [`encode_file`], but with caller-chosen
+/// [`EncodeOptions`]. Only [`EncodeOptions::lzw_strategy`] applies to a
+/// `GifFile` — its blocks, flags and extensions are written as given.
 ///
-/// The output is byte-identical to [`encode`] whenever
+/// The output is byte-identical to [`encode_file`] whenever
 /// `options == EncodeOptions::default()` *and* whenever no image frame's
 /// LZW dictionary reaches its 4096-entry ceiling — the
 /// [`LzwStrategy`] choice only changes the bytes for table-filling
 /// frames. Every produced stream decodes to the same pixels.
-pub fn encode_with_options(image: &GifFile, options: EncodeOptions) -> Result<Vec<u8>> {
+pub fn encode_file_with(image: &GifFile, options: &EncodeOptions) -> Result<Vec<u8>> {
     validate(image)?;
 
     let mut out = Vec::new();
@@ -102,6 +191,12 @@ pub fn encode_with_options(image: &GifFile, options: EncodeOptions) -> Result<Ve
     // §27 — Trailer.
     out.push(0x3B);
     Ok(out)
+}
+
+/// The pre-contract name of [`encode_file_with`] (options by value).
+#[deprecated(note = "use oxideav_gif::encode_file_with (IMAGE_CRATE_API)")]
+pub fn encode_with_options(image: &GifFile, options: EncodeOptions) -> Result<Vec<u8>> {
+    encode_file_with(image, &options)
 }
 
 // ---------------------------------------------------------------------
@@ -480,7 +575,7 @@ mod tests {
     #[test]
     fn encode_pure_image_under_gif87a_works() {
         let img = one_pixel_image(Version::Gif87a, vec![one_frame_no_gce()]);
-        let out = encode(&img).unwrap();
+        let out = encode_file(&img).unwrap();
         // Header must be `GIF87a`.
         assert_eq!(&out[..6], b"GIF87a");
     }
@@ -491,7 +586,7 @@ mod tests {
     #[test]
     fn encode_gce_under_gif87a_rejected() {
         let img = one_pixel_image(Version::Gif87a, vec![one_frame_with_gce()]);
-        let err = encode(&img).unwrap_err();
+        let err = encode_file(&img).unwrap_err();
         match err {
             Error::InvalidInput(s) => {
                 assert!(s.contains("GIF87a"), "{s}");
@@ -509,7 +604,7 @@ mod tests {
             Version::Gif87a,
             vec![Block::Comment(b"hi".to_vec()), one_frame_no_gce()],
         );
-        let err = encode(&img).unwrap_err();
+        let err = encode_file(&img).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(s) if s.contains("Comment")));
     }
 
@@ -537,7 +632,7 @@ mod tests {
                 one_frame_no_gce(),
             ],
         );
-        let err = encode(&img).unwrap_err();
+        let err = encode_file(&img).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(s) if s.contains("Plain Text")));
     }
 
@@ -553,18 +648,18 @@ mod tests {
             Version::Gif87a,
             vec![Block::Application(app), one_frame_no_gce()],
         );
-        let err = encode(&img).unwrap_err();
+        let err = encode_file(&img).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(s) if s.contains("Application")));
     }
 
-    /// `upgrade_version_if_needed()` followed by `encode()` succeeds on
+    /// `upgrade_version_if_needed()` followed by `encode_file()` succeeds on
     /// what would otherwise be a §7 mismatch — this is the documented
     /// recovery path.
     #[test]
     fn upgrade_then_encode_passes_with_gif89a_header() {
         let mut img = one_pixel_image(Version::Gif87a, vec![one_frame_with_gce()]);
         assert!(img.upgrade_version_if_needed(), "expected a version bump");
-        let out = encode(&img).unwrap();
+        let out = encode_file(&img).unwrap();
         assert_eq!(&out[..6], b"GIF89a");
     }
 
@@ -579,7 +674,7 @@ mod tests {
             "expected no version change"
         );
         assert_eq!(img.version, Version::Gif89a);
-        let out = encode(&img).unwrap();
+        let out = encode_file(&img).unwrap();
         assert_eq!(&out[..6], b"GIF89a");
     }
 
@@ -661,13 +756,13 @@ mod tests {
         }
     }
 
-    /// `encode_with_options(EncodeOptions::default())` is byte-identical
+    /// `encode_file_with(EncodeOptions::default())` is byte-identical
     /// to `encode` — the default knobs must not change the output.
     #[test]
     fn encode_with_default_options_matches_encode() {
         let img = regime_change_image();
-        let baseline = encode(&img).unwrap();
-        let via_options = encode_with_options(&img, EncodeOptions::default()).unwrap();
+        let baseline = encode_file(&img).unwrap();
+        let via_options = encode_file_with(&img, &EncodeOptions::default()).unwrap();
         assert_eq!(baseline, via_options);
     }
 
@@ -677,23 +772,19 @@ mod tests {
     #[test]
     fn both_strategies_decode_identically() {
         let img = regime_change_image();
-        let deferred = encode_with_options(
+        let deferred = encode_file_with(
             &img,
-            EncodeOptions {
-                lzw_strategy: LzwStrategy::DeferredClear,
-            },
+            &EncodeOptions::default().with_lzw_strategy(LzwStrategy::DeferredClear),
         )
         .unwrap();
-        let clear_on_full = encode_with_options(
+        let clear_on_full = encode_file_with(
             &img,
-            EncodeOptions {
-                lzw_strategy: LzwStrategy::ClearOnFull,
-            },
+            &EncodeOptions::default().with_lzw_strategy(LzwStrategy::ClearOnFull),
         )
         .unwrap();
 
-        let a = crate::decoder::decode(&deferred).unwrap();
-        let b = crate::decoder::decode(&clear_on_full).unwrap();
+        let a = crate::decoder::parse(&deferred).unwrap();
+        let b = crate::decoder::parse(&clear_on_full).unwrap();
         // Same decoded structure: one frame, identical index payloads.
         let fa: Vec<_> = a.frames().map(|f| f.indices.clone()).collect();
         let fb: Vec<_> = b.frames().map(|f| f.indices.clone()).collect();
@@ -709,18 +800,14 @@ mod tests {
     #[test]
     fn clear_on_full_is_smaller_on_regime_change() {
         let img = regime_change_image();
-        let deferred = encode_with_options(
+        let deferred = encode_file_with(
             &img,
-            EncodeOptions {
-                lzw_strategy: LzwStrategy::DeferredClear,
-            },
+            &EncodeOptions::default().with_lzw_strategy(LzwStrategy::DeferredClear),
         )
         .unwrap();
-        let clear_on_full = encode_with_options(
+        let clear_on_full = encode_file_with(
             &img,
-            EncodeOptions {
-                lzw_strategy: LzwStrategy::ClearOnFull,
-            },
+            &EncodeOptions::default().with_lzw_strategy(LzwStrategy::ClearOnFull),
         )
         .unwrap();
         assert!(
@@ -738,18 +825,14 @@ mod tests {
     #[test]
     fn strategies_agree_below_table_full() {
         let img = one_pixel_image(Version::Gif89a, vec![one_frame_no_gce()]);
-        let deferred = encode_with_options(
+        let deferred = encode_file_with(
             &img,
-            EncodeOptions {
-                lzw_strategy: LzwStrategy::DeferredClear,
-            },
+            &EncodeOptions::default().with_lzw_strategy(LzwStrategy::DeferredClear),
         )
         .unwrap();
-        let clear_on_full = encode_with_options(
+        let clear_on_full = encode_file_with(
             &img,
-            EncodeOptions {
-                lzw_strategy: LzwStrategy::ClearOnFull,
-            },
+            &EncodeOptions::default().with_lzw_strategy(LzwStrategy::ClearOnFull),
         )
         .unwrap();
         assert_eq!(deferred, clear_on_full);

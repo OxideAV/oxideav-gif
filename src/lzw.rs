@@ -54,7 +54,7 @@
 //!
 //! The encoder mirrors the decoder's "one extra entry" at end-of-input
 //! by performing one phantom dictionary extension during its final
-//! flush (see [`encode`] — the post-loop block adds a `(prev, prev's
+//! flush (see [`crate::encode_file`] — the post-loop block adds a `(prev, prev's
 //! own first byte)` entry just like the decoder would on receipt of
 //! `prev`). Without that phantom add the two sides would desync at the
 //! exact moment the encoder's penultimate in-loop assignment lands on
@@ -175,7 +175,7 @@ impl<'a> BitReader<'a> {
 //
 // Two surfaces:
 //
-//   * [`encode`] — stateless free function. Allocates a fresh
+//   * [`crate::encode_file`] — stateless free function. Allocates a fresh
 //     dictionary (~2 MiB), encodes one raster, drops everything. The
 //     historical entry point; behaviour byte-stable.
 //   * [`LzwEncoder`] — reusable state. Holds the dictionary across
@@ -311,17 +311,17 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
     Ok(writer.finish())
 }
 
-/// Encode `pixels` like [`encode`], but emit a Clear code and rebuild
+/// Encode `pixels` like [`crate::encode_file`], but emit a Clear code and rebuild
 /// the dictionary from scratch whenever the table fills (rather than
 /// freezing it under the cover-sheet "deferred clear" rule that
-/// [`encode`] follows).
+/// [`crate::encode_file`] follows).
 ///
 /// # Why both strategies exist
 ///
 /// Appendix F's cover sheet describes two legal behaviours once the
 /// dictionary reaches its maximum size (`2^12 = 4096` entries):
 ///
-/// * **Deferred clear** ([`encode`]): "keep emitting 12-bit codes
+/// * **Deferred clear** ([`crate::encode_file`]): "keep emitting 12-bit codes
 ///   against the existing table until you choose to send a Clear." The
 ///   frozen table stops learning new patterns, so on a large image with
 ///   varied content past the 4096-entry point compression efficiency
@@ -334,16 +334,16 @@ pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
 ///   which on large varied rasters typically produces a *smaller*
 ///   stream than the frozen-table path.
 ///
-/// Both outputs decode to the same pixels — the [`decode`] reader
+/// Both outputs decode to the same pixels — the [`crate::parse`] reader
 /// already honours a mid-stream Clear (§F.1 "reset table state"). The
 /// strategy is purely an encoder size/speed trade-off, so this is an
-/// opt-in companion rather than a change to [`encode`]'s byte-stable
+/// opt-in companion rather than a change to [`crate::encode_file`]'s byte-stable
 /// output. For rasters that never fill the table the two functions emit
 /// identical bytes.
 ///
 /// Returns the raw compressed byte stream excluding the leading LZW
 /// Minimum Code Size byte and the §15 sub-block framing, exactly like
-/// [`encode`].
+/// [`crate::encode_file`].
 pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
     if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
         return Err(Error::InvalidInput(format!(
@@ -432,7 +432,7 @@ pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec
         }
     }
 
-    // Final pending prefix + phantom width bump (see [`encode`]).
+    // Final pending prefix + phantom width bump (see [`crate::encode_file`]).
     writer.write(prev, width);
     if next_code < MAX_TABLE_SIZE as u16
         && next_code == (1u16 << width) - 1
@@ -457,7 +457,7 @@ pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec
 /// "absent"; entry codes are stored as `code + 1` so the slot can
 /// distinguish absent from entry-zero.
 ///
-/// After a frame finishes, [`Self::reset_dictionary`] walks an
+/// After a frame finishes, `reset_dictionary` walks an
 /// explicit `touched_keys` log and clears just those slots — cost
 /// proportional to actual dictionary entries used (≤ 4094 per frame),
 /// not to the full 2 MiB table. This is the cost the per-frame `encode`
@@ -473,7 +473,7 @@ pub struct LzwEncoder {
     table: Vec<u16>,
     /// Packed `(prefix * 256 + byte)` keys of every slot written
     /// during the in-progress (or just-finished) frame. Used by
-    /// [`Self::reset_dictionary`] to clear only those slots on
+    /// `reset_dictionary` to clear only those slots on
     /// reset — cost proportional to actual entries used rather than
     /// the full 2 MiB table.
     touched_keys: Vec<u32>,
@@ -495,10 +495,10 @@ impl LzwEncoder {
 
     /// Encode one raster against the reusable dictionary.
     ///
-    /// Output is byte-identical to the free-function [`encode`]: same
+    /// Output is byte-identical to the free-function [`crate::encode_file`]: same
     /// Clear emission, same width-bump rule, same EOI emission.
     /// On return the dictionary is reset, ready for the next frame —
-    /// callers do not need to invoke [`Self::reset_dictionary`]
+    /// callers do not need to invoke `reset_dictionary`
     /// themselves.
     pub fn encode_frame(&mut self, min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
         let payload = self.encode_frame_inner(min_code_size, pixels);
@@ -511,7 +511,7 @@ impl LzwEncoder {
 
     /// Inner state-machine for [`Self::encode_frame`]. Records every
     /// dictionary slot it writes in `self.touched_keys` so the caller's
-    /// post-call [`Self::reset_dictionary`] can clear just those slots
+    /// post-call `reset_dictionary` can clear just those slots
     /// rather than memsetting the whole 2 MiB table. Pulled into its
     /// own function so the encoder's `?` error early-return doesn't
     /// skip the reset bookkeeping the outer [`Self::encode_frame`]

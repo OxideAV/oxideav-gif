@@ -7,8 +7,8 @@
 //! never panics / aborts / OOMs.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_gif::decode_lenient;
+use oxideav_gif::parse_lenient;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = decode_lenient(data);
+    let _ = parse_lenient(data);
 });

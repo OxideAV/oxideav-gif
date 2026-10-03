@@ -31,7 +31,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_gif::{
-    compose, decode, encode, image::Rgb, playback::Playback, AnimationBuilder, DisposalMethod,
+    compose, encode_file, image::Rgb, parse, playback::Playback, AnimationBuilder, DisposalMethod,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {
@@ -79,8 +79,8 @@ fn bench_roundtrip_still_320x240_256pal(c: &mut Criterion) {
     g.sample_size(10);
     g.bench_function(BenchmarkId::from_parameter("still/320x240/pal=255"), |b| {
         b.iter(|| {
-            let bytes = encode(criterion::black_box(&img)).expect("encode");
-            let decoded = decode(&bytes).expect("decode");
+            let bytes = encode_file(criterion::black_box(&img)).expect("encode");
+            let decoded = parse(&bytes).expect("decode");
             compose(&decoded).expect("compose")
         });
     });
@@ -103,8 +103,8 @@ fn bench_roundtrip_anim_64x64_8f(c: &mut Criterion) {
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("anim/64x64/8f"), |b| {
         b.iter(|| {
-            let bytes = encode(criterion::black_box(&img)).expect("encode");
-            let decoded = decode(&bytes).expect("decode");
+            let bytes = encode_file(criterion::black_box(&img)).expect("encode");
+            let decoded = parse(&bytes).expect("decode");
             compose(&decoded).expect("compose")
         });
     });
@@ -127,8 +127,8 @@ fn bench_roundtrip_anim_64x64_8f_playback(c: &mut Criterion) {
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("anim-playback/64x64/8f"), |b| {
         b.iter(|| {
-            let bytes = encode(criterion::black_box(&img)).expect("encode");
-            let decoded = decode(&bytes).expect("decode");
+            let bytes = encode_file(criterion::black_box(&img)).expect("encode");
+            let decoded = parse(&bytes).expect("decode");
             let pb = Playback::new(&decoded);
             let mut n = 0usize;
             for _frame in pb.frames() {
@@ -161,8 +161,8 @@ fn bench_build_encode_decode_only_anim_64x64_8f(c: &mut Criterion) {
                     .expect("add animation frame");
             }
             let img = builder.build().expect("build");
-            let bytes = encode(&img).expect("encode");
-            decode(&bytes).expect("decode")
+            let bytes = encode_file(&img).expect("encode");
+            parse(&bytes).expect("decode")
         });
     });
     g.finish();

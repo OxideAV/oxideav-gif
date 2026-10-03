@@ -79,7 +79,7 @@ enum LoopBehaviour {
 /// whole logical screen) or [`add_placed_frame`](Self::add_placed_frame)
 /// (a sub-rectangle), optionally pick the looping behaviour, then
 /// [`build`](Self::build) to get a validated [`GifFile`] ready for
-/// [`crate::encode`].
+/// [`crate::encode_file`].
 ///
 /// Every frame is stored against the single Global Color Table supplied
 /// at construction (§18 / §21: a frame with the Local Color Table flag
@@ -125,7 +125,7 @@ impl AnimationBuilder {
 
     /// Set the §20.c.vii Interlace Flag applied to every frame added
     /// *after* this call. Frames added while the flag is `on` are stored
-    /// in Appendix E four-pass order by [`crate::encode`]; the composited
+    /// in Appendix E four-pass order by [`crate::encode_file`]; the composited
     /// output is unaffected (interlacing is a storage-order choice).
     ///
     /// The flag is captured per frame at add time, so toggling it between
@@ -420,8 +420,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let bytes = crate::encode(&img).unwrap();
-        let decoded = crate::decode(&bytes).unwrap();
+        let bytes = crate::encode_file(&img).unwrap();
+        let decoded = crate::parse(&bytes).unwrap();
         assert_eq!(decoded, img, "encode → decode is byte-stable for the build");
         assert_eq!(decoded.loop_count(), Some(2));
         // Some(2) → 3 passes; 0.30 s per pass → 0.90 s total.
@@ -562,7 +562,7 @@ mod tests {
             .unwrap();
         assert!(img.all_frames_interlaced());
 
-        let decoded = crate::decode(&crate::encode(&img).unwrap()).unwrap();
+        let decoded = crate::parse(&crate::encode_file(&img).unwrap()).unwrap();
         assert_eq!(decoded, img, "interlaced builder output round-trips");
     }
 

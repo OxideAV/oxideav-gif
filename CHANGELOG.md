@@ -22,6 +22,71 @@
   variants or `Display`. The framework conversion maps `LimitExceeded`
   to `oxideav_core::Error::InvalidData` and `Io` to `Io`.
 
+- **Image-crate API contract, part 2 — the root vocabulary.** New
+  framework-free root items: `probe`, `info -> ImageInfo`,
+  `decode -> GifImage`, `decode_with(&DecodeOptions)`, `decode_rgb8 ->
+  RgbImage`, `decode_rgba8 -> RgbaImage`, `decode_all -> Vec<Frame>`
+  (+ `decode_all_with`), `decode_from<R: Read>`, `encode(&GifImage,
+  &EncodeOptions)`, `encode_rgb8` / `encode_rgba8(w, h, &[u8], &opts)`,
+  `encode_to<W: Write>`, `encode_animation(&[Frame], &opts)`; types
+  `GifImage { width, height, format, planes, color, metadata, palette }`
+  (`new -> Result` validating geometry, `packed`, `from_rgb8`,
+  `from_rgba8`, `from_indexed`, `with_*`, `as_bytes`, `into_raw`,
+  `to_rgb8`, `to_rgba8`, `has_alpha`), `GifPixelFormat { Pal8, Rgb24,
+  Rgba }` + `PixelFormat` alias, `Plane`, `ColorInfo` / `ColorRange`,
+  `Metadata`, `Palette` (RGBA entries, `from_color_table`,
+  `transparent_index`), `RgbImage` / `RgbaImage`, `Frame { image, delay,
+  disposal, user_input }`, `ImageInfo` (+ GIF extras: `version`,
+  `image_count`, `has_global_palette`, `palette_entries`, `interlaced`,
+  `loop_count`, `pixel_aspect_ratio`), `DecodeOptions { max_width,
+  max_height, max_pixels, max_bytes, strict, lenient }` (limits enforced
+  on the Logical Screen Descriptor and every Image Descriptor before any
+  raster is expanded; default 1 GiB).
+  - `decode` returns the **first §20 image composed onto the §18 Logical
+    Screen** — pixels outside the image rectangle and at the §23.c.viii
+    Transparency Index are transparent, as `compose` renders them — in
+    `Pal8` with the frame's effective colour table (transparent index at
+    alpha 0; a synthetic `[0,0,0,0]` entry is appended when the frame
+    leaves screen pixels uncovered and has no transparent index), or in
+    `Rgba` when the table has 256 opaque entries and transparent pixels
+    remain. Only the first raster is LZW-expanded; the rest of the
+    stream is walked structurally for the ICC / Exif / XMP extensions.
+  - `decode_all` returns every graphic-rendering block as a composited
+    `Rgba` canvas (`compose` semantics) with its GCE delay / disposal /
+    user-input flag; `info` reports that count as `frames`.
+  - `encode` writes a `Pal8` palette as the Global Color Table as given
+    (first entry with alpha < 128 → Transparency Index, other such
+    entries folded onto it) and quantises `Rgb24` / `Rgba` with the
+    deterministic median-cut quantiser exactly as `encode_rgb8` /
+    `encode_rgba8` do (alpha < 128 → transparent). ICC / Exif / XMP
+    metadata is embedded as the de-facto Application Extensions.
+  - `ColorInfo` is always `gif_default()` (full-range RGB, unspecified
+    primaries / transfer): GIF carries no colour signalling.
+- The GIF Data Stream depth API keeps its model under contract-free
+  names: `parse` / `parse_with(&DecodeOptions)` / `parse_first_frame` /
+  `parse_first_frame_with` / `parse_lenient` (were `decode` /
+  `decode_first_frame` / `decode_lenient`) return `GifFile`;
+  `encode_file` / `encode_file_with(&GifFile, &EncodeOptions)` (were
+  `encode` / `encode_with_options`) serialise it; `GifFile::parse`,
+  `GifFile::parse_with`, `GifFile::to_bytes`, `GifFile::to_bytes_with`,
+  `GifFile::first_image`, `GifFile::frames_composited` and
+  `GifFile::metadata` bridge the two layers.
+- `EncodeOptions` is `#[non_exhaustive]` with `with_*` builders and
+  gains `interlace`, `quantize` (`QuantizeOptions`), `loop_count`
+  (default `Some(0)`) and `embed_metadata` (default `true`) next to
+  `lzw_strategy`; it is no longer `Copy`.
+- `parse_with` under `strict` maps the conformance walk's
+  `InvalidInput` to `InvalidData` (a decode-side departure).
+
+### Deprecated
+
+- `decode_first_frame` → `parse_first_frame`, `decode_lenient` →
+  `parse_lenient`, `encode_with_options(&GifFile, EncodeOptions)` →
+  `encode_file_with(&GifFile, &EncodeOptions)`. Kept for one release.
+  The pre-contract `decode(&[u8]) -> GifImage(model)` and
+  `encode(&GifImage(model))` could not be kept: both names now carry
+  the contract signatures; use `parse` / `encode_file`.
+
 ### Added
 
 - Serpentine (boustrophedon) error-diffusion scan, opt-in via

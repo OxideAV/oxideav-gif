@@ -19,7 +19,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
-    app_ext, compose, decode, decode_first_frame, decode_lenient, encode, playback::Playback,
+    app_ext, compose, encode_file, parse, parse_first_frame, parse_lenient, playback::Playback,
 };
 
 // Cap downstream work on suspiciously large screens so we don't fault
@@ -38,10 +38,10 @@ fuzz_target!(|data: &[u8]| {
     //    input is. The lenient path resyncs to the next §20 Image
     //    Separator / §27 Trailer rather than returning Err, so it
     //    exercises a different state machine than the strict path.
-    let _ = decode_lenient(data);
-    let _ = decode_first_frame(data);
+    let _ = parse_lenient(data);
+    let _ = parse_first_frame(data);
 
-    let Ok(img) = decode(data) else {
+    let Ok(img) = parse(data) else {
         return;
     };
 
@@ -136,9 +136,9 @@ fuzz_target!(|data: &[u8]| {
     //     equality; here we only care about panic-freedom on the
     //     re-decode path, which is a different state than fresh
     //     fuzzer bytes.)
-    if let Ok(bytes) = encode(&img) {
-        let _ = decode(&bytes);
-        let _ = decode_lenient(&bytes);
-        let _ = decode_first_frame(&bytes);
+    if let Ok(bytes) = encode_file(&img) {
+        let _ = parse(&bytes);
+        let _ = parse_lenient(&bytes);
+        let _ = parse_first_frame(&bytes);
     }
 });

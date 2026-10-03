@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_gif::{encode, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{encode_file, Block, GifFile, GifFrameData, Rgb, Version};
 
 fn build_sample_gif() -> Vec<u8> {
     let palette = vec![
@@ -53,7 +53,7 @@ fn build_sample_gif() -> Vec<u8> {
             graphic_control: None,
         })],
     };
-    encode(&img).expect("encode test sample")
+    encode_file(&img).expect("encode test sample")
 }
 
 #[test]

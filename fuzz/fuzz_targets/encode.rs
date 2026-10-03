@@ -28,7 +28,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
-    compose, decode, decode_first_frame, decode_lenient, encode, image::Rgb, playback::Playback,
+    compose, encode_file, image::Rgb, parse, parse_first_frame, parse_lenient, playback::Playback,
     quantize_frames_shared, quantize_rgba_with_options, AnimationBuilder, BoxPriority,
     DisposalMethod, Dither, GifFile, QuantizeOptions,
 };
@@ -200,7 +200,7 @@ fuzz_target!(|data: &[u8]| {
     let _: Vec<_> = img.frame_delays().collect();
     let _ = img.required_version();
 
-    let bytes = match encode(&img) {
+    let bytes = match encode_file(&img) {
         Ok(b) => b,
         Err(_) => return,
     };
@@ -208,10 +208,10 @@ fuzz_target!(|data: &[u8]| {
     // Strict, lenient, and cover-frame entry points — all three must
     // return on the encoded bytes regardless of which configuration
     // the builder ended up with.
-    let _ = decode_lenient(&bytes);
-    let _ = decode_first_frame(&bytes);
+    let _ = parse_lenient(&bytes);
+    let _ = parse_first_frame(&bytes);
 
-    let Ok(decoded) = decode(&bytes) else {
+    let Ok(decoded) = parse(&bytes) else {
         // Encoder produced bytes the decoder can't read: that's a
         // finding regardless of what the fuzzer fed us. Panic to surface.
         panic!("encoder emitted bytes the decoder rejected");
@@ -235,8 +235,8 @@ fuzz_target!(|data: &[u8]| {
     {
         let mut interlaced = img.clone();
         interlaced.set_frames_interlaced(true);
-        if let Ok(ibytes) = encode(&interlaced) {
-            let Ok(idecoded) = decode(&ibytes) else {
+        if let Ok(ibytes) = encode_file(&interlaced) {
+            let Ok(idecoded) = parse(&ibytes) else {
                 panic!("encoder emitted interlaced bytes the decoder rejected");
             };
             if let (Ok(seq), Ok(int)) = (compose(&img), compose(&idecoded)) {
@@ -305,8 +305,8 @@ fuzz_target!(|data: &[u8]| {
         if qw <= u16::MAX as usize && qh <= u16::MAX as usize {
             let (cw, ch) = (qw as u16, qh as u16);
             if let Ok(img) = GifFile::from_rgba_frame_with_options(&frame_a, cw, ch, opts) {
-                if let Ok(b) = encode(&img) {
-                    assert!(decode(&b).is_ok(), "dithered still rejected by decoder");
+                if let Ok(b) = encode_file(&img) {
+                    assert!(parse(&b).is_ok(), "dithered still rejected by decoder");
                 }
             }
             let frames = [
@@ -316,9 +316,9 @@ fuzz_target!(|data: &[u8]| {
             if let Ok(img) =
                 GifFile::from_rgba_frames_shared_palette(&frames, cw, ch, opts, Some(0))
             {
-                if let Ok(b) = encode(&img) {
+                if let Ok(b) = encode_file(&img) {
                     assert!(
-                        decode(&b).is_ok(),
+                        parse(&b).is_ok(),
                         "shared-palette animation rejected by decoder"
                     );
                 }

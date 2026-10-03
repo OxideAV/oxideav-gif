@@ -8,7 +8,7 @@
 //! field will hit.
 
 use oxideav_gif::{
-    compose, decode, encode, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb,
+    compose, encode_file, parse, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb,
     Version,
 };
 
@@ -85,8 +85,8 @@ fn roundtrip(disposal: DisposalMethod) -> Vec<oxideav_gif::ComposedFrame> {
     );
     let f2 = frame(2, 2, 2, 2, 2, None); // green
     let img = image_with(vec![Block::Image(f1), Block::Image(f2)]);
-    let bytes = encode(&img).expect("encode");
-    let decoded = decode(&bytes).expect("decode");
+    let bytes = encode_file(&img).expect("encode");
+    let decoded = parse(&bytes).expect("decode");
     compose(&decoded).expect("compose")
 }
 
@@ -171,8 +171,8 @@ fn disposal_3_restore_to_previous() {
         )),
         Block::Image(frame(2, 2, 2, 2, 2, None)), // green
     ]);
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let frames = compose(&decoded).unwrap();
     assert_eq!(frames.len(), 3);
     // F2 snapshot — blue temporarily on top.
@@ -300,8 +300,8 @@ fn transparent_index_preserves_prior_canvas() {
         }),
         |x, y| if (x + y) % 2 == 0 { 2 } else { 3 },
     );
-    let bytes = encode(&image_with(vec![Block::Image(f1), Block::Image(f2)])).unwrap();
-    let frames = compose(&decode(&bytes).unwrap()).unwrap();
+    let bytes = encode_file(&image_with(vec![Block::Image(f1), Block::Image(f2)])).unwrap();
+    let frames = compose(&parse(&bytes).unwrap()).unwrap();
     let c2 = &frames[1].canvas;
     // Opaque green where (x+y)%2 == 0.
     assert_eq!(px(c2, 0, 0), [0, 0xFF, 0, 0xFF], "green at (0,0)");
@@ -365,8 +365,8 @@ fn restore_background_with_no_gct_clears_to_transparent_black() {
         global_palette: None, // <- key part: no GCT
         blocks: vec![Block::Image(f1), Block::Image(f2)],
     };
-    let bytes = encode(&img).unwrap();
-    let frames = compose(&decode(&bytes).unwrap()).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let frames = compose(&parse(&bytes).unwrap()).unwrap();
     let c2 = &frames[1].canvas;
     // F1's old rect is now alpha-0 black (no GCT → no background
     // colour resolution; §23.c.iv value 2 falls back per §18.c.iii).
@@ -417,13 +417,13 @@ fn restore_background_clears_only_disposing_frames_own_rect() {
     // F3 placed off the centre to give us a probe point that wasn't
     // touched by F2 at all — it should still show F1's red.
     let f3 = frame(0, 5, 1, 1, 3, None); // blue at corner
-    let bytes = encode(&image_6x6_with(vec![
+    let bytes = encode_file(&image_6x6_with(vec![
         Block::Image(f1),
         Block::Image(f2),
         Block::Image(f3),
     ]))
     .unwrap();
-    let frames = compose(&decode(&bytes).unwrap()).unwrap();
+    let frames = compose(&parse(&bytes).unwrap()).unwrap();
     let c3 = &frames[2].canvas;
     // F2's 2×2 rect was wiped to background black.
     assert_eq!(px(c3, 2, 2), [0, 0, 0, 0xFF], "bg-cleared by F2 dispose");
@@ -479,13 +479,13 @@ fn restore_previous_captures_show_through_state() {
         |_, _| 0, // every pixel is the transparent index → no writes
     );
     let f3 = frame(2, 2, 2, 2, 3, None); // blue
-    let bytes = encode(&image_with(vec![
+    let bytes = encode_file(&image_with(vec![
         Block::Image(f1),
         Block::Image(f2),
         Block::Image(f3),
     ]))
     .unwrap();
-    let frames = compose(&decode(&bytes).unwrap()).unwrap();
+    let frames = compose(&parse(&bytes).unwrap()).unwrap();
     // F2 snapshot — fully transparent draw, canvas still shows F1.
     let c2 = &frames[1].canvas;
     assert_eq!(
@@ -559,14 +559,14 @@ fn nested_restore_previous_chain() {
         }),
     );
     let f4 = frame(2, 2, 2, 2, 0, None); // black drawn pixels
-    let bytes = encode(&image_with(vec![
+    let bytes = encode_file(&image_with(vec![
         Block::Image(f1),
         Block::Image(f2),
         Block::Image(f3),
         Block::Image(f4),
     ]))
     .unwrap();
-    let frames = compose(&decode(&bytes).unwrap()).unwrap();
+    let frames = compose(&parse(&bytes).unwrap()).unwrap();
     assert_eq!(frames.len(), 4);
     // F2 snapshot — green visible.
     assert_eq!(px(&frames[1].canvas, 0, 0), [0, 0xFF, 0, 0xFF]);
@@ -616,8 +616,8 @@ fn restore_background_full_screen_frame_wipes_canvas() {
         }),
     );
     let f2 = frame(0, 0, 1, 1, 2, None); // green at corner
-    let bytes = encode(&image_with(vec![Block::Image(f1), Block::Image(f2)])).unwrap();
-    let frames = compose(&decode(&bytes).unwrap()).unwrap();
+    let bytes = encode_file(&image_with(vec![Block::Image(f1), Block::Image(f2)])).unwrap();
+    let frames = compose(&parse(&bytes).unwrap()).unwrap();
     // F1 snapshot — full red canvas.
     assert_eq!(px(&frames[0].canvas, 0, 0), [0xFF, 0, 0, 0xFF]);
     assert_eq!(px(&frames[0].canvas, 3, 3), [0xFF, 0, 0, 0xFF]);
@@ -662,13 +662,13 @@ fn delay_centis_matches_frames_own_gce() {
     );
     // F3 deliberately has NO GCE → delay_centis must default to 0.
     let f3 = frame(0, 2, 2, 2, 3, None);
-    let bytes = encode(&image_with(vec![
+    let bytes = encode_file(&image_with(vec![
         Block::Image(f1),
         Block::Image(f2),
         Block::Image(f3),
     ]))
     .unwrap();
-    let frames = compose(&decode(&bytes).unwrap()).unwrap();
+    let frames = compose(&parse(&bytes).unwrap()).unwrap();
     assert_eq!(frames[0].delay_centis, 11, "F1 reports its own delay");
     assert_eq!(frames[1].delay_centis, 23, "F2 reports its own delay");
     assert_eq!(frames[2].delay_centis, 0, "F3 has no GCE → 0");

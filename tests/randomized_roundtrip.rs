@@ -4,7 +4,7 @@
 //! image and verify that decoding the result reproduces the original
 //! pixel raster, palette and header.
 
-use oxideav_gif::{decode, encode, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{encode_file, parse, Block, GifFile, GifFrameData, Rgb, Version};
 
 /// Reproducible xorshift32 — keeps the suite deterministic without a
 /// crate-level RNG dependency.
@@ -79,10 +79,10 @@ fn many_shapes_and_palettes_roundtrip() {
     .enumerate()
     {
         let img = make_gif(0xCAFE_F00D + i as u32, *w, *h, *pal, false);
-        let bytes = encode(&img).unwrap_or_else(|e| {
+        let bytes = encode_file(&img).unwrap_or_else(|e| {
             panic!("encode {w}x{h} pal={pal} failed: {e}");
         });
-        let img2 = decode(&bytes).unwrap_or_else(|e| {
+        let img2 = parse(&bytes).unwrap_or_else(|e| {
             panic!("decode {w}x{h} pal={pal} failed: {e}");
         });
         assert_eq!(img2, img, "round-trip differs for {w}x{h} palette={pal}");
@@ -96,8 +96,8 @@ fn interlaced_variants_roundtrip() {
         .enumerate()
     {
         let img = make_gif(0xFEED_FACE + i as u32, *w, *h, 16, true);
-        let bytes = encode(&img).unwrap();
-        let img2 = decode(&bytes).unwrap();
+        let bytes = encode_file(&img).unwrap();
+        let img2 = parse(&bytes).unwrap();
         assert_eq!(img2, img, "interlaced round-trip differs for {w}x{h}");
     }
 }
@@ -107,8 +107,8 @@ fn interlaced_variants_roundtrip() {
 #[test]
 fn re_encode_is_byte_identical() {
     let img = make_gif(0x1234_5678, 64, 48, 32, false);
-    let bytes1 = encode(&img).unwrap();
-    let img2 = decode(&bytes1).unwrap();
-    let bytes2 = encode(&img2).unwrap();
+    let bytes1 = encode_file(&img).unwrap();
+    let img2 = parse(&bytes1).unwrap();
+    let bytes2 = encode_file(&img2).unwrap();
     assert_eq!(bytes1, bytes2);
 }

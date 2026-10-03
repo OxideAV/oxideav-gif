@@ -16,8 +16,8 @@
 //!    fatal encoder validation never disagree on those shared rules.
 
 use oxideav_gif::{
-    decode, encode, AnimationBuilder, Block, ConformanceRule, ConformanceSeverity, DisposalMethod,
-    GifFile, GifFrameData, GraphicControl, PlainText, Rgb, Version,
+    encode_file, parse, AnimationBuilder, Block, ConformanceRule, ConformanceSeverity,
+    DisposalMethod, GifFile, GifFrameData, GraphicControl, PlainText, Rgb, Version,
 };
 
 /// A minimal well-formed GIF89a animation: 2×2, two frames, looping.
@@ -47,8 +47,8 @@ fn builder_output_is_conformant() {
 #[test]
 fn builder_output_survives_roundtrip_conformant() {
     let img = builder_animation();
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     let report = decoded.conformance_report();
     assert!(
         !report.has_errors(),
@@ -87,7 +87,7 @@ fn decoded_multi_block_stream_is_conformant() {
         // Trailer §27
         0x3B,
     ];
-    let img = decode(FIXTURE).expect("fixture decodes");
+    let img = parse(FIXTURE).expect("fixture decodes");
     let report = img.conformance_report();
     assert!(
         !report.has_errors(),
@@ -107,7 +107,7 @@ fn shared_rules_agree_with_encoder() {
     // Clean image: encoder must accept.
     let clean = builder_animation();
     assert!(clean.conformance_report().is_clean());
-    assert!(encode(&clean).is_ok());
+    assert!(encode_file(&clean).is_ok());
 
     // Indices-length mismatch — a rule the encoder enforces fatally.
     // (`loop_forever()` puts the NETSCAPE Application block at index 0,
@@ -126,7 +126,7 @@ fn shared_rules_agree_with_encoder() {
         .errors()
         .any(|i| i.rule == ConformanceRule::FrameIndicesLength));
     assert!(
-        encode(&bad_len).is_err(),
+        encode_file(&bad_len).is_err(),
         "an indices-length error must make encode fail too"
     );
 
@@ -137,7 +137,7 @@ fn shared_rules_agree_with_encoder() {
     assert!(report
         .errors()
         .any(|i| i.rule == ConformanceRule::VersionTooLow));
-    assert!(encode(&bad_ver).is_err());
+    assert!(encode_file(&bad_ver).is_err());
 }
 
 /// Property: a §20.a frame-escapes-screen error and a pixel-range error
@@ -174,7 +174,7 @@ fn placement_and_pixel_range_are_diagnostic_only() {
         .errors()
         .any(|i| i.rule == ConformanceRule::FrameEscapesScreen));
     assert!(
-        encode(&escaping).is_ok(),
+        encode_file(&escaping).is_ok(),
         "§20.a placement is diagnostic-only; the encoder tolerates it"
     );
 }
@@ -214,7 +214,7 @@ fn recommendation_only_image_encodes() {
     assert!(!report.is_clean());
     assert!(!report.has_errors());
     assert_eq!(report.count(ConformanceSeverity::Recommendation), 1);
-    assert!(encode(&img).is_ok());
+    assert!(encode_file(&img).is_ok());
 }
 
 /// Plain Text block referencing the GCT in range is conformant; out of
@@ -259,8 +259,8 @@ fn plain_text_index_bounds() {
 #[test]
 fn validate_strict_through_decode_and_mutation() {
     let img = builder_animation();
-    let bytes = encode(&img).unwrap();
-    let decoded = decode(&bytes).unwrap();
+    let bytes = encode_file(&img).unwrap();
+    let decoded = parse(&bytes).unwrap();
     assert!(
         decoded.validate_strict().is_ok(),
         "a decoded well-formed stream must validate strictly"

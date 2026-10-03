@@ -6,19 +6,19 @@
 //! image of valid inputs.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_gif::{decode, encode};
+use oxideav_gif::{encode_file, parse};
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(img) = decode(data) else {
+    let Ok(img) = parse(data) else {
         return;
     };
-    let Ok(encoded) = encode(&img) else {
+    let Ok(encoded) = encode_file(&img) else {
         // Encoder rejected an input the decoder accepted: that's a
         // bug in either side. Surface it as a panic so the fuzzer
         // bins it.
         panic!("decoded image rejected by encoder");
     };
-    let img2 = match decode(&encoded) {
+    let img2 = match parse(&encoded) {
         Ok(i) => i,
         Err(e) => panic!("re-encoded GIF failed to decode: {e}"),
     };

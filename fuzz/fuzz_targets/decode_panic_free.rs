@@ -5,11 +5,11 @@
 //! input is.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_gif::decode;
+use oxideav_gif::parse;
 
 fuzz_target!(|data: &[u8]| {
     // The return value is intentionally discarded — the contract under
     // test is that the call returns at all, and that any returned
     // error is a `Result::Err` (not a panic / abort / OOM).
-    let _ = decode(data);
+    let _ = parse(data);
 });
