@@ -33,6 +33,7 @@ if oxideav_gif::probe(&bytes) {
         let _ = (frame.image.to_rgba8(), frame.delay, frame.disposal);
     }
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 | Item | What it does |
