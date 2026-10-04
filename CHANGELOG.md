@@ -13,6 +13,10 @@
 
 ### Changed
 
+- `GifImage::from_video_frame` and `TryFrom<(&VideoFrame, &CodecParameters)>`
+  return the crate's `GifError` instead of `oxideav_core::Error` (contract
+  ruling); the registry adapter maps it. `TryFrom<PixelFormat> for
+  GifPixelFormat` still yields `oxideav_core::Error`.
 - **Framework `GifDecoder` emits the native layout for still images.**
   A GIF with one graphic-rendering block now comes out exactly as
   `decode` returns it — `Pal8` with the palette side-channel (RGB), or

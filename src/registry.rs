@@ -74,13 +74,13 @@ pub fn to_core_pixel_format(pf: GifPixelFormat) -> PixelFormat {
     }
 }
 
-fn from_core_pixel_format(pf: PixelFormat) -> CoreResult<GifPixelFormat> {
+fn from_core_pixel_format(pf: PixelFormat) -> crate::Result<GifPixelFormat> {
     Ok(match pf {
         PixelFormat::Pal8 => GifPixelFormat::Pal8,
         PixelFormat::Rgb24 => GifPixelFormat::Rgb24,
         PixelFormat::Rgba => GifPixelFormat::Rgba,
         other => {
-            return Err(CoreError::unsupported(format!(
+            return Err(GifError::unsupported(format!(
                 "GIF: pixel format {other:?} not supported (Pal8 / Rgb24 / Rgba)"
             )))
         }
@@ -96,7 +96,7 @@ impl From<GifPixelFormat> for PixelFormat {
 impl TryFrom<PixelFormat> for GifPixelFormat {
     type Error = CoreError;
     fn try_from(pf: PixelFormat) -> CoreResult<Self> {
-        from_core_pixel_format(pf)
+        Ok(from_core_pixel_format(pf)?)
     }
 }
 
@@ -195,27 +195,27 @@ impl GifImage {
     /// frame's palette side-channel (RGB, all opaque) becomes
     /// [`GifImage::palette`]; the colour-signal side-channel, when
     /// attached, becomes [`GifImage::color`].
-    pub fn from_video_frame(frame: &VideoFrame, params: &CodecParameters) -> CoreResult<Self> {
+    pub fn from_video_frame(frame: &VideoFrame, params: &CodecParameters) -> crate::Result<Self> {
         let width = params
             .width
-            .ok_or_else(|| CoreError::invalid("GIF: missing width"))?;
+            .ok_or_else(|| GifError::invalid("GIF: missing width"))?;
         let height = params
             .height
-            .ok_or_else(|| CoreError::invalid("GIF: missing height"))?;
+            .ok_or_else(|| GifError::invalid("GIF: missing height"))?;
         let pix = from_core_pixel_format(params.pixel_format.unwrap_or(PixelFormat::Rgba))?;
         let plane = frame
             .image_planes()
             .first()
-            .ok_or_else(|| CoreError::invalid("GIF: frame has no planes"))?;
+            .ok_or_else(|| GifError::invalid("GIF: frame has no planes"))?;
         // The contract constructor requires `data.len() == stride ×
         // height`; a framework plane may carry trailing bytes, so trim
         // (after checking it is at least that long).
         let need = plane
             .stride
             .checked_mul(height as usize)
-            .ok_or_else(|| CoreError::invalid("GIF: plane size overflow"))?;
+            .ok_or_else(|| GifError::invalid("GIF: plane size overflow"))?;
         if plane.data.len() < need {
-            return Err(CoreError::invalid(format!(
+            return Err(GifError::invalid(format!(
                 "GIF: plane holds {} bytes, stride {} x height {height} needs {need}",
                 plane.data.len(),
                 plane.stride
@@ -245,8 +245,8 @@ impl GifImage {
 }
 
 impl TryFrom<(&VideoFrame, &CodecParameters)> for GifImage {
-    type Error = CoreError;
-    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> CoreResult<Self> {
+    type Error = GifError;
+    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> crate::Result<Self> {
         GifImage::from_video_frame(frame, params)
     }
 }
