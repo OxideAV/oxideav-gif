@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OxideAV/oxideav-gif/compare/v0.0.12...v0.0.13) - 2026-10-04
+
+### Other
+
+- from_video_frame returns GifError (contract ruling); adapter maps to core
+- README examples use the current registry API
+- fleet sweep — encode_all, native Pal8 registry output for stills, crates.io exclude
+
 ### Added
 
 - `encode_all(&[Frame], &EncodeOptions)`, the contract's multi-image
