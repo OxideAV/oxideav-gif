@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "oxideav-gif"
-version = "0.0.11"
+version = "0.0.13"
 dependencies = [
  "oxideav-core",
 ]
@@ -111,6 +111,7 @@ name = "oxideav-gif-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "oxideav-core",
  "oxideav-gif",
 ]
 

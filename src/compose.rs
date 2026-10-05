@@ -113,19 +113,65 @@ pub struct ComposedFrame {
 /// * A frame has neither a local palette nor a global one to fall
 ///   back on.
 pub fn compose(image: &GifFile) -> Result<Vec<ComposedFrame>> {
-    let mut canvas = RgbaCanvas::new(image.screen_width, image.screen_height);
-
-    // §18.c.iii / §18.c.vii — background colour is meaningful only if
-    // a Global Color Table is present and the background index falls
-    // inside it. Otherwise dispose-to-background clears to
-    // fully-transparent black. The two-step resolution lives on
-    // `GifFile` so the composer and the lazy `Playback` iterator
-    // share one implementation.
-    let background_rgba: [u8; 4] = image.background_color_rgba();
-
+    let mut compositor = Compositor::new(image.screen_width, image.screen_height);
     let mut out = Vec::new();
-
     for block in &image.blocks {
+        if let Some(frame) = compositor.step(image, block)? {
+            out.push(frame);
+        }
+    }
+    Ok(out)
+}
+
+/// The §23 disposal-method state machine as a persistent object: one
+/// logical-screen canvas that [`Compositor::step`] advances by one
+/// graphic-rendering block at a time.
+///
+/// [`compose`] drives it over a whole [`GifFile`]; the framework
+/// decoder drives it across packets when a demuxer hands it an
+/// animation one frame per packet (each packet a single-frame GIF Data
+/// Stream sharing the same Logical Screen), so the composited output
+/// is byte-identical either way.
+pub(crate) struct Compositor {
+    canvas: RgbaCanvas,
+}
+
+impl Compositor {
+    /// A blank (fully transparent) canvas of the Logical Screen size.
+    pub(crate) fn new(screen_width: u16, screen_height: u16) -> Self {
+        Self {
+            canvas: RgbaCanvas::new(screen_width, screen_height),
+        }
+    }
+
+    /// Logical Screen width the canvas was created with.
+    #[cfg_attr(not(feature = "registry"), allow(dead_code))]
+    pub(crate) fn width(&self) -> u16 {
+        self.canvas.width
+    }
+
+    /// Logical Screen height the canvas was created with.
+    #[cfg_attr(not(feature = "registry"), allow(dead_code))]
+    pub(crate) fn height(&self) -> u16 {
+        self.canvas.height
+    }
+
+    /// Render one block of `image` onto the canvas and return the
+    /// composited frame (the post-render snapshot), then apply the
+    /// block's disposal method to prepare the canvas for the next
+    /// frame. Non-graphic blocks (§24 comments, §26 application
+    /// extensions) render nothing and return `None`.
+    ///
+    /// `image` supplies the §19 Global Color Table and the §18.c.vii
+    /// background colour the block is rendered against; its Logical
+    /// Screen must match the canvas (`InvalidData` otherwise).
+    pub(crate) fn step(&mut self, image: &GifFile, block: &Block) -> Result<Option<ComposedFrame>> {
+        if image.screen_width != self.canvas.width || image.screen_height != self.canvas.height {
+            return Err(Error::InvalidData(format!(
+                "GIF: block belongs to a {}×{} logical screen, canvas is {}×{}",
+                image.screen_width, image.screen_height, self.canvas.width, self.canvas.height
+            )));
+        }
         // Identify graphic-rendering blocks (§20 image + §25 plain
         // text) and pull their bounding rectangle + GCE; everything
         // else (§24 comments, §26 application extensions) doesn't
@@ -155,10 +201,19 @@ pub fn compose(image: &GifFile) -> Result<Vec<ComposedFrame>> {
                     graphic_control.as_ref(),
                     BlockKind::PlainText(params),
                 ),
-                _ => continue,
+                _ => return Ok(None),
             };
 
         check_rect_in_screen(image, &rect)?;
+
+        // §18.c.iii / §18.c.vii — background colour is meaningful only
+        // if a Global Color Table is present and the background index
+        // falls inside it. Otherwise dispose-to-background clears to
+        // fully-transparent black. The two-step resolution lives on
+        // `GifFile` so the composer and the lazy `Playback` iterator
+        // share one implementation.
+        let background_rgba: [u8; 4] = image.background_color_rgba();
+        let canvas = &mut self.canvas;
 
         // §23.f.i — snapshot the *pre-render* canvas so a later
         // RestorePrevious can revert to exactly the image the user was
@@ -167,7 +222,7 @@ pub fn compose(image: &GifFile) -> Result<Vec<ComposedFrame>> {
 
         match kind {
             BlockKind::Image(f) => {
-                render_frame(&mut canvas, f, image.global_palette.as_deref())?;
+                render_frame(canvas, f, image.global_palette.as_deref())?;
             }
             BlockKind::PlainText(p) => {
                 // §25.a — "This block requires a Global Color Table to
@@ -179,17 +234,16 @@ pub fn compose(image: &GifFile) -> Result<Vec<ComposedFrame>> {
                     // applies to plain-text cells exactly as it does to
                     // §20 image pixels.
                     let transparent_index = gce.and_then(|g| g.transparent_index);
-                    render_plain_text(&mut canvas, p, gct, transparent_index);
+                    render_plain_text(canvas, p, gct, transparent_index);
                 }
             }
         }
 
         let delay_centis = gce.map(|g| g.delay_centis).unwrap_or(0);
-
-        out.push(ComposedFrame {
+        let frame = ComposedFrame {
             canvas: canvas.clone(),
             delay_centis,
-        });
+        };
 
         // Apply this block's disposal method to *prepare* the canvas
         // for the next frame. Plain Text is a §25 graphic-rendering
@@ -207,7 +261,7 @@ pub fn compose(image: &GifFile) -> Result<Vec<ComposedFrame>> {
                 // §23.c.iv value 2 — "the area used by the graphic
                 // must be restored to the background color." Only the
                 // rectangle the block just drew is cleared.
-                clear_rect_to_color(&mut canvas, &rect, background_rgba);
+                clear_rect_to_color(canvas, &rect, background_rgba);
             }
             DisposalMethod::RestorePrevious => {
                 // §23.c.iv value 3 — restore what was visible before
@@ -215,9 +269,9 @@ pub fn compose(image: &GifFile) -> Result<Vec<ComposedFrame>> {
                 canvas.pixels = pre_render_snapshot;
             }
         }
-    }
 
-    Ok(out)
+        Ok(Some(frame))
+    }
 }
 
 /// The composited canvas visible at a global playback offset, plus the

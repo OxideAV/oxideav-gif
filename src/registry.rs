@@ -382,19 +382,18 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     );
 }
 
-/// Register the `.gif` file extension so the container registry can
-/// resolve the codec identifier from a filename hint.
-///
-/// GIF is its own container (the data stream IS the file format), so
-/// only the extension hook is wired up — no demuxer or muxer is
-/// installed.
+/// Register the GIF container — demuxer, muxer, content probe and the
+/// `.gif` extension — so the framework can open and write GIF files
+/// through the registry (see [`crate::container`] for the stream layout
+/// and packetisation).
 pub fn register_containers(reg: &mut ContainerRegistry) {
-    reg.register_extension("gif", "gif");
+    crate::container::register(reg);
 }
 
 /// Unified registration entry point — installs the GIF codec into the
-/// codec sub-registry and the `.gif` extension hint into the container
-/// sub-registry of the supplied [`RuntimeContext`].
+/// codec sub-registry and the GIF container (demuxer / muxer / probe /
+/// `.gif` extension) into the container sub-registry of the supplied
+/// [`RuntimeContext`].
 ///
 /// Wired into `oxideav_meta::register_all` via the
 /// [`oxideav_core::register!`] macro below.
@@ -407,9 +406,11 @@ oxideav_core::register!("gif", register);
 
 /// Factory for the `Decoder` trait impl — registered in the codec
 /// registry and called by the framework when a `gif` packet stream
-/// needs decoding.
-pub fn make_decoder(_params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
-    Ok(Box::new(GifDecoder::new()))
+/// needs decoding. `params.extradata` selects the packetisation (see
+/// [`GifDecoder::from_params`]); `params.limits` tighten the decode
+/// limits.
+pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
+    Ok(Box::new(GifDecoder::from_params(params)))
 }
 
 /// Factory for the `Encoder` trait impl. `params.width` / `height`
@@ -423,41 +424,163 @@ pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
         output_params: params.clone(),
         opts,
         pending: std::collections::VecDeque::new(),
+        flushed: false,
     }))
 }
 
 // ---- Decoder --------------------------------------------------------------
 
+/// How the packets of a `gif` stream are cut — chosen from
+/// `CodecParameters::extradata` by [`GifDecoder::from_params`].
+enum Packetisation {
+    /// Every packet is a complete `<GIF Data Stream>` decoded on its
+    /// own: a still comes out native, an animation as every composited
+    /// frame. The default (no [`crate::container`] record).
+    WholeStream,
+    /// The [`crate::container`] demuxer's animation layout: one
+    /// single-frame stream per packet, composited across packets on a
+    /// persistent canvas (`Rgba` out).
+    AnimationPackets {
+        compositor: Option<crate::compose::Compositor>,
+    },
+}
+
 /// `Decoder` trait wrapper around the framework-free [`crate::decode`]
-/// / [`crate::decode_all`].
+/// / [`crate::decode_all`] and the §23 compositor of
+/// [`crate::compose()`].
 ///
-/// One input [`Packet`] is treated as a complete `<GIF Data Stream>`
-/// (Header → Logical Screen Descriptor → blocks → Trailer).
+/// Every input [`Packet`] is a complete `<GIF Data Stream>` (Header →
+/// Logical Screen Descriptor → blocks → Trailer).
 ///
 /// * A still image (exactly one graphic-rendering block) is emitted in
 ///   its native layout, exactly as [`crate::decode`] returns it: `Pal8`
 ///   with the palette side-channel (RGB; the framework palette carries
 ///   no alpha), or `Rgba` only when the file's 256-entry table leaves no
 ///   room for a transparent entry.
-/// * An animation (two or more graphic-rendering blocks) is emitted as
-///   [`crate::decode_all`] does: every block becomes one composited
-///   `Rgba` [`VideoFrame`] (the §23 disposal-method state machine of
-///   [`crate::compose()`]), because disposal across frames with
-///   distinct colour tables has no indexed representation.
+/// * An animation is emitted as [`crate::decode_all`] does: every
+///   graphic-rendering block becomes one composited `Rgba`
+///   [`VideoFrame`] (the §23 disposal-method state machine), because
+///   disposal across frames with distinct colour tables has no indexed
+///   representation. When the stream's `extradata` carries the
+///   [`crate::container`] animation record, each packet holds one frame
+///   and the canvas persists across packets; otherwise the whole
+///   animation is one packet.
 ///
-/// `pts` = frame ordinal.
+/// `pts` is the packet's `pts` when it has one (the demuxer's
+/// cumulative delay), else the frame ordinal within the packet.
+///
+/// Drained, `receive_frame` returns [`CoreError::NeedMore`] until
+/// [`Decoder::flush`] has been called, then [`CoreError::Eof`].
 pub struct GifDecoder {
     codec_id: CodecId,
     queued: std::collections::VecDeque<CoreFrame>,
+    opts: crate::DecodeOptions,
+    mode: Packetisation,
+    eof: bool,
 }
 
 impl GifDecoder {
-    /// A decoder with an empty frame queue.
+    /// A whole-stream decoder with default [`crate::DecodeOptions`]
+    /// (every packet a complete file).
     pub fn new() -> Self {
         Self {
             codec_id: CodecId::new(CODEC_ID_STR),
             queued: std::collections::VecDeque::new(),
+            opts: crate::DecodeOptions::default(),
+            mode: Packetisation::WholeStream,
+            eof: false,
         }
+    }
+
+    /// A decoder for the stream `params` describe: the
+    /// [`crate::container`] `extradata` record selects whole-stream or
+    /// per-frame animation packets, and `params.limits`
+    /// (`max_pixels_per_frame`, `max_alloc_bytes_per_frame`) tighten the
+    /// [`crate::DecodeOptions`] limits (never loosen them).
+    pub fn from_params(params: &CodecParameters) -> Self {
+        let mut dec = Self::new();
+        let limits = &params.limits;
+        dec.opts.max_pixels = Some(
+            dec.opts
+                .max_pixels
+                .map_or(limits.max_pixels_per_frame, |m| {
+                    m.min(limits.max_pixels_per_frame)
+                }),
+        );
+        dec.opts.max_bytes = Some(
+            dec.opts
+                .max_bytes
+                .map_or(limits.max_alloc_bytes_per_frame, |m| {
+                    m.min(limits.max_alloc_bytes_per_frame)
+                }),
+        );
+        if crate::container::is_animation_stream(params) {
+            dec.mode = Packetisation::AnimationPackets { compositor: None };
+        }
+        dec
+    }
+
+    /// Whole-stream path: one packet = one complete file.
+    fn decode_whole_stream(&mut self, packet: &Packet) -> CoreResult<()> {
+        let info = crate::info(&packet.data)?;
+        if info.frames == 1 && info.image_count == 1 {
+            // Still image: the native layout (`Pal8` + palette), as
+            // `decode` returns it.
+            let image = crate::decode_with(&packet.data, &self.opts)?;
+            self.queued
+                .push_back(CoreFrame::Video(image_into_video_frame(
+                    image,
+                    packet.pts.or(Some(0)),
+                )));
+            return Ok(());
+        }
+        let frames = crate::decode_all_with(&packet.data, &self.opts)?;
+        for (idx, frame) in frames.into_iter().enumerate() {
+            let pts = match packet.pts {
+                Some(p) if idx == 0 => Some(p),
+                Some(_) => None,
+                None => Some(idx as i64),
+            };
+            self.queued
+                .push_back(CoreFrame::Video(image_into_video_frame(frame.image, pts)));
+        }
+        Ok(())
+    }
+
+    /// Animation-packets path: composite this packet's graphic block(s)
+    /// onto the persistent canvas.
+    fn decode_animation_packet(&mut self, packet: &Packet) -> CoreResult<()> {
+        let file = crate::parse_with(&packet.data, &self.opts)?;
+        let (w, h) = (file.screen_width, file.screen_height);
+        let Packetisation::AnimationPackets { compositor } = &mut self.mode else {
+            unreachable!("decode_animation_packet is only called in animation mode");
+        };
+        if compositor.is_none() {
+            let bytes = u64::from(w) * u64::from(h) * 4;
+            self.opts.check_screen(u32::from(w), u32::from(h), bytes)?;
+            *compositor = Some(crate::compose::Compositor::new(w, h));
+        }
+        let comp = compositor.as_mut().expect("compositor was just created");
+        if (comp.width(), comp.height()) != (w, h) {
+            return Err(CoreError::invalid(format!(
+                "gif: packet is a {w}×{h} logical screen, the stream's canvas is {}×{}",
+                comp.width(),
+                comp.height()
+            )));
+        }
+        for block in &file.blocks {
+            if let Some(composed) = comp.step(&file, block)? {
+                let frame = VideoFrame {
+                    pts: packet.pts,
+                    planes: vec![VideoPlane {
+                        stride: usize::from(w) * 4,
+                        data: composed.canvas.pixels,
+                    }],
+                };
+                self.queued.push_back(CoreFrame::Video(frame));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -473,34 +596,31 @@ impl Decoder for GifDecoder {
     }
 
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
-        let info = crate::info(&packet.data)?;
-        if info.frames == 1 && info.image_count == 1 {
-            // Still image: the native layout (`Pal8` + palette), as
-            // `decode` returns it.
-            let image = crate::decode(&packet.data)?;
-            self.queued
-                .push_back(CoreFrame::Video(image_into_video_frame(image, Some(0))));
-            return Ok(());
+        match self.mode {
+            Packetisation::WholeStream => self.decode_whole_stream(packet),
+            Packetisation::AnimationPackets { .. } => self.decode_animation_packet(packet),
         }
-        let frames = crate::decode_all(&packet.data)?;
-        for (idx, frame) in frames.into_iter().enumerate() {
-            self.queued
-                .push_back(CoreFrame::Video(image_into_video_frame(
-                    frame.image,
-                    Some(idx as i64),
-                )));
-        }
-        Ok(())
     }
 
     fn receive_frame(&mut self) -> CoreResult<CoreFrame> {
-        self.queued
-            .pop_front()
-            .ok_or_else(|| CoreError::invalid("gif: no frame queued"))
+        match self.queued.pop_front() {
+            Some(f) => Ok(f),
+            None if self.eof => Err(CoreError::Eof),
+            None => Err(CoreError::NeedMore),
+        }
     }
 
     fn flush(&mut self) -> CoreResult<()> {
+        self.eof = true;
+        Ok(())
+    }
+
+    fn reset(&mut self) -> CoreResult<()> {
         self.queued.clear();
+        self.eof = false;
+        if let Packetisation::AnimationPackets { compositor } = &mut self.mode {
+            *compositor = None;
+        }
         Ok(())
     }
 }
@@ -510,7 +630,11 @@ impl Decoder for GifDecoder {
 /// `Encoder` trait wrapper around the framework-free [`crate::encode`]:
 /// accepts one [`VideoFrame`] per `send_frame` (layout per
 /// `params.pixel_format`) and emits a single-image GIF byte stream per
-/// `receive_packet`.
+/// `receive_packet` (`pts` / `dts` = the frame's `pts`). Drained,
+/// `receive_packet` returns [`CoreError::NeedMore`] until
+/// [`Encoder::flush`] has been called, then [`CoreError::Eof`]. The
+/// [`crate::container`] muxer merges several such packets into one
+/// animated file.
 ///
 /// Truecolour frames are reduced to a colour table by the deterministic
 /// median-cut quantiser ([`crate::quantize`]); an opaque frame using
@@ -523,6 +647,7 @@ pub struct GifEncoder {
     output_params: CodecParameters,
     opts: EncodeOptions,
     pending: std::collections::VecDeque<Packet>,
+    flushed: bool,
 }
 
 impl GifEncoder {
@@ -534,6 +659,7 @@ impl GifEncoder {
             output_params: params.clone(),
             opts: parse_options::<EncodeOptions>(&params.options).unwrap_or_default(),
             pending: std::collections::VecDeque::new(),
+            flushed: false,
         }
     }
 }
@@ -559,18 +685,24 @@ impl Encoder for GifEncoder {
             ));
         }
         let bytes = crate::encode(&image, &self.opts)?;
-        let pkt = Packet::new(0u32, TimeBase::new(1, 1), bytes);
+        let mut pkt = Packet::new(0u32, TimeBase::new(1, 1), bytes);
+        pkt.pts = video.pts;
+        pkt.dts = video.pts;
+        pkt.flags.keyframe = true;
         self.pending.push_back(pkt);
         Ok(())
     }
 
     fn receive_packet(&mut self) -> CoreResult<Packet> {
-        self.pending
-            .pop_front()
-            .ok_or_else(|| CoreError::invalid("gif encoder: no packet queued"))
+        match self.pending.pop_front() {
+            Some(p) => Ok(p),
+            None if self.flushed => Err(CoreError::Eof),
+            None => Err(CoreError::NeedMore),
+        }
     }
 
     fn flush(&mut self) -> CoreResult<()> {
+        self.flushed = true;
         Ok(())
     }
 }

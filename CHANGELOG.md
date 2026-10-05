@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The `gif` container** (`oxideav_gif::container`, installed by
+  `register` / `register_containers` next to the codec): a demuxer that
+  declares the native layout `decode` returns for a still (`Pal8` +
+  palette in `extradata`, or `Rgba`) as one packet, and cuts an
+  animation into one standalone single-frame GIF packet per
+  graphic-rendering block (time base 1/100 s — GIF's own Delay Time
+  tick — `pts` cumulative, `duration` = the frame's delay, `extradata`
+  marks the animation layout; `metadata()` carries `loop_count` and
+  `comment`s); a muxer that writes one packet verbatim and merges
+  several into one animated GIF (packet durations → Delay Time, Global
+  Color Tables carried as Local ones when they differ, NETSCAPE2.0 loop
+  from the encoder's `loop_count` option); the content probe. The
+  framework (and `oxideav-image`) can now open and write GIF files
+  through the registry. Pinned: registry frames byte-identical to
+  `decode` / `decode_all` on `Pal8` (full-screen and sub-rectangle with
+  a synthetic transparent entry), `Rgba` stills and a mixed-disposal
+  animation; `demux(mux(frames)) == frames`; demux → mux → demux
+  round trip; hostile inputs.
+- `GifDecoder::from_params`: honours the container's `extradata` record
+  (compositing one canvas across per-frame packets) and tightens the
+  decode limits from `CodecParameters::limits`.
+- `container::is_animation_stream` / `container::extradata_palette` /
+  `container::TIME_BASE` and the `EXTRADATA_*` constants describing the
+  record.
+- Fuzz target `demux` (file → demuxer → decoder → muxer).
+
+### Fixed
+
+- `GifEncoder::receive_packet` returned `InvalidData("no packet queued")`
+  when drained; it now returns `NeedMore` while frames may still come
+  and `Eof` after `flush` (the framework contract every other encoder
+  follows). `GifDecoder::receive_frame` likewise (`NeedMore` / `Eof`
+  instead of `InvalidData`), `flush` no longer discards queued frames,
+  and `reset` clears the canvas and the end-of-stream latch. Encoder
+  packets carry the frame's `pts` / `dts` and the keyframe flag.
+
 ## [0.0.13](https://github.com/OxideAV/oxideav-gif/compare/v0.0.12...v0.0.13) - 2026-10-04
 
 ### Other

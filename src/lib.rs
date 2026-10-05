@@ -46,12 +46,14 @@
 //! # Framework use
 //!
 //! With the default-on `registry` feature, [`register`] installs the
-//! `gif` codec and the `.gif` extension hint into an
-//! `oxideav_core::RuntimeContext`; [`make_decoder`] / [`make_encoder`]
-//! are the factories, and `From<GifImage> for VideoFrame` /
-//! [`GifImage::from_video_frame`] convert between the two worlds. The
-//! trait-side [`GifDecoder`] / [`GifEncoder`] call the standalone
-//! functions ([`decode_all`] and [`encode`]).
+//! `gif` codec and the GIF container (demuxer, muxer, probe, `.gif`
+//! extension — [`container`]) into an `oxideav_core::RuntimeContext`, so
+//! the framework opens and writes GIF files through the registry;
+//! [`make_decoder`] / [`make_encoder`] are the factories, and
+//! `From<GifImage> for VideoFrame` / [`GifImage::from_video_frame`]
+//! convert between the two worlds. The trait-side [`GifDecoder`] /
+//! [`GifEncoder`] call the standalone functions ([`decode`],
+//! [`decode_all`], [`encode`]) and the §23 compositor.
 //!
 //! # Supported layouts
 //!
@@ -158,6 +160,8 @@ pub mod app_ext;
 pub mod builder;
 pub mod compose;
 pub mod conformance;
+#[cfg(feature = "registry")]
+pub mod container;
 pub mod decoder;
 pub mod encoder;
 pub mod error;

@@ -13,6 +13,10 @@ libfuzzer-sys = "0.4"
 [dependencies.oxideav-gif]
 path = ".."
 
+# The `demux` target drives the container through the framework types.
+[dependencies.oxideav-core]
+version = "0.1"
+
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]
@@ -65,5 +69,11 @@ doc = false
 [[bin]]
 name = "contract"
 path = "fuzz_targets/contract.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux"
+path = "fuzz_targets/demux.rs"
 test = false
 doc = false

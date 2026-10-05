@@ -63,9 +63,11 @@ specifics* below.
 ## Framework use
 
 With the default-on `registry` feature, `register(&mut RuntimeContext)`
-installs the `gif` codec and the `.gif` extension hint
-(`register_codecs` / `register_containers` are the split forms;
-`oxideav_meta::register_all` calls the `__oxideav_entry` wrapper).
+installs the `gif` codec **and the `gif` container** — demuxer, muxer,
+content probe and the `.gif` extension (`register_codecs` /
+`register_containers` are the split forms; `oxideav_meta::register_all`
+calls the `__oxideav_entry` wrapper), so the framework opens and writes
+GIF files through the registry (`oxideav-image` included).
 `make_decoder` / `make_encoder` are the factories; the trait-side
 `GifDecoder` emits a still GIF (one graphic-rendering block) in its
 native layout exactly as `decode` returns it — `Pal8` with the palette
@@ -77,6 +79,31 @@ indexed form). `GifEncoder` writes one
 single-image GIF per `Rgba` / `Rgb24` / `Pal8` frame (`encode`), with
 `params.options` parsed into `EncodeOptions` (`lzw_strategy`,
 `interlace`, `max_colors`, `dither`, `loop_count`, `embed_metadata`).
+Drained, `receive_frame` / `receive_packet` return `NeedMore` until
+`flush`, then `Eof`.
+
+The container (`oxideav_gif::container`) declares one video stream,
+time base **1/100 s** (the §23.c.vii Delay Time tick):
+
+| File | Stream | Packets |
+|---|---|---|
+| Still (one §20 image) | `width` / `height` = the Logical Screen; `pixel_format` = what `decode` returns (`Pal8` / `Rgba`); the palette as RGB triplets in `extradata` for `Pal8` | one packet holding the whole file, `pts 0` |
+| Animation (two or more graphic-rendering blocks, or a Plain Text block) | `pixel_format = Rgba` (the composited canvas, as `decode_all`), `extradata` marks the stream as an animation (`container::is_animation_stream`) | one packet per graphic-rendering block, each a complete single-frame GIF data stream (the file's header / Logical Screen / Global Color Table + the blocks leading up to and including that frame + a Trailer); `pts` cumulative, `duration` = the frame's Delay Time (`None` without a GCE); only the first is a keyframe |
+
+`Demuxer::metadata()` carries `("loop_count", n)` from the NETSCAPE2.0 /
+ANIMEXTS1.0 *Looping* block and one `("comment", text)` per §24 Comment
+Extension. The decoder reads the `extradata` record: on an animation
+stream it keeps one §23 canvas across packets, so the registry yields
+the same frames as `decode_all`; without the record (any other producer
+of `gif` packets) every packet is a whole file. The muxer writes one
+packet verbatim and merges several into one animated GIF — each
+packet's `duration` (rescaled to centiseconds) becomes its frame's Delay
+Time, an image that drew from its own packet's Global Color Table gets
+it as a Local Color Table when the tables differ, and a NETSCAPE2.0 loop
+block comes from the stream's `loop_count` option when no packet carries
+one — so `demux(mux(frames)) == frames` for opaque frames of ≤ 256
+colours each (`encode_all` semantics), and demux → mux → demux of any
+file reproduces its composited frames, delays, disposal and loop count.
 `From<GifImage> for VideoFrame` (palette and colour-signal
 side-channels), `GifImage::from_video_frame(&VideoFrame,
 &CodecParameters)` / `TryFrom<(&VideoFrame, &CodecParameters)>`,
@@ -687,8 +714,14 @@ Implements every block type defined by the CompuServe specifications:
 
 ## Fuzzing
 
-`fuzz/fuzz_targets/` ships eight `cargo-fuzz` harnesses, all asserting
+`fuzz/fuzz_targets/` ships nine `cargo-fuzz` harnesses, all asserting
 panic-freedom on arbitrary bytes:
+
+- `demux` — the framework path: the bytes as a file into the container
+  demuxer, every packet it cuts through the registered `gif` decoder
+  (whole-stream or per-frame animation mode, as the stream's
+  `extradata` says, under a 1 Mpx `DecoderLimits` budget), then the
+  packets back through the muxer.
 
 - `contract` — the image-crate contract surface: `probe` / `info` /
   `decode` / `decode_with` (strict and lenient) / `decode_rgb8` /

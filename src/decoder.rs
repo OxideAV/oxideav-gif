@@ -414,6 +414,9 @@ fn parse_mode(bytes: &[u8], mode: RecoveryMode, opts: &DecodeOptions) -> Result<
 // ---------------------------------------------------------------------
 
 /// What [`scan`] learns from a structural walk of the stream.
+// The span / comment / prefix fields are read by the framework
+// container only.
+#[cfg_attr(not(feature = "registry"), allow(dead_code))]
 pub(crate) struct Scan {
     /// A *partial* [`GifFile`]: header / Logical Screen fields, every
     /// §26 Application Extension in source order, and the first §20
@@ -425,6 +428,36 @@ pub(crate) struct Scan {
     pub(crate) image_count: u32,
     /// Number of §25 Plain Text blocks seen.
     pub(crate) plain_text_count: u32,
+    /// Byte length of the stream prefix every frame shares: §17 Header +
+    /// §18 Logical Screen Descriptor + §19 Global Color Table.
+    pub(crate) prefix_len: usize,
+    /// One span per graphic-rendering block (§20 image or §25 Plain
+    /// Text), in source order. The spans partition the body between
+    /// `prefix_len` and the §27 Trailer: span `i` starts where span
+    /// `i - 1` ended (span 0 at `prefix_len`), so every §23 Graphic
+    /// Control, §24 Comment and §26 Application block travels with the
+    /// graphic block that follows it; trailing special-purpose blocks
+    /// ride the last span. Empty when the stream has no graphic block.
+    pub(crate) spans: Vec<GraphicSpan>,
+    /// Every §24 Comment Extension payload, in source order.
+    pub(crate) comments: Vec<Vec<u8>>,
+    /// The structural fault that ended the walk early (after the first
+    /// image), when there was one. `None` for a well-formed stream.
+    pub(crate) walk_error: Option<Error>,
+}
+
+/// Byte extent of one graphic-rendering block and the blocks that lead
+/// it — see [`Scan::spans`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "registry"), allow(dead_code))]
+pub(crate) struct GraphicSpan {
+    /// First byte (inclusive) in the stream.
+    pub(crate) start: usize,
+    /// One past the last byte of the graphic block.
+    pub(crate) end: usize,
+    /// §23.c.vii Delay Time of the block's Graphic Control Extension;
+    /// `None` when the block has no GCE.
+    pub(crate) delay_centis: Option<u16>,
 }
 
 /// Walk the stream like [`parse`] but without expanding any LZW raster
@@ -448,13 +481,21 @@ pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Re
         None
     };
 
+    let prefix_len = p.pos;
     let mut blocks = Vec::new();
     let mut pending_gce: Option<GraphicControl> = None;
     let mut image_count = 0u32;
     let mut plain_text_count = 0u32;
+    let mut spans: Vec<GraphicSpan> = Vec::new();
+    let mut comments: Vec<Vec<u8>> = Vec::new();
+    let mut walk_error: Option<Error> = None;
+    // Where the span of the next graphic block starts: the end of the
+    // previous one (the body start for the first).
+    let mut span_start = prefix_len;
 
     // Every structural step after the first image is "best effort": an
-    // `Err` ends the walk instead of failing it.
+    // `Err` ends the walk instead of failing it (the fault is kept in
+    // `walk_error` for callers that need the whole stream).
     macro_rules! step {
         ($e:expr) => {
             match $e {
@@ -463,6 +504,7 @@ pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Re
                     if image_count == 0 {
                         return Err(e);
                     }
+                    walk_error = Some(e);
                     break;
                 }
             }
@@ -472,8 +514,15 @@ pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Re
     loop {
         let intro = step!(p.peek_byte());
         match intro {
-            label::TRAILER => break,
+            label::TRAILER => {
+                // Trailing special-purpose blocks ride the last span.
+                if let Some(last) = spans.last_mut() {
+                    last.end = p.pos;
+                }
+                break;
+            }
             label::IMAGE_SEPARATOR => {
+                let delay_centis = pending_gce.as_ref().map(|g| g.delay_centis);
                 if image_count == 0 && expand_first {
                     let frame = p.read_image_descriptor_and_data(pending_gce.take())?;
                     blocks.push(Block::Image(frame));
@@ -484,6 +533,12 @@ pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Re
                     }
                 }
                 image_count += 1;
+                spans.push(GraphicSpan {
+                    start: span_start,
+                    end: p.pos,
+                    delay_centis,
+                });
+                span_start = p.pos;
             }
             label::EXTENSION_INTRODUCER => {
                 p.advance(1);
@@ -493,12 +548,18 @@ pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Re
                         pending_gce = Some(step!(p.read_graphic_control_extension()));
                     }
                     label::COMMENT => {
-                        step!(p.skip_data_sub_blocks());
+                        comments.push(step!(p.read_data_sub_blocks()));
                     }
                     label::PLAIN_TEXT => {
                         let _ = step!(p.read_plain_text_extension());
-                        pending_gce = None;
+                        let delay_centis = pending_gce.take().map(|g| g.delay_centis);
                         plain_text_count += 1;
+                        spans.push(GraphicSpan {
+                            start: span_start,
+                            end: p.pos,
+                            delay_centis,
+                        });
+                        span_start = p.pos;
                     }
                     label::APPLICATION => {
                         let app = step!(p.read_application_extension());
@@ -533,6 +594,10 @@ pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Re
         },
         image_count,
         plain_text_count,
+        prefix_len,
+        spans,
+        comments,
+        walk_error,
     })
 }
 

@@ -362,19 +362,61 @@ impl FirstFrameLayout {
     }
 }
 
+/// The first image's colour table (its §21 Local Color Table, else the
+/// §19 Global Color Table).
+fn first_frame_table<'a>(file: &'a GifFile, f: &'a GifFrameData) -> Result<&'a [Rgb]> {
+    f.local_palette
+        .as_deref()
+        .or(file.global_palette.as_deref())
+        .ok_or_else(|| {
+            Error::invalid("frame has no local palette and stream has no global palette")
+        })
+}
+
+/// The [`Palette`] a `Pal8` first image carries: the file's table with
+/// the Transparency Index at alpha 0, plus — when the transparent slot
+/// is synthetic — a `[0, 0, 0, 0]` entry right past the table and
+/// opaque-black padding to the next power of two (the shape a §19 / §21
+/// colour table takes on the wire), so `decode(encode(img)) == img`.
+fn pal8_palette(table: &[Rgb], transparent: Option<u8>, synthetic: bool) -> Palette {
+    let mut palette = Palette::from_color_table(table, transparent);
+    if synthetic {
+        palette.entries.push([0, 0, 0, 0]);
+        let padded = palette.len().next_power_of_two().clamp(2, 256);
+        palette.entries.resize(padded, [0, 0, 0, 255]);
+    }
+    palette
+}
+
+/// The native layout [`decode`] returns for `file` and, for `Pal8`, the
+/// palette it carries — from the header walk alone (no raster is read).
+/// This is what the framework demuxer declares on its stream.
+#[cfg_attr(not(feature = "registry"), allow(dead_code))]
+pub(crate) fn first_frame_native(file: &GifFile) -> Result<(PixelFormat, Option<Palette>)> {
+    let f = file
+        .frames()
+        .next()
+        .ok_or_else(|| Error::invalid("GIF: stream contains no image block"))?;
+    let table = first_frame_table(file, f)?;
+    Ok(match FirstFrameLayout::of(file, f) {
+        FirstFrameLayout::Pal8 {
+            transparent,
+            synthetic,
+        } => (
+            PixelFormat::Pal8,
+            Some(pal8_palette(table, transparent, synthetic)),
+        ),
+        FirstFrameLayout::Rgba => (PixelFormat::Rgba, None),
+    })
+}
+
 /// Compose the first §20 image of `file` onto the Logical Screen.
 fn first_frame_image(file: &GifFile, opts: &DecodeOptions) -> Result<GifImage> {
     let f = file
         .frames()
         .next()
         .ok_or_else(|| Error::invalid("GIF: stream contains no image block"))?;
-    let table = f
-        .local_palette
-        .as_deref()
-        .or(file.global_palette.as_deref())
-        .ok_or_else(|| {
-            Error::invalid("frame has no local palette and stream has no global palette")
-        })?;
+    let table = first_frame_table(file, f)?;
     let (sw, sh) = (
         usize::from(file.screen_width),
         usize::from(file.screen_height),
@@ -420,17 +462,7 @@ fn first_frame_image(file: &GifFile, opts: &DecodeOptions) -> Result<GifImage> {
             synthetic,
         } => {
             opts.check_bytes((sw * sh) as u64)?;
-            let mut palette = Palette::from_color_table(table, transparent);
-            if synthetic {
-                // The transparent slot goes right past the file's table,
-                // then the table is padded to the next power of two with
-                // opaque black — the shape a §19 / §21 colour table takes
-                // on the wire — so `decode(encode(img)) == img` holds for
-                // this image too.
-                palette.entries.push([0, 0, 0, 0]);
-                let padded = palette.len().next_power_of_two().clamp(2, 256);
-                palette.entries.resize(padded, [0, 0, 0, 255]);
-            }
+            let palette = pal8_palette(table, transparent, synthetic);
             let fill = transparent.unwrap_or(0);
             let mut indices = vec![fill; sw * sh];
             for y in 0..fh {
