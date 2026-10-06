@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OxideAV/oxideav-gif/compare/v0.0.13...v0.0.14) - 2026-10-05
+
+### Other
+
+- container demuxer + muxer behind register_containers; decoder/encoder drain contract
+
 ### Added
 
 - **The `gif` container** (`oxideav_gif::container`, installed by
