@@ -104,7 +104,9 @@ time base **1/100 s** (the §23.c.vii Delay Time tick):
 
 `Demuxer::metadata()` carries `("loop_count", n)` from the NETSCAPE2.0 /
 ANIMEXTS1.0 *Looping* block and one `("comment", text)` per §24 Comment
-Extension. The decoder reads the `extradata` record: on an animation
+Extension; the stream's `params.blobs` carry the ICC / Exif / XMP
+extensions and the comments as framework blobs (see *Metadata and
+colour*). The decoder reads the `extradata` record: on an animation
 stream it keeps one §23 canvas across packets, so the registry yields
 the same frames as `decode_all`; without the record (any other producer
 of `gif` packets) every packet is a whole file. The muxer writes one
@@ -189,6 +191,31 @@ unspecified primaries and transfer (H.273 code point 2); an embedded ICC
 profile governs when present. `encode` writes the three extensions back
 unless `embed_metadata` is off. `to_rgb8` / `to_rgba8` are exact palette
 expansions; no colour management is applied.
+
+**Through the registry (core 0.1.40 blobs):** the demuxer puts the
+file's metadata on the stream's `CodecParameters::blobs` — GIF metadata
+is file-level, so it is stream-level in the framework; decoded frames
+carry no blob record — and the encoder writes the blobs back:
+
+| Blob kind | GIF carriage | Payload |
+|---|---|---|
+| `icc` | `ICCRGBG1012` Application Extension | the profile bytes verbatim |
+| `exif` | `Exif` Application Extension | the TIFF structure from the byte-order mark; a leading `Exif\0\0` (JPEG `APP1` framing some producers keep) is stripped on read and never written |
+| `xmp` | `XMP DataXMP` Application Extension | the packet bytes as the sub-blocks carry them |
+| `gif-comment` (crate-named custom kind, `COMMENT_BLOB_KIND`) | one §24 Comment Extension per blob, raw bytes, in order, written ahead of the image (§24.e.ii) | the comment bytes verbatim (`Demuxer::metadata()` keeps the lossy-UTF-8 `("comment", text)` pairs as well) |
+| `iptc`, `cover-art`, other custom kinds | none | dropped on encode, never an error |
+
+The encoder writes the stream's blobs, except that every kind present
+on the frame's own blob record replaces the stream blobs of that kind
+(for `gif-comment`, the frame's comment set replaces the stream's);
+`embed_metadata=false` writes none. Every encoder packet is a complete
+file and carries the extensions; the muxer keeps **one copy** when it
+merges (a later packet's ICC / Exif / XMP extension or Comment that is
+byte-identical to one already written is dropped) and **inserts** a
+stream blob whose extension no packet carries ahead of the packets'
+blocks — a single foreign packet is then re-serialised instead of
+written verbatim. `metadata_blobs(&GifFile)`, `blobs_to_gif`,
+`effective_blobs`, `comment_blob` are the public pieces.
 
 ## Limits
 

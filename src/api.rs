@@ -562,7 +562,8 @@ fn delay_centis(d: Option<Duration>) -> u16 {
 }
 
 /// The de-facto Application Extensions for `metadata`.
-fn metadata_blocks(metadata: &Metadata) -> Vec<Block> {
+#[cfg_attr(not(feature = "registry"), allow(dead_code))]
+pub(crate) fn metadata_blocks(metadata: &Metadata) -> Vec<Block> {
     let mut out = Vec::new();
     if let Some(icc) = &metadata.icc {
         out.push(Block::Application(
@@ -584,6 +585,18 @@ fn metadata_blocks(metadata: &Metadata) -> Vec<Block> {
 
 /// Build the single-image [`GifFile`] that [`encode`] serialises.
 fn file_from_image(image: &GifImage, opts: &EncodeOptions) -> Result<GifFile> {
+    file_from_image_with_blocks(image, opts, Vec::new())
+}
+
+/// [`file_from_image`] with `leading` Special-Purpose blocks (§24
+/// Comments the registry encoder lifts from metadata blobs) placed
+/// after the metadata Application Extensions and before the image —
+/// the §24.e.ii recommended position.
+pub(crate) fn file_from_image_with_blocks(
+    image: &GifImage,
+    opts: &EncodeOptions,
+    leading: Vec<Block>,
+) -> Result<GifFile> {
     let (w16, h16) = wire_dims(image.width, image.height)?;
     let (w, h) = (image.width as usize, image.height as usize);
     let stride = image.stride();
@@ -656,6 +669,7 @@ fn file_from_image(image: &GifImage, opts: &EncodeOptions) -> Result<GifFile> {
     if opts.embed_metadata {
         blocks.extend(metadata_blocks(&image.metadata));
     }
+    blocks.extend(leading);
     blocks.push(Block::Image(GifFrameData {
         left: 0,
         top: 0,

@@ -31,17 +31,21 @@
 //! looks up.
 
 use oxideav_core::{
-    frame::VideoPlane, parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct,
-    CodecParameters, CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, Decoder,
-    Encoder, Error as CoreError, Frame as CoreFrame, MatrixCoefficients, OptionField, OptionKind,
-    OptionValue, Packet, PixelFormat, Result as CoreResult, RuntimeContext, TimeBase,
-    TransferCharacteristics, VideoFrame,
+    frame::VideoPlane, parse_options, BlobKind, CodecCapabilities, CodecId, CodecInfo,
+    CodecOptionsStruct, CodecParameters, CodecRegistry, ColorPrimaries, ColorSignal,
+    ContainerRegistry, Decoder, Encoder, Error as CoreError, Frame as CoreFrame,
+    MatrixCoefficients, MetadataBlob, OptionField, OptionKind, OptionValue, Packet, PixelFormat,
+    Result as CoreResult, RuntimeContext, TimeBase, TransferCharacteristics, VideoFrame,
 };
 
+use crate::app_ext::{
+    EXIF_IDENTIFIER, ICC_AUTH_CODE, ICC_IDENTIFIER, XMP_AUTH_CODE, XMP_IDENTIFIER,
+};
 use crate::encoder::{EncodeOptions, LzwStrategy};
 use crate::error::GifError;
+use crate::image::{Application, Block, GifFile};
 use crate::quantize::Dither;
-use crate::types::{ColorInfo, ColorRange, GifImage, GifPixelFormat, Palette};
+use crate::types::{ColorInfo, ColorRange, GifImage, GifPixelFormat, Metadata, Palette};
 
 /// Canonical codec id for GIF image frames.
 pub const CODEC_ID_STR: &str = "gif";
@@ -281,6 +285,123 @@ impl TryFrom<(&VideoFrame, &CodecParameters)> for GifImage {
     }
 }
 
+// ---- Metadata blobs -----------------------------------------------------------
+
+/// The custom [`BlobKind`] name for a §24 Comment Extension: one blob
+/// per Comment Extension, holding its sub-block payload verbatim (raw
+/// bytes — §24 says 7-bit ASCII, producers write anything). The
+/// framework's well-known kinds cover the ICC / Exif / XMP Application
+/// Extensions; comments have no well-known kind, so this crate names
+/// the native structure as the contract asks (`"gif-comment"`).
+pub const COMMENT_BLOB_KIND: &str = "gif-comment";
+
+/// The [`BlobKind`] of a §24 Comment Extension blob
+/// ([`COMMENT_BLOB_KIND`]).
+pub fn comment_blob_kind() -> BlobKind {
+    BlobKind::from_static(COMMENT_BLOB_KIND)
+}
+
+/// A `gif-comment` blob holding `comment` verbatim.
+pub fn comment_blob(comment: impl Into<Vec<u8>>) -> MetadataBlob {
+    MetadataBlob::new(comment_blob_kind(), comment)
+}
+
+/// The JPEG `APP1` framing some producers keep in front of the TIFF
+/// structure inside a GIF `Exif` Application Extension. The framework's
+/// `exif` payload convention starts at the byte-order mark, so the
+/// prefix is removed on the way in and never written on the way out.
+const EXIF_APP1_PREFIX: &[u8] = b"Exif\0\0";
+
+/// The metadata blobs a parsed GIF carries, in source order of its
+/// §26 Application Extensions: [`BlobKind::ICC`] from `ICCRGBG1012`
+/// (the profile bytes verbatim), [`BlobKind::EXIF`] from `Exif` (the
+/// TIFF structure; a leading `Exif\0\0` is stripped so the payload
+/// starts at the byte-order mark), [`BlobKind::XMP`] from `XMP DataXMP`
+/// (the packet bytes as the sub-blocks carry them), then one
+/// [`comment_blob`] per §24 Comment Extension in source order.
+///
+/// Every other Application Extension (NETSCAPE2.0 / ANIMEXTS1.0 loop
+/// control, vendor blocks) is structure, not metadata, and stays in
+/// [`GifFile::blocks`]. The demuxer puts these on
+/// [`CodecParameters::blobs`] (GIF metadata is file-level, so it is
+/// stream-level in the framework; decoded frames carry no blob
+/// record).
+pub fn metadata_blobs(file: &GifFile) -> Vec<MetadataBlob> {
+    let mut out = application_blobs(file);
+    out.extend(file.comments().map(comment_blob));
+    out
+}
+
+/// The ICC / Exif / XMP blobs of `file`'s Application Extensions, in
+/// source order (see [`metadata_blobs`]).
+pub(crate) fn application_blobs(file: &GifFile) -> Vec<MetadataBlob> {
+    file.application_extensions()
+        .filter_map(application_blob)
+        .collect()
+}
+
+/// One Application Extension as a well-known blob, or `None` when it is
+/// not one of the three metadata extensions.
+fn application_blob(app: &Application) -> Option<MetadataBlob> {
+    if &app.identifier == ICC_IDENTIFIER && &app.auth_code == ICC_AUTH_CODE {
+        Some(MetadataBlob::new(BlobKind::ICC, app.data.clone()))
+    } else if &app.identifier == XMP_IDENTIFIER && &app.auth_code == XMP_AUTH_CODE {
+        Some(MetadataBlob::new(BlobKind::XMP, app.data.clone()))
+    } else if &app.identifier == EXIF_IDENTIFIER {
+        let payload = app.data.strip_prefix(EXIF_APP1_PREFIX).unwrap_or(&app.data);
+        Some(MetadataBlob::new(BlobKind::EXIF, payload.to_vec()))
+    } else {
+        None
+    }
+}
+
+/// `true` when `app` is one of the three metadata Application
+/// Extensions ([`metadata_blobs`] lifts).
+pub(crate) fn is_metadata_application(app: &Application) -> bool {
+    application_blob(app).is_some()
+}
+
+/// What the registry encoder writes for a blob list: the
+/// [`Metadata`] (first ICC / Exif / XMP blob of each kind — GIF carries
+/// one extension of each) and one §24 Comment block per
+/// `gif-comment` blob, in blob order. Kinds GIF has no carriage for
+/// (IPTC, cover art, other custom kinds) are dropped.
+pub fn blobs_to_gif(blobs: &[MetadataBlob]) -> (Metadata, Vec<Block>) {
+    let mut meta = Metadata::new();
+    let mut comments = Vec::new();
+    for b in blobs {
+        if b.kind == BlobKind::ICC {
+            meta.icc.get_or_insert_with(|| b.data.clone());
+        } else if b.kind == BlobKind::EXIF {
+            meta.exif.get_or_insert_with(|| {
+                b.data
+                    .strip_prefix(EXIF_APP1_PREFIX)
+                    .unwrap_or(&b.data)
+                    .to_vec()
+            });
+        } else if b.kind == BlobKind::XMP {
+            meta.xmp.get_or_insert_with(|| b.data.clone());
+        } else if b.kind == COMMENT_BLOB_KIND {
+            comments.push(Block::Comment(b.data.clone()));
+        }
+    }
+    (meta, comments)
+}
+
+/// The blob list a picture is written with: `stream` blobs, except
+/// that every kind present in `frame` replaces the stream blobs of
+/// that kind (a frame blob overrides a stream blob of the same kind —
+/// for `gif-comment`, the frame's comment set replaces the stream's).
+pub fn effective_blobs(stream: &[MetadataBlob], frame: &[MetadataBlob]) -> Vec<MetadataBlob> {
+    let mut out: Vec<MetadataBlob> = stream
+        .iter()
+        .filter(|s| !frame.iter().any(|f| f.kind == s.kind))
+        .cloned()
+        .collect();
+    out.extend(frame.iter().cloned());
+    out
+}
+
 // ---- CodecOptionsStruct (registry-only schema for EncodeOptions) ----------
 
 impl CodecOptionsStruct for EncodeOptions {
@@ -337,8 +458,9 @@ impl CodecOptionsStruct for EncodeOptions {
             name: "embed_metadata",
             kind: OptionKind::Bool,
             default: OptionValue::Bool(true),
-            help: "Write the ICC / Exif / XMP Application Extensions from \
-                   the image's metadata.",
+            help: "Write the ICC / Exif / XMP Application Extensions and \
+                   the §24 Comment blocks from the stream's and the frame's \
+                   metadata blobs (`icc` / `exif` / `xmp` / `gif-comment`).",
         },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> CoreResult<()> {
@@ -718,13 +840,27 @@ impl Encoder for GifEncoder {
             CoreFrame::Video(v) => v,
             _ => return Err(CoreError::invalid("gif encoder: expected Frame::Video")),
         };
-        let image = GifImage::from_video_frame(video, &self.output_params)?;
+        let mut image = GifImage::from_video_frame(video, &self.output_params)?;
         if image.width == 0 || image.height == 0 {
             return Err(CoreError::invalid(
                 "gif encoder: width/height must be in 1..=65535",
             ));
         }
-        let bytes = crate::encode(&image, &self.opts)?;
+        // Metadata: the stream's blobs, overridden per kind by the
+        // frame's record, as the ICC / Exif / XMP Application
+        // Extensions and §24 Comment blocks of this packet (every
+        // packet is a complete file, so every packet carries them; the
+        // muxer keeps one copy when it merges).
+        let comments = if self.opts.embed_metadata {
+            let blobs = effective_blobs(&self.output_params.blobs, &video.blobs());
+            let (meta, comments) = blobs_to_gif(&blobs);
+            image.metadata = meta;
+            comments
+        } else {
+            Vec::new()
+        };
+        let file = crate::api::file_from_image_with_blocks(&image, &self.opts, comments)?;
+        let bytes = crate::encode_file_with(&file, &self.opts)?;
         let mut pkt = Packet::new(0u32, TimeBase::new(1, 1), bytes);
         pkt.pts = video.pts;
         pkt.dts = video.pts;

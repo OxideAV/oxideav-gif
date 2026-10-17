@@ -37,6 +37,22 @@
 //! NETSCAPE2.0 / ANIMEXTS1.0 *Looping* sub-block and one
 //! `("comment", text)` per §24 Comment Extension (lossy UTF-8).
 //!
+//! # Metadata blobs (core 0.1.40)
+//!
+//! The stream's `CodecParameters::blobs` carry the file's metadata as
+//! framework blobs — [`crate::registry::metadata_blobs`]: `icc` from
+//! the `ICCRGBG1012` Application Extension, `exif` from `Exif` (TIFF
+//! structure, a leading `Exif\0\0` stripped), `xmp` from `XMP DataXMP`,
+//! and one `gif-comment` per §24 Comment Extension (raw bytes). GIF
+//! metadata is file-level, so it is stream-level here; decoded frames
+//! carry no blob record. The muxer writes them back: a packet from the
+//! `gif` encoder already holds its extensions (one copy survives the
+//! merge — a later packet's ICC / Exif / XMP extension or Comment block
+//! that is byte-identical to one already written is dropped), and a
+//! stream blob whose extension no packet carries is inserted ahead of
+//! the packets' blocks (a single foreign packet is then re-serialised
+//! rather than written verbatim).
+//!
 //! # `extradata`
 //!
 //! The demuxer tells the decoder which of the two layouts above a
@@ -89,7 +105,9 @@ use crate::decoder::scan;
 use crate::encoder::{encode_file_with, EncodeOptions};
 use crate::image::{Block, DisposalMethod, GifFile, GraphicControl};
 use crate::options::DecodeOptions;
-use crate::registry::to_core_pixel_format;
+use crate::registry::{
+    application_blobs, blobs_to_gif, comment_blob, is_metadata_application, to_core_pixel_format,
+};
 use crate::types::Palette;
 
 /// GIF's own clock: the §23.c.vii Delay Time counts hundredths of a
@@ -239,7 +257,7 @@ pub fn open_demuxer(
     }
 
     let total: i64 = packets.iter().filter_map(|p| p.duration).sum();
-    let stream = StreamInfo {
+    let mut stream = StreamInfo {
         index: 0,
         time_base: TIME_BASE,
         duration: if still { None } else { Some(total) },
@@ -254,6 +272,14 @@ pub fn open_demuxer(
     for c in &s.comments {
         metadata.push(("comment".into(), String::from_utf8_lossy(c).into_owned()));
     }
+    // The file's metadata as framework blobs (stream-level: GIF
+    // metadata is file-level). `scan` keeps every Application
+    // Extension on its partial file and every Comment aside.
+    stream.params.blobs = application_blobs(file);
+    stream
+        .params
+        .blobs
+        .extend(s.comments.iter().map(|c| comment_blob(c.clone())));
 
     Ok(Box::new(GifDemuxer {
         stream,
@@ -324,9 +350,15 @@ pub fn open_muxer(
     let loop_count = parse_options::<EncodeOptions>(&s.params.options)
         .map(|o| o.loop_count)
         .unwrap_or(EncodeOptions::default().loop_count);
+    // The stream's metadata blobs become the file's extensions when
+    // no packet carries them.
+    let (meta, comments) = blobs_to_gif(&s.params.blobs);
+    let mut stream_blocks = crate::api::metadata_blocks(&meta);
+    stream_blocks.extend(comments);
     Ok(Box::new(GifMuxer {
         output,
         loop_count,
+        stream_blocks,
         packets: Vec::new(),
         header_written: false,
         trailer_written: false,
@@ -336,6 +368,10 @@ pub fn open_muxer(
 struct GifMuxer {
     output: Box<dyn WriteSeek>,
     loop_count: Option<u16>,
+    /// The stream-level metadata blobs as GIF blocks (metadata
+    /// Application Extensions, then Comments), inserted when no packet
+    /// carries the extension.
+    stream_blocks: Vec<Block>,
     packets: Vec<Packet>,
     header_written: bool,
     trailer_written: bool,
@@ -370,10 +406,26 @@ impl Muxer for GifMuxer {
         }
         match self.packets.len() {
             0 => return Err(CoreError::invalid("GIF muxer: no packets written")),
-            // One packet is already a complete file.
-            1 => self.output.write_all(&self.packets[0].data)?,
+            // One packet is already a complete file — written verbatim
+            // unless a stream blob has to be added to it.
+            1 => {
+                let opts = DecodeOptions::default().unlimited();
+                let file = crate::parse_with(&self.packets[0].data, &opts).map_err(|e| {
+                    CoreError::invalid(format!("GIF muxer: packet 0 does not parse: {e}"))
+                })?;
+                let missing = missing_stream_blocks(&self.stream_blocks, &file.blocks);
+                if missing.is_empty() {
+                    self.output.write_all(&self.packets[0].data)?;
+                } else {
+                    let mut file = file;
+                    file.blocks.splice(0..0, missing);
+                    file.upgrade_version_if_needed();
+                    let bytes = encode_file_with(&file, &EncodeOptions::default())?;
+                    self.output.write_all(&bytes)?;
+                }
+            }
             _ => {
-                let merged = merge_packets(&self.packets, self.loop_count)?;
+                let merged = merge_packets(&self.packets, self.loop_count, &self.stream_blocks)?;
                 self.output.write_all(&merged)?;
             }
         }
@@ -425,9 +477,46 @@ fn set_block_delay(block: &mut Block, delay_centis: u16) {
     }
 }
 
+/// `true` when `block` is a metadata block the merge keeps one copy
+/// of: an ICC / Exif / XMP Application Extension or a §24 Comment.
+fn is_metadata_block(block: &Block) -> bool {
+    match block {
+        Block::Application(a) => is_metadata_application(a),
+        Block::Comment(_) => true,
+        _ => false,
+    }
+}
+
+/// `true` when `present` already carries `block`'s extension: the same
+/// Application Extension identifier + authentication code (one ICC /
+/// Exif / XMP extension per file), or a byte-identical Comment.
+fn carries(present: &[Block], block: &Block) -> bool {
+    present.iter().any(|p| match (p, block) {
+        (Block::Application(a), Block::Application(b)) => {
+            a.identifier == b.identifier && a.auth_code == b.auth_code
+        }
+        (Block::Comment(a), Block::Comment(b)) => a == b,
+        _ => false,
+    })
+}
+
+/// The stream-level metadata blocks no packet block carries.
+fn missing_stream_blocks(stream_blocks: &[Block], present: &[Block]) -> Vec<Block> {
+    stream_blocks
+        .iter()
+        .filter(|b| !carries(present, b))
+        .cloned()
+        .collect()
+}
+
 /// Merge N complete GIF data streams (one per packet) into one animated
-/// file — see the module docs.
-fn merge_packets(packets: &[Packet], loop_count: Option<u16>) -> CoreResult<Vec<u8>> {
+/// file — see the module docs. `stream_blocks` are the stream-level
+/// metadata blocks, inserted ahead when no packet carries them.
+fn merge_packets(
+    packets: &[Packet],
+    loop_count: Option<u16>,
+    stream_blocks: &[Block],
+) -> CoreResult<Vec<u8>> {
     let opts = DecodeOptions::default().unlimited();
     let mut files = Vec::with_capacity(packets.len());
     for (i, p) in packets.iter().enumerate() {
@@ -477,6 +566,11 @@ fn merge_packets(packets: &[Packet], loop_count: Option<u16>) -> CoreResult<Vec<
                          Global Color Table)"
                     )));
                 }
+                // Every encoder packet is a complete file carrying the
+                // stream's metadata; one copy per merged file.
+                other if is_metadata_block(other) && blocks.iter().any(|b| b == other) => {
+                    continue;
+                }
                 other => blocks.push(other.clone()),
             }
         }
@@ -500,6 +594,8 @@ fn merge_packets(packets: &[Packet], loop_count: Option<u16>) -> CoreResult<Vec<
             blocks.insert(0, Block::Application(ctl.to_application()));
         }
     }
+    let missing = missing_stream_blocks(stream_blocks, &blocks);
+    blocks.splice(0..0, missing);
 
     let mut merged = GifFile {
         version: first.version,

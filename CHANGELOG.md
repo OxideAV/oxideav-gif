@@ -19,6 +19,24 @@
   `Rgba`; `Rgba` stills remain the 256-opaque-entries-plus-uncovered-
   canvas case only. README table of the rules.
 
+- **Metadata blobs through the registry** (core 0.1.40
+  `oxideav_core::blob`): the demuxer puts the `ICCRGBG1012` profile
+  (`BlobKind::ICC`), the `Exif` extension (`BlobKind::EXIF`, TIFF
+  structure from the byte-order mark — a leading `Exif\0\0` is
+  stripped) and the `XMP DataXMP` packet (`BlobKind::XMP`) on
+  `CodecParameters::blobs`, plus one crate-named custom `gif-comment`
+  blob per §24 Comment Extension (raw bytes; `COMMENT_BLOB_KIND`,
+  `comment_blob`). The registry encoder writes the stream's blobs —
+  each kind overridden by the frame's own blob record — back as the
+  three Application Extensions and leading Comment blocks
+  (`embed_metadata=false` writes none; kinds GIF cannot carry are
+  dropped). The muxer keeps one copy of each metadata extension /
+  Comment across merged packets and inserts stream blobs no packet
+  carries (a single foreign packet is re-serialised in that case).
+  Public helpers `metadata_blobs(&GifFile)`, `blobs_to_gif`,
+  `effective_blobs`. Eleven integration tests, demux → encode → mux →
+  demux round trip included.
+
 ### Other
 
 - `fuzz/target/` (cargo-fuzz build artifacts) untracked and ignored.
