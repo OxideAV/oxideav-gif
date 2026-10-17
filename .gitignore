@@ -11,3 +11,6 @@
 # crash artifacts are not pinned in the tree.
 fuzz/corpus/
 fuzz/artifacts/
+
+# cargo-fuzz build artifacts (the fuzz sub-crate has its own target dir).
+fuzz/target/
