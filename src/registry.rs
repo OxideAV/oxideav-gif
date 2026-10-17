@@ -714,6 +714,16 @@ impl CodecOptionsStruct for EncodeOptions {
                    forever, n repeats n times, -1 plays once (no extension).",
         },
         OptionField {
+            name: "quality",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(100),
+            help: "Colour budget as a quality, 0..=100: the colour-table \
+                   budget is round(256 x quality / 100) entries, at least 2 \
+                   (100 = the full 256-entry table, lossless for input of \
+                   at most that many colours). Applied only when `max_colors` \
+                   is not given explicitly; see `quality_to_max_colors`.",
+        },
+        OptionField {
             name: "embed_metadata",
             kind: OptionKind::Bool,
             default: OptionValue::Bool(true),
@@ -765,10 +775,52 @@ impl CodecOptionsStruct for EncodeOptions {
                     })?),
                 };
             }
+            "quality" => {
+                // Validated here; the budget it stands for is resolved by
+                // the factory once every option is known (an explicit
+                // `max_colors` wins, whatever the map order) — see
+                // `apply_quality`.
+                let q = v.as_u32()?;
+                if q > 100 {
+                    return Err(CoreError::invalid(format!(
+                        "GIF encoder: option `quality` got {q}; expected 0..=100"
+                    )));
+                }
+            }
             "embed_metadata" => self.embed_metadata = v.as_bool()?,
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())
+    }
+}
+
+/// The colour-table budget the `quality` option stands for:
+/// `round(256 × quality / 100)` entries, at least 2 — `100` is the full
+/// 256-entry table (the default, lossless for input of ≤ 256 colours),
+/// `50` is 128 entries, `0` is 2. Monotone: a lower quality never
+/// yields a larger table, and the median-cut reduction to fewer entries
+/// gives smaller LZW output for truecolour input (shorter codes, more
+/// repetition). This is the one knob the framework's `quality` governs
+/// here; GIF has no quantiser scale, so dither and the LZW strategy
+/// stay separate options.
+pub fn quality_to_max_colors(quality: u32) -> usize {
+    let q = quality.min(100) as usize;
+    ((256 * q + 50) / 100).clamp(2, 256)
+}
+
+/// Resolve the `quality` option against `opts`: when `options` carries
+/// `quality` and no explicit `max_colors`, the quantiser's colour
+/// budget becomes [`quality_to_max_colors`] of it. An explicit
+/// `max_colors` always wins.
+fn apply_quality(opts: &mut EncodeOptions, options: &oxideav_core::CodecOptions) {
+    if options.get("max_colors").is_some() {
+        return;
+    }
+    if let Some(q) = options
+        .get("quality")
+        .and_then(|q| q.trim().parse::<u32>().ok())
+    {
+        opts.quantize.max_colors = quality_to_max_colors(q);
     }
 }
 
@@ -833,7 +885,8 @@ pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
 /// = Pal8` (what the `gif` decoder emits for every packet this encoder
 /// writes), not the input layout.
 pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
-    let opts = parse_options::<EncodeOptions>(&params.options)?;
+    let mut opts = parse_options::<EncodeOptions>(&params.options)?;
+    apply_quality(&mut opts, &params.options);
     Ok(Box::new(GifEncoder::with_options(params, opts)))
 }
 
@@ -1089,10 +1142,9 @@ impl GifEncoder {
     /// [`EncodeOptions`] schema; invalid options fall back to defaults —
     /// use [`make_encoder`] to surface them as errors).
     pub fn new_from_params(params: &CodecParameters) -> Self {
-        Self::with_options(
-            params,
-            parse_options::<EncodeOptions>(&params.options).unwrap_or_default(),
-        )
+        let mut opts = parse_options::<EncodeOptions>(&params.options).unwrap_or_default();
+        apply_quality(&mut opts, &params.options);
+        Self::with_options(params, opts)
     }
 
     fn with_options(params: &CodecParameters, opts: EncodeOptions) -> Self {

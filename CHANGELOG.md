@@ -57,6 +57,14 @@
   not the input layout; the capabilities declare both `lossy` and
   `lossless`.
 
+- **`quality` option on the registry encoder** (contract r476 ruling):
+  the framework's `quality` 0..=100 is the colour-table budget
+  `round(256 × quality / 100)` entries, at least 2
+  (`quality_to_max_colors`; 100 = the full table, the default), applied
+  only when `max_colors` is not given explicitly. Distinct bytes at
+  100 / 90 / 50 / 10 on truecolour input; out-of-range values are
+  refused by `make_encoder`.
+
 ### Other
 
 - `fuzz/target/` (cargo-fuzz build artifacts) untracked and ignored.

@@ -207,6 +207,21 @@ Image Descriptor **before** any raster is allocated.
 | `loop_count: Option<u16>` | `Some(0)` (forever) | NETSCAPE2.0 loop count for `encode_all`; `None` plays once. |
 | `embed_metadata: bool` | `true` | Write ICC / Exif / XMP Application Extensions from `GifImage::metadata`. |
 
+**`quality` (registry path only, contract r476):** GIF's one
+meaningful knob is the colour-table budget, so the framework's
+`quality` option (0..=100; `oxideav_image::SaveOptions::quality`
+forwards it) is the budget `round(256 × quality / 100)` entries, at
+least 2 — `quality_to_max_colors`: `100` is the full 256-entry table
+(the default; lossless for input of ≤ 256 colours), `90` → 230, `50` →
+128, `10` → 26, `0` → 2. Monotone: a lower quality never yields a
+larger table, and the median-cut reduction gives smaller LZW output
+for truecolour input (`quality` 100 / 90 / 50 / 10 of a 272-colour
+picture are four different byte streams). An explicit `max_colors`
+always wins, whatever the option order; input with fewer distinct
+colours than the budget is unaffected (a 2-colour picture is identical
+at every quality — the knob is a budget, not a quantiser scale). Dither
+and the LZW strategy stay separate options.
+
 ## Metadata and colour
 
 `GifImage::metadata` carries the ICC profile (`ICCRGBG1012`

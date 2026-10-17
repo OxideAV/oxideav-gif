@@ -222,7 +222,8 @@ pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{
     blobs_to_gif, comment_blob, comment_blob_kind, effective_blobs, from_color_signal,
-    make_decoder, make_encoder, metadata_blobs, palette_alpha_record, palette_from_frame, register,
-    register_codecs, register_containers, to_color_signal, to_core_pixel_format, GifDecoder,
-    GifEncoder, ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR, COMMENT_BLOB_KIND,
+    make_decoder, make_encoder, metadata_blobs, palette_alpha_record, palette_from_frame,
+    quality_to_max_colors, register, register_codecs, register_containers, to_color_signal,
+    to_core_pixel_format, GifDecoder, GifEncoder, ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR,
+    COMMENT_BLOB_KIND,
 };
