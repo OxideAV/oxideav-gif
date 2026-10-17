@@ -221,6 +221,7 @@ pub use quantize::{
 pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{
-    from_color_signal, make_decoder, make_encoder, register, register_codecs, register_containers,
-    to_color_signal, to_core_pixel_format, GifDecoder, GifEncoder, CODEC_ID_STR,
+    from_color_signal, make_decoder, make_encoder, palette_alpha_record, palette_from_frame,
+    register, register_codecs, register_containers, to_color_signal, to_core_pixel_format,
+    GifDecoder, GifEncoder, CODEC_ID_STR,
 };

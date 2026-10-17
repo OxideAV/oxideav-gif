@@ -369,12 +369,30 @@ fn still_layouts_match_layer1_decode_byte_for_byte() {
             expect.palette.as_ref().map(rgb_triplets).as_deref(),
             "{name}: palette side-channel"
         );
+        // The palette-alpha record (r477): attached exactly when the
+        // Layer 1 palette has a non-opaque entry, one byte per entry.
+        let expect_alpha: Option<Vec<u8>> = expect
+            .palette
+            .as_ref()
+            .filter(|pal| pal.has_alpha())
+            .map(|pal| pal.entries.iter().map(|e| e[3]).collect());
+        assert_eq!(
+            v.palette_alpha(),
+            expect_alpha.as_deref(),
+            "{name}: palette-alpha record"
+        );
+        if let Some(pal) = &expect.palette {
+            for (i, e) in pal.entries.iter().enumerate() {
+                assert_eq!(v.palette_rgba(i as u8), Some(*e), "{name}: entry {i}");
+            }
+        }
         assert_eq!(v.pts, Some(0));
         // The bridge rebuilds the Layer 1 image from the registry frame.
         let back = GifImage::from_video_frame(v, p).unwrap();
         assert_eq!(back.width, expect.width);
         assert_eq!(back.format, expect.format);
         assert_eq!(back.planes, expect.planes, "{name}");
+        assert_eq!(back.palette, expect.palette, "{name}: palette with alpha");
         seen.push(expect.format);
     }
     // The matrix really covered both native layouts.

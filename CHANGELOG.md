@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Palette-alpha record on the registry path** (core 0.1.40,
+  image-crate contract r473/r476 rulings): a still GIF with a
+  §23.c.viii Transparency Index — or a sub-rectangle image that gets
+  the synthetic transparent entry — now decodes through the framework
+  as `Pal8` **with** `VideoFrame::palette_alpha` (`0` at that entry,
+  `255` elsewhere; opaque tables attach no record) instead of `Pal8`
+  with the transparency dropped. `GifImage::from_video_frame` reads the
+  record back (uncovered entries opaque), so the registry encoder maps
+  it to a Transparency Index by the `ALPHA_OPAQUE_THRESHOLD` rule
+  (first entry below 128; other such entries fold onto it; ≥ 128 is
+  written opaque). New helpers `palette_alpha_record(&Palette)` and
+  `palette_from_frame(&VideoFrame)`. Animations still composite as
+  `Rgba`; `Rgba` stills remain the 256-opaque-entries-plus-uncovered-
+  canvas case only. README table of the rules.
+
+### Other
+
+- `fuzz/target/` (cargo-fuzz build artifacts) untracked and ignored.
+
 ## [0.0.14](https://github.com/OxideAV/oxideav-gif/compare/v0.0.13...v0.0.14) - 2026-10-05
 
 ### Other

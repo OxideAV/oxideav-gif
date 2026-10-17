@@ -155,14 +155,18 @@ fn image_into_video_frame(mut image: GifImage, pts: Option<i64>) -> VideoFrame {
     frame
 }
 
-/// The palette side-channel for `Pal8` (RGB triplets — the framework
-/// palette carries no alpha, so a transparent entry's RGB is kept and
-/// its transparency is lost; use [`crate::decode_rgba8`] when alpha
-/// matters), and the colour-signal side-channel whenever the image
-/// signals more than GIF's default.
+/// The palette side-channel for `Pal8` (RGB triplets) plus, when any
+/// entry is not fully opaque, the palette-alpha record (one byte per
+/// entry, in entry order: `0` at the §23.c.viii Transparency Index,
+/// `255` everywhere else — see [`palette_alpha_record`]); and the
+/// colour-signal side-channel whenever the image signals more than
+/// GIF's default.
 fn stamp_frame_side_channels(frame: &mut VideoFrame, image: &GifImage) {
     if let (GifPixelFormat::Pal8, Some(p)) = (image.format, &image.palette) {
         frame.set_palette(p.entries.iter().flat_map(|e| [e[0], e[1], e[2]]).collect());
+        if let Some(alpha) = palette_alpha_record(p) {
+            frame.set_palette_alpha(alpha);
+        }
     }
     let c = image.color;
     if c.primaries != ColorInfo::UNSPECIFIED
@@ -173,9 +177,40 @@ fn stamp_frame_side_channels(frame: &mut VideoFrame, image: &GifImage) {
     }
 }
 
+/// The palette-alpha side-channel record for `palette`: one byte per
+/// entry (`entries[i][3]`), covering the whole table, or `None` when
+/// every entry is opaque (an opaque palette attaches no record — the
+/// framework reads a missing record as "all opaque").
+///
+/// This is the carriage the image-crate contract rules for indexed
+/// layouts: a still with a Transparency Index stays `Pal8` and its
+/// transparency rides this record (`0` at that index, `255` elsewhere)
+/// instead of being dropped or forcing an `Rgba` expansion.
+pub fn palette_alpha_record(palette: &Palette) -> Option<Vec<u8>> {
+    palette
+        .has_alpha()
+        .then(|| palette.entries.iter().map(|e| e[3]).collect())
+}
+
+/// The [`Palette`] a `Pal8` [`VideoFrame`] carries: the palette
+/// side-channel's RGB triplets joined with the palette-alpha record
+/// (an entry the record does not cover — or every entry when no
+/// record is attached — is opaque). `None` without a palette record.
+pub fn palette_from_frame(frame: &VideoFrame) -> Option<Palette> {
+    let rgb = frame.palette()?;
+    let alpha = frame.palette_alpha().unwrap_or(&[]);
+    Some(Palette::new(
+        rgb.chunks_exact(3)
+            .enumerate()
+            .map(|(i, c)| [c[0], c[1], c[2], alpha.get(i).copied().unwrap_or(255)])
+            .collect(),
+    ))
+}
+
 impl From<GifImage> for VideoFrame {
     /// The pixel plane (`pts` `None`), plus the palette side-channel
-    /// for `Pal8` and the colour-signal side-channel when the image
+    /// (and the palette-alpha record for a non-opaque table) for
+    /// `Pal8` and the colour-signal side-channel when the image
     /// signals a colour space.
     fn from(image: GifImage) -> Self {
         image_into_video_frame(image, None)
@@ -192,9 +227,10 @@ impl GifImage {
     /// Build a [`GifImage`] from a framework [`VideoFrame`]: dimensions
     /// and pixel format come from `params` (`Rgba` when unset), the
     /// first image plane is the pixel plane, and for `Pal8` the
-    /// frame's palette side-channel (RGB, all opaque) becomes
-    /// [`GifImage::palette`]; the colour-signal side-channel, when
-    /// attached, becomes [`GifImage::color`].
+    /// frame's palette side-channel joined with its palette-alpha
+    /// record (see [`palette_from_frame`]; no record = every entry
+    /// opaque) becomes [`GifImage::palette`]; the colour-signal
+    /// side-channel, when attached, becomes [`GifImage::color`].
     pub fn from_video_frame(frame: &VideoFrame, params: &CodecParameters) -> crate::Result<Self> {
         let width = params
             .width
@@ -229,13 +265,7 @@ impl GifImage {
             plane.data[..need].to_vec(),
         )?;
         if pix == GifPixelFormat::Pal8 {
-            img.palette = frame.palette().map(|rgb| {
-                Palette::new(
-                    rgb.chunks_exact(3)
-                        .map(|c| [c[0], c[1], c[2], 255])
-                        .collect(),
-                )
-            });
+            img.palette = palette_from_frame(frame);
         }
         if let Some(sig) = frame.color_signal() {
             img.color = from_color_signal(&sig);
@@ -454,9 +484,13 @@ enum Packetisation {
 ///
 /// * A still image (exactly one graphic-rendering block) is emitted in
 ///   its native layout, exactly as [`crate::decode`] returns it: `Pal8`
-///   with the palette side-channel (RGB; the framework palette carries
-///   no alpha), or `Rgba` only when the file's 256-entry table leaves no
-///   room for a transparent entry.
+///   with the palette side-channel (RGB) and — when the file has a
+///   §23.c.viii Transparency Index, or the image leaves canvas
+///   uncovered and the table has a free slot for a synthetic
+///   transparent entry — the palette-alpha record (`0` at that entry,
+///   `255` elsewhere; see [`palette_alpha_record`]); `Rgba` only when
+///   the file's 256-entry opaque table leaves no room for the
+///   transparent entry an uncovered canvas needs.
 /// * An animation is emitted as [`crate::decode_all`] does: every
 ///   graphic-rendering block becomes one composited `Rgba`
 ///   [`VideoFrame`] (the §23 disposal-method state machine), because
@@ -642,7 +676,13 @@ impl Decoder for GifDecoder {
 /// alpha — pixels with alpha below
 /// [`crate::quantize::ALPHA_OPAQUE_THRESHOLD`] route to the one
 /// §23.c.viii Transparency Index. `Pal8` frames are written with their
-/// palette side-channel as the Global Color Table.
+/// palette side-channel as the Global Color Table; their palette-alpha
+/// record, when attached, selects the Transparency Index by the same
+/// rule — the first entry whose alpha is below the threshold becomes
+/// the Transparency Index and every pixel at another such entry is
+/// folded onto it (GIF has one transparent index per image); entries
+/// at or above the threshold are written opaque. No record = every
+/// entry opaque, no Graphic Control Extension.
 pub struct GifEncoder {
     output_params: CodecParameters,
     opts: EncodeOptions,

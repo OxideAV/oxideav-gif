@@ -71,16 +71,28 @@ GIF files through the registry (`oxideav-image` included).
 `make_decoder` / `make_encoder` are the factories; the trait-side
 `GifDecoder` emits a still GIF (one graphic-rendering block) in its
 native layout exactly as `decode` returns it — `Pal8` with the palette
-side-channel (RGB; the framework palette has no alpha), `Rgba` only
-when the file's 256-entry table leaves no transparent slot — and an
-animation as one composited `Rgba` `VideoFrame` per graphic-rendering
-block (`decode_all`; disposal across distinct colour tables has no
-indexed form). `GifEncoder` writes one
-single-image GIF per `Rgba` / `Rgb24` / `Pal8` frame (`encode`), with
-`params.options` parsed into `EncodeOptions` (`lzw_strategy`,
-`interlace`, `max_colors`, `dither`, `loop_count`, `embed_metadata`).
-Drained, `receive_frame` / `receive_packet` return `NeedMore` until
-`flush`, then `Eof`.
+side-channel (RGB) and, when the table has a non-opaque entry, the
+**palette-alpha record** (`VideoFrame::palette_alpha`, core 0.1.40:
+one byte per entry, `0` at the Transparency Index, `255` elsewhere —
+`palette_alpha_record` / `palette_from_frame` are the helpers), `Rgba`
+only when the file's 256-entry opaque table leaves no transparent
+slot — and an animation as one composited `Rgba` `VideoFrame` per
+graphic-rendering block (`decode_all`; disposal across distinct colour
+tables has no indexed form). `GifEncoder` writes one single-image GIF
+per `Rgba` / `Rgb24` / `Pal8` frame (`encode`), with `params.options`
+parsed into `EncodeOptions` (`lzw_strategy`, `interlace`, `max_colors`,
+`dither`, `loop_count`, `embed_metadata`). Drained, `receive_frame` /
+`receive_packet` return `NeedMore` until `flush`, then `Eof`.
+
+**Palette-alpha rules (registry path):**
+
+| Direction | Rule |
+|---|---|
+| Decode, still | `Pal8` + palette; the alpha record is attached exactly when the Layer 1 `Palette` has a non-opaque entry — a §23.c.viii Transparency Index in range of the table, or the synthetic `[0, 0, 0, 0]` entry a sub-rectangle image without one gets (see *Supported layouts*). An opaque table attaches no record (the framework reads "no record" as all-opaque). |
+| Decode, still with 256 opaque entries and uncovered canvas | `Rgba` (no palette, no record) — the only case a still is not indexed. |
+| Decode, animation | `Rgba` composited canvas per frame; no palette, no record. |
+| Encode, `Pal8` frame | The palette side-channel is the Global Color Table. With an alpha record: the first entry whose alpha is below `ALPHA_OPAQUE_THRESHOLD` (128) becomes the Transparency Index, pixels at every other such entry are folded onto it, entries at or above the threshold are written opaque (GIF has one transparent index, no partial coverage). Entries the record does not cover, or no record at all: opaque. |
+| Encode, `Rgba` frame | Pixels with alpha below the threshold go to the one Transparency Index; an alpha source therefore always comes back as `Pal8` + record. |
 
 The container (`oxideav_gif::container`) declares one video stream,
 time base **1/100 s** (the §23.c.vii Delay Time tick):
