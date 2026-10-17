@@ -121,8 +121,8 @@ block comes from the stream's `loop_count` option when no packet carries
 one — so `demux(mux(frames)) == frames` for opaque frames of ≤ 256
 colours each (`encode_all` semantics), and demux → mux → demux of any
 file reproduces its composited frames, delays, disposal and loop count.
-`From<GifImage> for VideoFrame` (palette and colour-signal
-side-channels), `GifImage::from_video_frame(&VideoFrame,
+`From<GifImage> for VideoFrame` (palette, palette-alpha and
+colour-signal side-channels), `GifImage::from_video_frame(&VideoFrame,
 &CodecParameters)` / `TryFrom<(&VideoFrame, &CodecParameters)>`,
 `to_core_pixel_format` and `to_color_signal` / `from_color_signal`
 bridge the two worlds. One implementation: the registry path calls the
@@ -972,6 +972,15 @@ and the baseline numbers.
   `app_ext` — these stay surfaced as raw `Block::Application` data
   with the identifier, authentication code, and concatenated payload
   bytes.
+- The XMP storage convention's own framing of the `XMP DataXMP`
+  payload (the packet followed by a fixed resynchronisation trailer so
+  that the §15 sub-block length bytes fall inside the packet text).
+  The XMP storage specification is not staged under `docs/`, so the
+  crate carries the payload exactly as the §26 sub-blocks concatenate
+  it — both ways, so a file this crate wrote round-trips — and the
+  `xmp` blob is that payload verbatim; a file written under the
+  convention above reads back with the sub-block length bytes removed
+  from the packet text. Pending a staged copy of that specification.
 
 ## Specifications
 
