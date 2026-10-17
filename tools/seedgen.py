@@ -279,7 +279,105 @@ lzw_seeds = {
 
 OUT_LZW = "fuzz/seed_corpus/lzw"
 
+# =============================================================================
+# Round 477: `demux` (framework path, metadata blobs) and
+# `registry_encode` (registry encoder input) seeds.
+# =============================================================================
+#
+# The demux seeds splice the three metadata Application Extensions
+# (§26: `ICCRGBG1012`, `XMP DataXMP`, `Exif` + opaque auth code) and a
+# §24 Comment Extension between the Global Color Table and the Graphic
+# Control Extension of the 2x2 GIF89a fixture, so the demuxer's blob
+# extraction (ICC verbatim, XMP verbatim, Exif with its `Exif\0\0`
+# prefix stripped, comment raw) runs from the first execution.
+
+def _app_ext(identifier, auth, payload):
+    assert len(identifier) == 8 and len(auth) == 3
+    out = bytes([0x21, 0xFF, 0x0B]) + identifier + auth
+    # §15 sub-blocks of at most 255 bytes.
+    for i in range(0, len(payload), 255):
+        chunk = payload[i:i + 255]
+        out += bytes([len(chunk)]) + chunk
+    return out + b"\x00"
+
+def _comment_ext(payload):
+    return bytes([0x21, 0xFE, len(payload)]) + payload + b"\x00"
+
+_89a_prefix = fix_89a[:25]          # §17 header + §18 LSD + §19 4-entry GCT
+_89a_body = fix_89a[25:]            # §23 GCE + §20 image + §27 trailer
+assert _89a_prefix[-12:-9] == b"\x00\x00\x00" and _89a_body[0] == 0x21
+
+_exif_tiff = b"II*\x00\x08\x00\x00\x00\x00\x00"   # byte-order mark, magic, IFD at 8, 0 entries
+demux_seed_metadata = (
+    _89a_prefix
+    + _app_ext(b"ICCRGBG1", b"012", b"\x00\x00\x00\x80acsp" + b"\x00" * 8)
+    + _app_ext(b"XMP Data", b"XMP", b"<?xpacket begin=''?><x:xmpmeta/><?xpacket end='w'?>")
+    + _app_ext(b"Exif    ", b"\xFF\x00\x00", b"Exif\x00\x00" + _exif_tiff)
+    + _comment_ext(b"seed comment")
+    + _89a_body
+)
+# Same file, Exif without the APP1 prefix, two comments (one non-ASCII),
+# and the image block repeated → a two-frame animation stream.
+demux_seed_animation = (
+    _89a_prefix
+    + _app_ext(b"ICCRGBG1", b"012", b"\x00\x00\x00\x80acsp")
+    + _app_ext(b"Exif    ", b"\xFF\x00\x00", _exif_tiff)
+    + _comment_ext(b"one")
+    + _comment_ext(b"\xFF\xFEtwo\x00")
+    + _89a_body[:-1]                 # GCE + image, no trailer
+    + _89a_body                      # GCE + image + trailer
+)
+
+demux_seeds = {
+    "demux_still_icc_xmp_exif_prefixed_comment": demux_seed_metadata,
+    "demux_animation_icc_exif_two_comments":     demux_seed_animation,
+}
+
+# `registry_encode` input layout (see fuzz_targets/registry_encode.rs):
+#   byte 0  layout selector (index into ACCEPTED_PIXEL_FORMATS, then the
+#           undeclared list)
+#   byte 1  width - 1 (mod 24), byte 2 height - 1 (mod 24)
+#   byte 3  flags: 1 row padding, 2 attach a palette, 4 attach an alpha
+#           record, 8 quality option, 16 shorten the last plane, 32
+#           dither, 64 interlace, 128 embed_metadata=false
+#   byte 4  quality, byte 5 palette entries - 1, byte 6 alpha-record
+#           length, byte 7 blob count (mod 6); the rest feeds planes,
+#           palette, record and blobs cyclically.
+def _re_seed(layout, w, h, flags, quality, pal_len, alpha_len, n_blobs, tail):
+    return bytes([layout, w - 1, h - 1, flags, quality, pal_len - 1, alpha_len, n_blobs]) + tail
+
+registry_encode_seeds = {
+    # Pal8, 4x3, palette of 4 with an alpha record, two blobs.
+    "re_pal8_alpha_record_blobs":   _re_seed(0, 4, 3, 2 | 4, 0, 4, 4, 2, bytes(range(1, 64))),
+    # Rgba 5x2 with padding, quality 50, three blobs, one on the frame.
+    "re_rgba_quality_blobs":        _re_seed(1, 5, 2, 1 | 8, 50, 1, 0, 3, bytes(range(200, 256)) + b"\x84" + bytes(range(0, 40))),
+    # Gbrap16Le 3x3, dither + interlace.
+    "re_gbrap16_dither_interlace":  _re_seed(14, 3, 3, 32 | 64, 0, 1, 0, 0, bytes(range(0, 120))),
+    # An undeclared layout (Yuv420P) — must be refused by type.
+    "re_undeclared_yuv420p":        _re_seed(21, 2, 2, 0, 0, 1, 0, 0, bytes(16)),
+}
+
 def sha1hex(b): return hashlib.sha1(b).hexdigest()
+
+for label, blob in demux_seeds.items():
+    name = sha1hex(blob)
+    out = "fuzz/seed_corpus/demux"
+    path = os.path.join(out, name)
+    os.makedirs(out, exist_ok=True)
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(blob)
+        print(f"[write] {label} -> {out}/{name} ({len(blob)} B)")
+
+for label, blob in registry_encode_seeds.items():
+    name = sha1hex(blob)
+    out = "fuzz/seed_corpus/registry_encode"
+    path = os.path.join(out, name)
+    os.makedirs(out, exist_ok=True)
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(blob)
+        print(f"[write] {label} -> {out}/{name} ({len(blob)} B)")
 
 written = []
 for label, blob in seeds.items():

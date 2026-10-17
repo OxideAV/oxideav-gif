@@ -65,6 +65,16 @@
   100 / 90 / 50 / 10 on truecolour input; out-of-range values are
   refused by `make_encoder`.
 
+- **Fuzz**: new `registry_encode` harness (declared and undeclared
+  input layouts, palette-alpha records of any length, stream / frame
+  blobs of every kind, options; every emitted packet must parse,
+  decode, demux with the predicted blobs and mux); the `demux` harness
+  now checks the stream blobs against the Layer 1 parse, the alpha
+  record against the Layer 1 palette, re-encodes the first frame with
+  the stream's blobs and muxes the tail packets under them. Seeds for
+  both under `fuzz/seed_corpus/`; `fuzz/Cargo.lock` moved to core
+  0.1.40.
+
 ### Other
 
 - `fuzz/target/` (cargo-fuzz build artifacts) untracked and ignored.

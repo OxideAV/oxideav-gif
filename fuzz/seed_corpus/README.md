@@ -22,6 +22,8 @@ fuzz/seed_corpus/decode_panic_free/...
 fuzz/seed_corpus/decode_lenient_panic_free/...
 fuzz/seed_corpus/plain_text/...
 fuzz/seed_corpus/lzw/...
+fuzz/seed_corpus/demux/...
+fuzz/seed_corpus/registry_encode/...
 ```
 
 ## Bootstrapping `fuzz/corpus/<target>/`
@@ -136,3 +138,24 @@ python3 tools/seedgen.py
 run from the crate root. The script is pure-Python with no external
 deps; the seeds are produced by literal spec walks, not by invoking
 any GIF library.
+
+### `demux` (round 477)
+
+| Label                                        | Bytes | What it walks                                                        |
+|----------------------------------------------|-------|----------------------------------------------------------------------|
+| `demux_still_icc_xmp_exif_prefixed_comment`  | 197   | §26 `ICCRGBG1012` / `XMP DataXMP` / `Exif` (with `Exif\0\0`) + §24 Comment ahead of the 2×2 GIF89a image → stream blobs |
+| `demux_animation_icc_exif_two_comments`      | 141   | ICC + prefix-less Exif + two Comments (one non-ASCII), image repeated → animation packets, blobs on the stream |
+
+### `registry_encode` (round 477)
+
+Structured inputs for `fuzz_targets/registry_encode.rs` (byte 0 layout
+selector, bytes 1–2 geometry, byte 3 flags, bytes 4–7 quality / palette
+length / alpha-record length / blob count, the rest planes + palette +
+record + blobs):
+
+| Label                          | Bytes | What it walks                                                    |
+|--------------------------------|-------|------------------------------------------------------------------|
+| `re_pal8_alpha_record_blobs`   | 71    | `Pal8` 4×3, 4-entry palette with an alpha record, two blobs      |
+| `re_rgba_quality_blobs`        | 105   | `Rgba` 5×2, row padding, `quality` 50, three blobs (one on the frame) |
+| `re_gbrap16_dither_interlace`  | 128   | `Gbrap16Le` 3×3 (planar, 16 → 8), dither + interlace             |
+| `re_undeclared_yuv420p`        | 24    | an undeclared layout — must be a typed `Unsupported`             |

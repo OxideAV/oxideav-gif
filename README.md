@@ -795,14 +795,33 @@ Implements every block type defined by the CompuServe specifications:
 
 ## Fuzzing
 
-`fuzz/fuzz_targets/` ships nine `cargo-fuzz` harnesses, all asserting
+`fuzz/fuzz_targets/` ships ten `cargo-fuzz` harnesses, all asserting
 panic-freedom on arbitrary bytes:
 
 - `demux` — the framework path: the bytes as a file into the container
   demuxer, every packet it cuts through the registered `gif` decoder
   (whole-stream or per-frame animation mode, as the stream's
   `extradata` says, under a 1 Mpx `DecoderLimits` budget), then the
-  packets back through the muxer.
+  packets back through the muxer. Round 477: the stream's metadata
+  blobs must equal `metadata_blobs` of the Layer 1 parse; every
+  decoded still's palette-alpha record is well formed and matches the
+  Layer 1 palette entry for entry; the first decoded frame is
+  re-encoded through the registry encoder with the stream's blobs and
+  that packet must parse and demux with them; the tail packets are
+  muxed alone under the stream's blobs (the muxer's insertion path).
+- `registry_encode` — the registry encoder's input surface: the bytes
+  select one of the 21 declared input layouts (or an undeclared one,
+  which must be refused by type), a geometry up to 24×24, row padding,
+  a deliberately short plane, a palette with an alpha record of any
+  length (longer than the palette included), stream and frame blobs of
+  every kind (ICC, Exif with and without the `Exif\0\0` prefix, XMP,
+  `gif-comment`, kinds GIF cannot carry) and the `quality` / `dither` /
+  `interlace` / `embed_metadata` options. Every packet the encoder
+  emits must parse, decode as `Pal8` of the requested geometry, decode
+  through the registry decoder under the coded label, demux with
+  exactly the blobs `effective_blobs` → `blobs_to_gif` predicts, and
+  mux once (verbatim / insertion path) and twice (merge, one copy of
+  the metadata).
 
 - `contract` — the image-crate contract surface: `probe` / `info` /
   `decode` / `decode_with` (strict and lenient) / `decode_rgb8` /
@@ -906,12 +925,18 @@ fixtures from the `lzw::decode` unit tests), an illegal
 `min_code_size = 12`, a hostile `expected_pixels` near `u32::MAX`
 against a 2-byte payload (allocation-clamp), an out-of-range first
 code (KwKwK / uninitialised-prefix), and a Clear-only stream that ends
-before EOI. Bootstrap a fresh corpus with
+before EOI. The `demux` target gets two seeds — the 2×2 GIF89a fixture
+with the three metadata Application Extensions (`Exif` carrying the
+`Exif\0\0` prefix) and a Comment spliced in, and a two-frame animation
+with ICC, prefix-less Exif and two comments; `registry_encode` gets
+four structured inputs (`Pal8` with an alpha record and blobs, `Rgba`
+with padding / quality / a frame blob, `Gbrap16Le` with dither and
+interlace, an undeclared `Yuv420P`). Bootstrap a fresh corpus with
 `cp -n fuzz/seed_corpus/<target>/* fuzz/corpus/<target>/`. Seeds are
 content-addressed by SHA-1 and regenerable via `tools/seedgen.py`
 (pure-Python, no GIF library invoked).
 
-All seven harnesses run crash-free over long fuzzing sessions
+All ten harnesses run crash-free over long fuzzing sessions
 (the end-to-end `decode` target clears hundreds of thousands of
 executions per minute with the `optimize_frame_rects`
 compose-equivalence assert enabled in the loop; the `lzw` target
