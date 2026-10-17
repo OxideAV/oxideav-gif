@@ -79,9 +79,12 @@ only when the file's 256-entry opaque table leaves no transparent
 slot — and an animation as one composited `Rgba` `VideoFrame` per
 graphic-rendering block (`decode_all`; disposal across distinct colour
 tables has no indexed form). `GifEncoder` writes one single-image GIF
-per `Rgba` / `Rgb24` / `Pal8` frame (`encode`), with `params.options`
-parsed into `EncodeOptions` (`lzw_strategy`, `interlace`, `max_colors`,
-`dither`, `loop_count`, `embed_metadata`). Drained, `receive_frame` /
+per frame in any of the 21 declared input layouts (`Pal8` / `Rgba` /
+`Rgb24` and their reorderings, grey, mono, 16-bit — see *Supported
+layouts*; `encode` after normalisation), with `params.options` parsed
+into `EncodeOptions` (`lzw_strategy`, `interlace`, `max_colors`,
+`dither`, `loop_count`, `embed_metadata`); its `output_params` label the
+coded layout, `Pal8`. Drained, `receive_frame` /
 `receive_packet` return `NeedMore` until `flush`, then `Eof`.
 
 **Palette-alpha rules (registry path):**
@@ -149,6 +152,30 @@ Encode:
 | `Rgb24` | Reduced to ≤ `quantize.max_colors` entries by the deterministic median-cut quantiser (lossless when the input has that many distinct colours or fewer) — the same conversion `encode_rgb8` performs. GIF has no truecolour layout, so this is documented, not refused. |
 | `Rgba` | As `Rgb24`, with every pixel of alpha < 128 routed to the one Transparency Index (one slot of the colour budget), the rest opaque — the `encode_rgba8` conversion. |
 | width or height > 65 535 | `Error::Unsupported` (the §18 / §20 fields are 16-bit). |
+
+**Registry encoder — declared input layouts** (`ACCEPTED_PIXEL_FORMATS`,
+21 entries, what `CodecCapabilities::accepted_pixel_formats` of the
+`gif` codec lists and the gateway's ladder reads; every one is
+normalised to the three layouts above before `encode` runs, so the
+registry and the standalone path produce identical bytes for the same
+request; anything else — every YCbCr layout, CMYK, float — is a typed
+`Unsupported` from `send_frame`):
+
+| Input | Normalised to | Conversion |
+|---|---|---|
+| `Pal8` | `Pal8` | none; palette + palette-alpha record as given |
+| `Rgba`, `Bgra`, `Argb`, `Abgr`, `Gbrap8`, `Ya8` | `Rgba` | channel reorder / plane interleave / grey replicated to RGB; exact |
+| `Rgb24`, `Bgr24`, `Gbrp8`, `Gray8` | `Rgb24` | channel reorder / plane interleave / grey replicated; exact (grey and ≤ 256-colour input are never quantised) |
+| `MonoBlack`, `MonoWhite` | `Rgb24` | 1 bit per pixel, MSB first → `0` / `255` grey; exact |
+| `Rgba64Le`, `Gbrap16Le`, `Ya16Le` | `Rgba` | the high byte of every 16-bit word (`v >> 8`), alpha included |
+| `Rgb48Le`, `Gbrp16Le`, `Gray16Le` | `Rgb24` | the high byte of every 16-bit word (`v >> 8`) |
+| `Gray12Le`, `Gray10Le` | `Rgb24` | the significant bits narrowed to 8 (`v >> 4`, `v >> 2`) |
+
+The encoder's `output_params` carry the **coded label**
+`pixel_format = Pal8` — what the `gif` decoder emits for every packet
+it writes — not the input layout; its capabilities declare both
+`lossy` (the colour-table reduction, the alpha threshold, the 16 → 8
+narrowing) and `lossless` (indexed / ≤ `max_colors`-colour input).
 
 `encode` writes `GIF87a` when no extension is needed and `GIF89a`
 otherwise (§7); `EncodeOptions::interlace` stores the rows in

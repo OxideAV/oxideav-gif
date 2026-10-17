@@ -78,16 +78,288 @@ pub fn to_core_pixel_format(pf: GifPixelFormat) -> PixelFormat {
     }
 }
 
+/// The framework's native-layout names for the three GIF layouts
+/// (the only [`PixelFormat`]s with a [`GifPixelFormat`] twin). Every
+/// other declared input layout ([`ACCEPTED_PIXEL_FORMATS`]) is
+/// normalised to one of these by [`GifImage::from_video_frame`].
 fn from_core_pixel_format(pf: PixelFormat) -> crate::Result<GifPixelFormat> {
     Ok(match pf {
         PixelFormat::Pal8 => GifPixelFormat::Pal8,
         PixelFormat::Rgb24 => GifPixelFormat::Rgb24,
         PixelFormat::Rgba => GifPixelFormat::Rgba,
-        other => {
-            return Err(GifError::unsupported(format!(
-                "GIF: pixel format {other:?} not supported (Pal8 / Rgb24 / Rgba)"
-            )))
+        other => return Err(unsupported_layout(other)),
+    })
+}
+
+/// The typed refusal for an input layout the encoder does not declare.
+fn unsupported_layout(pf: PixelFormat) -> GifError {
+    GifError::unsupported(format!(
+        "GIF encoder: pixel format {pf:?} is not an accepted input layout (accepted: {})",
+        ACCEPTED_PIXEL_FORMATS
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// The input layouts the registry encoder accepts
+/// (`CodecCapabilities::accepted_pixel_formats` of the `gif` codec),
+/// in the order the encoder prefers them: the native indexed layout,
+/// then the 8-bit colour layouts with alpha, without alpha, grey,
+/// 1-bit, then the deep layouts the encoder narrows to 8 bits. Every
+/// one is normalised to `Pal8` / `Rgba` / `Rgb24` before Layer 1
+/// [`crate::encode`] runs, so the colour-table reduction is the same
+/// for all of them:
+///
+/// | Input | Normalised to | Conversion |
+/// |---|---|---|
+/// | `Pal8` | `Pal8` | none; palette + palette-alpha record as given |
+/// | `Rgba`, `Bgra`, `Argb`, `Abgr`, `Gbrap8`, `Ya8` | `Rgba` | channel reorder / plane interleave / grey replicated to RGB; exact |
+/// | `Rgb24`, `Bgr24`, `Gbrp8`, `Gray8` | `Rgb24` | channel reorder / plane interleave / grey replicated; exact |
+/// | `MonoBlack`, `MonoWhite` | `Rgb24` | 1 bit per pixel, MSB first → `0` / `255` grey; exact |
+/// | `Rgba64Le`, `Gbrap16Le`, `Ya16Le` | `Rgba` | the high byte of every 16-bit word (`v >> 8`), alpha included |
+/// | `Rgb48Le`, `Gbrp16Le`, `Gray16Le` | `Rgb24` | the high byte of every 16-bit word (`v >> 8`) |
+/// | `Gray12Le`, `Gray10Le` | `Rgb24` | the 12 / 10 significant bits narrowed to 8 (`v >> 4`, `v >> 2`) |
+///
+/// `Rgba` input then goes through the alpha threshold
+/// ([`crate::quantize::ALPHA_OPAQUE_THRESHOLD`]) and `Rgba` / `Rgb24`
+/// through the median-cut colour-table reduction when they hold more
+/// than `max_colors` distinct colours; `Gray8` / mono / ≤ 256-colour
+/// input is exact. Anything not listed — every YCbCr layout, CMYK,
+/// float — is a typed `Unsupported` refusal from `send_frame`, and the
+/// gateway's ladder converts to one of these first.
+pub const ACCEPTED_PIXEL_FORMATS: &[PixelFormat] = &[
+    PixelFormat::Pal8,
+    PixelFormat::Rgba,
+    PixelFormat::Bgra,
+    PixelFormat::Argb,
+    PixelFormat::Abgr,
+    PixelFormat::Gbrap8,
+    PixelFormat::Ya8,
+    PixelFormat::Rgb24,
+    PixelFormat::Bgr24,
+    PixelFormat::Gbrp8,
+    PixelFormat::Gray8,
+    PixelFormat::MonoBlack,
+    PixelFormat::MonoWhite,
+    PixelFormat::Rgba64Le,
+    PixelFormat::Gbrap16Le,
+    PixelFormat::Ya16Le,
+    PixelFormat::Rgb48Le,
+    PixelFormat::Gbrp16Le,
+    PixelFormat::Gray16Le,
+    PixelFormat::Gray12Le,
+    PixelFormat::Gray10Le,
+];
+
+/// The pixel plane(s) of `frame` as one tightly packed `Pal8` /
+/// `Rgb24` / `Rgba` plane, per the [`ACCEPTED_PIXEL_FORMATS`] table.
+/// Returns the GIF layout, the packed stride and the bytes.
+fn normalise_planes(
+    frame: &VideoFrame,
+    pf: PixelFormat,
+    width: u32,
+    height: u32,
+) -> crate::Result<(GifPixelFormat, usize, Vec<u8>)> {
+    let (w, h) = (width as usize, height as usize);
+    let planes = frame.image_planes();
+    let count = pf.plane_count();
+    if planes.len() < count {
+        return Err(GifError::invalid(format!(
+            "GIF encoder: {pf:?} needs {count} plane(s), the frame has {}",
+            planes.len()
+        )));
+    }
+    // Every declared layout stores full-resolution planes: validate
+    // each against its own row length and height (a framework plane
+    // may carry trailing bytes; it may not be short).
+    let mut rows: Vec<&[u8]> = Vec::with_capacity(count);
+    let mut strides = Vec::with_capacity(count);
+    for (i, plane) in planes.iter().take(count).enumerate() {
+        let row = pf
+            .plane_row_bytes(i, width)
+            .ok_or_else(|| GifError::invalid("GIF encoder: plane size overflow"))?;
+        let need = plane
+            .stride
+            .checked_mul(h)
+            .ok_or_else(|| GifError::invalid("GIF encoder: plane size overflow"))?;
+        if plane.stride < row || plane.data.len() < need {
+            return Err(GifError::invalid(format!(
+                "GIF encoder: plane {i} holds {} bytes at stride {}, {pf:?} {width}x{height} \
+                 needs rows of {row} bytes x {height}",
+                plane.data.len(),
+                plane.stride
+            )));
         }
+        rows.push(&plane.data[..need]);
+        strides.push(plane.stride);
+    }
+    let p0 = rows[0];
+    let s0 = strides[0];
+    // Row `y` of plane 0.
+    let row0 = |y: usize| &p0[y * s0..y * s0 + pf.plane_row_bytes(0, width).unwrap_or(0)];
+    // Little-endian 16-bit word `i` of a row.
+    let le16 = |r: &[u8], i: usize| u16::from_le_bytes([r[2 * i], r[2 * i + 1]]);
+
+    Ok(match pf {
+        PixelFormat::Pal8 => (GifPixelFormat::Pal8, s0, p0.to_vec()),
+        PixelFormat::Rgb24 => (GifPixelFormat::Rgb24, s0, p0.to_vec()),
+        PixelFormat::Rgba => (GifPixelFormat::Rgba, s0, p0.to_vec()),
+        PixelFormat::Bgra | PixelFormat::Argb | PixelFormat::Abgr => {
+            // Byte offsets of R, G, B, A within the 4-byte pixel.
+            let [r, g, b, a] = match pf {
+                PixelFormat::Bgra => [2, 1, 0, 3],
+                PixelFormat::Argb => [1, 2, 3, 0],
+                _ => [3, 2, 1, 0],
+            };
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for px in row0(y).chunks_exact(4) {
+                    out.extend_from_slice(&[px[r], px[g], px[b], px[a]]);
+                }
+            }
+            (GifPixelFormat::Rgba, w * 4, out)
+        }
+        PixelFormat::Bgr24 => {
+            let mut out = Vec::with_capacity(w * h * 3);
+            for y in 0..h {
+                for px in row0(y).chunks_exact(3) {
+                    out.extend_from_slice(&[px[2], px[1], px[0]]);
+                }
+            }
+            (GifPixelFormat::Rgb24, w * 3, out)
+        }
+        PixelFormat::Gray8 => {
+            let mut out = Vec::with_capacity(w * h * 3);
+            for y in 0..h {
+                for &v in row0(y) {
+                    out.extend_from_slice(&[v, v, v]);
+                }
+            }
+            (GifPixelFormat::Rgb24, w * 3, out)
+        }
+        PixelFormat::Ya8 => {
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for px in row0(y).chunks_exact(2) {
+                    out.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
+                }
+            }
+            (GifPixelFormat::Rgba, w * 4, out)
+        }
+        PixelFormat::MonoBlack | PixelFormat::MonoWhite => {
+            // 1 bit per pixel, MSB first; `0` is black (MonoBlack) or
+            // white (MonoWhite).
+            let zero_is_black = pf == PixelFormat::MonoBlack;
+            let mut out = Vec::with_capacity(w * h * 3);
+            for y in 0..h {
+                let r = row0(y);
+                for x in 0..w {
+                    let bit = (r[x / 8] >> (7 - (x % 8))) & 1;
+                    let v = if (bit == 1) == zero_is_black { 255 } else { 0 };
+                    out.extend_from_slice(&[v, v, v]);
+                }
+            }
+            (GifPixelFormat::Rgb24, w * 3, out)
+        }
+        PixelFormat::Gbrp8 | PixelFormat::Gbrap8 => {
+            let alpha = pf == PixelFormat::Gbrap8;
+            let bpp = if alpha { 4 } else { 3 };
+            let mut out = Vec::with_capacity(w * h * bpp);
+            for y in 0..h {
+                let at = |p: usize, x: usize| rows[p][y * strides[p] + x];
+                for x in 0..w {
+                    out.extend_from_slice(&[at(2, x), at(0, x), at(1, x)]);
+                    if alpha {
+                        out.push(at(3, x));
+                    }
+                }
+            }
+            (
+                if alpha {
+                    GifPixelFormat::Rgba
+                } else {
+                    GifPixelFormat::Rgb24
+                },
+                w * bpp,
+                out,
+            )
+        }
+        PixelFormat::Gbrp16Le | PixelFormat::Gbrap16Le => {
+            let alpha = pf == PixelFormat::Gbrap16Le;
+            let bpp = if alpha { 4 } else { 3 };
+            let mut out = Vec::with_capacity(w * h * bpp);
+            for y in 0..h {
+                let at = |p: usize, x: usize| {
+                    let r = &rows[p][y * strides[p]..];
+                    (le16(r, x) >> 8) as u8
+                };
+                for x in 0..w {
+                    out.extend_from_slice(&[at(2, x), at(0, x), at(1, x)]);
+                    if alpha {
+                        out.push(at(3, x));
+                    }
+                }
+            }
+            (
+                if alpha {
+                    GifPixelFormat::Rgba
+                } else {
+                    GifPixelFormat::Rgb24
+                },
+                w * bpp,
+                out,
+            )
+        }
+        PixelFormat::Rgb48Le | PixelFormat::Rgba64Le => {
+            let ch = if pf == PixelFormat::Rgba64Le { 4 } else { 3 };
+            let mut out = Vec::with_capacity(w * h * ch);
+            for y in 0..h {
+                let r = row0(y);
+                for i in 0..w * ch {
+                    out.push((le16(r, i) >> 8) as u8);
+                }
+            }
+            (
+                if ch == 4 {
+                    GifPixelFormat::Rgba
+                } else {
+                    GifPixelFormat::Rgb24
+                },
+                w * ch,
+                out,
+            )
+        }
+        PixelFormat::Gray16Le | PixelFormat::Gray12Le | PixelFormat::Gray10Le => {
+            let shift = match pf {
+                PixelFormat::Gray16Le => 8,
+                PixelFormat::Gray12Le => 4,
+                _ => 2,
+            };
+            let mut out = Vec::with_capacity(w * h * 3);
+            for y in 0..h {
+                let r = row0(y);
+                for x in 0..w {
+                    let v = (le16(r, x) >> shift).min(255) as u8;
+                    out.extend_from_slice(&[v, v, v]);
+                }
+            }
+            (GifPixelFormat::Rgb24, w * 3, out)
+        }
+        PixelFormat::Ya16Le => {
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                let r = row0(y);
+                for x in 0..w {
+                    let v = (le16(r, 2 * x) >> 8) as u8;
+                    let a = (le16(r, 2 * x + 1) >> 8) as u8;
+                    out.extend_from_slice(&[v, v, v, a]);
+                }
+            }
+            (GifPixelFormat::Rgba, w * 4, out)
+        }
+        other => return Err(unsupported_layout(other)),
     })
 }
 
@@ -229,8 +501,12 @@ impl From<&GifImage> for VideoFrame {
 
 impl GifImage {
     /// Build a [`GifImage`] from a framework [`VideoFrame`]: dimensions
-    /// and pixel format come from `params` (`Rgba` when unset), the
-    /// first image plane is the pixel plane, and for `Pal8` the
+    /// and pixel format come from `params` (`Rgba` when unset); the
+    /// frame's image planes are normalised to the GIF layout the
+    /// [`ACCEPTED_PIXEL_FORMATS`] table gives for that format (`Pal8`,
+    /// `Rgb24`, `Rgba` are taken as they are; the others are reordered,
+    /// interleaved or narrowed to 8 bits as documented there — any
+    /// other format is a typed `Unsupported` error); for `Pal8` the
     /// frame's palette side-channel joined with its palette-alpha
     /// record (see [`palette_from_frame`]; no record = every entry
     /// opaque) becomes [`GifImage::palette`]; the colour-signal
@@ -242,32 +518,15 @@ impl GifImage {
         let height = params
             .height
             .ok_or_else(|| GifError::invalid("GIF: missing height"))?;
-        let pix = from_core_pixel_format(params.pixel_format.unwrap_or(PixelFormat::Rgba))?;
-        let plane = frame
-            .image_planes()
-            .first()
-            .ok_or_else(|| GifError::invalid("GIF: frame has no planes"))?;
-        // The contract constructor requires `data.len() == stride ×
-        // height`; a framework plane may carry trailing bytes, so trim
-        // (after checking it is at least that long).
-        let need = plane
-            .stride
-            .checked_mul(height as usize)
-            .ok_or_else(|| GifError::invalid("GIF: plane size overflow"))?;
-        if plane.data.len() < need {
-            return Err(GifError::invalid(format!(
-                "GIF: plane holds {} bytes, stride {} x height {height} needs {need}",
-                plane.data.len(),
-                plane.stride
-            )));
+        let pf = params.pixel_format.unwrap_or(PixelFormat::Rgba);
+        if !ACCEPTED_PIXEL_FORMATS.contains(&pf) {
+            return Err(unsupported_layout(pf));
         }
-        let mut img = GifImage::packed(
-            width,
-            height,
-            pix,
-            plane.stride,
-            plane.data[..need].to_vec(),
-        )?;
+        if frame.image_planes().is_empty() {
+            return Err(GifError::invalid("GIF: frame has no planes"));
+        }
+        let (pix, stride, data) = normalise_planes(frame, pf, width, height)?;
+        let mut img = GifImage::packed(width, height, pix, stride, data)?;
         if pix == GifPixelFormat::Pal8 {
             img.palette = palette_from_frame(frame);
         }
@@ -517,15 +776,15 @@ impl CodecOptionsStruct for EncodeOptions {
 
 /// Register the GIF codec into the supplied [`CodecRegistry`].
 pub fn register_codecs(reg: &mut CodecRegistry) {
+    // Lossless for indexed / ≤ `max_colors`-colour input, lossy (the
+    // median-cut reduction, the alpha threshold, the 16 → 8-bit
+    // narrowing) for everything else — both flags are truthful.
     let caps = CodecCapabilities::video("gif_sw")
-        .with_lossy(false)
+        .with_lossy(true)
+        .with_lossless(true)
         .with_intra_only(true)
         .with_max_size(65535, 65535)
-        .with_pixel_formats(vec![
-            PixelFormat::Rgba,
-            PixelFormat::Rgb24,
-            PixelFormat::Pal8,
-        ]);
+        .with_pixel_formats(ACCEPTED_PIXEL_FORMATS.to_vec());
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
@@ -567,17 +826,26 @@ pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
 
 /// Factory for the `Encoder` trait impl. `params.width` / `height`
 /// are required at `send_frame`; `params.pixel_format` selects the
-/// input layout (`Rgba` default, `Rgb24`, or `Pal8` with the frame's
-/// palette side-channel); `params.options` is parsed into
-/// [`EncodeOptions`] (see its `CodecOptionsStruct` schema).
+/// input layout (`Rgba` default; any of [`ACCEPTED_PIXEL_FORMATS`],
+/// `Pal8` with the frame's palette side-channel); `params.options` is
+/// parsed into [`EncodeOptions`] (see its `CodecOptionsStruct` schema).
+/// The encoder's `output_params` carry the coded label: `pixel_format
+/// = Pal8` (what the `gif` decoder emits for every packet this encoder
+/// writes), not the input layout.
 pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
     let opts = parse_options::<EncodeOptions>(&params.options)?;
-    Ok(Box::new(GifEncoder {
-        output_params: params.clone(),
-        opts,
-        pending: std::collections::VecDeque::new(),
-        flushed: false,
-    }))
+    Ok(Box::new(GifEncoder::with_options(params, opts)))
+}
+
+/// The stream `params` describe, relabelled with what the coded
+/// packets decode to: `Pal8` (every packet the encoder writes is a
+/// single full-canvas image with a ≤ 256-entry table, which
+/// [`crate::decode`] returns indexed — with the palette-alpha record
+/// when it has a Transparency Index).
+fn coded_params(params: &CodecParameters) -> CodecParameters {
+    let mut out = params.clone();
+    out.pixel_format = Some(PixelFormat::Pal8);
+    out
 }
 
 // ---- Decoder --------------------------------------------------------------
@@ -806,6 +1074,10 @@ impl Decoder for GifDecoder {
 /// at or above the threshold are written opaque. No record = every
 /// entry opaque, no Graphic Control Extension.
 pub struct GifEncoder {
+    /// The stream as the caller described it: the input layout the
+    /// frames arrive in, the options, the stream-level blobs.
+    input_params: CodecParameters,
+    /// `input_params` with the coded label (`Pal8`).
     output_params: CodecParameters,
     opts: EncodeOptions,
     pending: std::collections::VecDeque<Packet>,
@@ -817,9 +1089,17 @@ impl GifEncoder {
     /// [`EncodeOptions`] schema; invalid options fall back to defaults —
     /// use [`make_encoder`] to surface them as errors).
     pub fn new_from_params(params: &CodecParameters) -> Self {
+        Self::with_options(
+            params,
+            parse_options::<EncodeOptions>(&params.options).unwrap_or_default(),
+        )
+    }
+
+    fn with_options(params: &CodecParameters, opts: EncodeOptions) -> Self {
         Self {
-            output_params: params.clone(),
-            opts: parse_options::<EncodeOptions>(&params.options).unwrap_or_default(),
+            input_params: params.clone(),
+            output_params: coded_params(params),
+            opts,
             pending: std::collections::VecDeque::new(),
             flushed: false,
         }
@@ -840,7 +1120,7 @@ impl Encoder for GifEncoder {
             CoreFrame::Video(v) => v,
             _ => return Err(CoreError::invalid("gif encoder: expected Frame::Video")),
         };
-        let mut image = GifImage::from_video_frame(video, &self.output_params)?;
+        let mut image = GifImage::from_video_frame(video, &self.input_params)?;
         if image.width == 0 || image.height == 0 {
             return Err(CoreError::invalid(
                 "gif encoder: width/height must be in 1..=65535",
@@ -852,7 +1132,7 @@ impl Encoder for GifEncoder {
         // packet is a complete file, so every packet carries them; the
         // muxer keeps one copy when it merges).
         let comments = if self.opts.embed_metadata {
-            let blobs = effective_blobs(&self.output_params.blobs, &video.blobs());
+            let blobs = effective_blobs(&self.input_params.blobs, &video.blobs());
             let (meta, comments) = blobs_to_gif(&blobs);
             image.metadata = meta;
             comments

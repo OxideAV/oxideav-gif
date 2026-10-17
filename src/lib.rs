@@ -224,5 +224,5 @@ pub use registry::{
     blobs_to_gif, comment_blob, comment_blob_kind, effective_blobs, from_color_signal,
     make_decoder, make_encoder, metadata_blobs, palette_alpha_record, palette_from_frame, register,
     register_codecs, register_containers, to_color_signal, to_core_pixel_format, GifDecoder,
-    GifEncoder, CODEC_ID_STR, COMMENT_BLOB_KIND,
+    GifEncoder, ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR, COMMENT_BLOB_KIND,
 };

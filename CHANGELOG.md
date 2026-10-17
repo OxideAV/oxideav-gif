@@ -37,6 +37,26 @@
   `effective_blobs`. Eleven integration tests, demux → encode → mux →
   demux round trip included.
 
+- **The registry encoder declares its input layouts** (contract r476
+  ruling): `ACCEPTED_PIXEL_FORMATS` — 21 `PixelFormat`s
+  (`Pal8`; `Rgba` / `Bgra` / `Argb` / `Abgr` / `Gbrap8` / `Ya8`;
+  `Rgb24` / `Bgr24` / `Gbrp8` / `Gray8`; `MonoBlack` / `MonoWhite`;
+  `Rgba64Le` / `Gbrap16Le` / `Ya16Le` / `Rgb48Le` / `Gbrp16Le` /
+  `Gray16Le` / `Gray12Le` / `Gray10Le`) — is what
+  `CodecCapabilities::accepted_pixel_formats` lists (was `Rgba` /
+  `Rgb24` / `Pal8`). `GifImage::from_video_frame` normalises every one
+  to `Pal8` / `Rgba` / `Rgb24` as the README table documents (channel
+  reorder, plane interleave, grey replication, 1-bit unpacking, 16 → 8
+  by the high byte, 12 / 10-bit by shift), validating every plane
+  against its own row length, so the registry and standalone paths
+  produce identical bytes; an undeclared layout (YCbCr, CMYK, float)
+  is a typed `Unsupported` naming the accepted set instead of a
+  plane-count message.
+- **Truthful output label**: `GifEncoder::output_params()` reports
+  `pixel_format = Pal8` (the coded layout every packet decodes to),
+  not the input layout; the capabilities declare both `lossy` and
+  `lossless`.
+
 ### Other
 
 - `fuzz/target/` (cargo-fuzz build artifacts) untracked and ignored.
