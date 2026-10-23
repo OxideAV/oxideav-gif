@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_gif::{encode_file, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{Block, GifFile, GifFrameData, Rgb, Version, encode_file};
 
 fn build_sample_gif() -> Vec<u8> {
     let palette = vec![

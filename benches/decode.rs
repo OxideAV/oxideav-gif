@@ -40,11 +40,11 @@
 //! Run with:
 //!     cargo bench -p oxideav-gif --bench decode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_gif::{
-    encode_file, image::Rgb, parse, parse_first_frame, parse_lenient, AnimationBuilder,
-    DisposalMethod,
+    AnimationBuilder, DisposalMethod, encode_file, image::Rgb, parse, parse_first_frame,
+    parse_lenient,
 };
 
 /// Cheap deterministic xorshift32 — keeps the synthesised pixel stream

@@ -41,7 +41,7 @@
 //! For a faster baseline (10s/scenario instead of the default ~30s):
 //!     cargo bench -p oxideav-gif --bench lzw -- --quick
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_gif::lzw;
 

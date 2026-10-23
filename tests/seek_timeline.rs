@@ -11,8 +11,8 @@
 
 use core::time::Duration;
 use oxideav_gif::{
-    compose, compose_frame_at_global, encode_file, parse, AnimationBuilder, DisposalMethod,
-    Playback, Rgb,
+    AnimationBuilder, DisposalMethod, Playback, Rgb, compose, compose_frame_at_global, encode_file,
+    parse,
 };
 
 /// A 2×2 four-colour palette: index 0 black (background), 1 red, 2 green,

@@ -18,8 +18,9 @@ use oxideav_core::{
 use oxideav_gif::app_ext::{ExifMetadata, IccProfile, XmpPacket};
 use oxideav_gif::container;
 use oxideav_gif::{
+    Block, CODEC_ID_STR, COMMENT_BLOB_KIND, GifFile, GifFrameData, GifImage, Rgb, Version,
     blobs_to_gif, comment_blob, comment_blob_kind, effective_blobs, encode_file, metadata_blobs,
-    parse, Block, GifFile, GifFrameData, GifImage, Rgb, Version, CODEC_ID_STR, COMMENT_BLOB_KIND,
+    parse,
 };
 
 const ICC: &[u8] = b"\x00\x00\x00\x80acsp-fake-profile";

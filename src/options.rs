@@ -123,19 +123,19 @@ impl DecodeOptions {
     /// Check the Logical Screen geometry against the dimension / pixel
     /// limits and `bytes` against the byte limit.
     pub(crate) fn check_screen(&self, width: u32, height: u32, bytes: u64) -> Result<()> {
-        if let Some(m) = self.max_width {
-            if width > m {
-                return Err(GifError::limit(format!(
-                    "GIF: logical screen width {width} exceeds max_width {m}"
-                )));
-            }
+        if let Some(m) = self.max_width
+            && width > m
+        {
+            return Err(GifError::limit(format!(
+                "GIF: logical screen width {width} exceeds max_width {m}"
+            )));
         }
-        if let Some(m) = self.max_height {
-            if height > m {
-                return Err(GifError::limit(format!(
-                    "GIF: logical screen height {height} exceeds max_height {m}"
-                )));
-            }
+        if let Some(m) = self.max_height
+            && height > m
+        {
+            return Err(GifError::limit(format!(
+                "GIF: logical screen height {height} exceeds max_height {m}"
+            )));
         }
         self.check_pixels(width, height)?;
         self.check_bytes(bytes)
@@ -144,24 +144,24 @@ impl DecodeOptions {
     /// Check a rectangle's pixel count against `max_pixels`.
     pub(crate) fn check_pixels(&self, width: u32, height: u32) -> Result<()> {
         let pixels = u64::from(width) * u64::from(height);
-        if let Some(m) = self.max_pixels {
-            if pixels > m {
-                return Err(GifError::limit(format!(
-                    "GIF: {pixels} pixels exceed max_pixels {m}"
-                )));
-            }
+        if let Some(m) = self.max_pixels
+            && pixels > m
+        {
+            return Err(GifError::limit(format!(
+                "GIF: {pixels} pixels exceed max_pixels {m}"
+            )));
         }
         Ok(())
     }
 
     /// Check a buffer size against `max_bytes`.
     pub(crate) fn check_bytes(&self, bytes: u64) -> Result<()> {
-        if let Some(m) = self.max_bytes {
-            if bytes > m {
-                return Err(GifError::limit(format!(
-                    "GIF: {bytes} decoded bytes exceed max_bytes {m}"
-                )));
-            }
+        if let Some(m) = self.max_bytes
+            && bytes > m
+        {
+            return Err(GifError::limit(format!(
+                "GIF: {bytes} decoded bytes exceed max_bytes {m}"
+            )));
         }
         Ok(())
     }
@@ -208,9 +208,10 @@ mod tests {
             o.check_screen(5, 5, 101),
             Err(GifError::LimitExceeded(_))
         ));
-        assert!(o
-            .unlimited()
-            .check_screen(u32::MAX, u32::MAX, u64::MAX)
-            .is_ok());
+        assert!(
+            o.unlimited()
+                .check_screen(u32::MAX, u32::MAX, u64::MAX)
+                .is_ok()
+        );
     }
 }

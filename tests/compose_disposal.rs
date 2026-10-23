@@ -8,8 +8,8 @@
 //! field will hit.
 
 use oxideav_gif::{
-    compose, encode_file, parse, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb,
-    Version,
+    Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version, compose,
+    encode_file, parse,
 };
 
 /// 4-entry palette with the colours used by the disposal tests.

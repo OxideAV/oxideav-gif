@@ -8,8 +8,8 @@ use core::time::Duration;
 
 use oxideav_gif::app_ext::LoopControl;
 use oxideav_gif::{
-    compose, encode_file, parse, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
-    Playback, Rgb, Version,
+    Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Playback, Rgb, Version, compose,
+    encode_file, parse,
 };
 
 /// Build a 4×4 image with one global palette of 4 colours and the

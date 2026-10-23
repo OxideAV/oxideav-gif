@@ -593,8 +593,8 @@ impl GifImage {
                 for y in 0..h {
                     let row = &src[y * stride..y * stride + w];
                     let dst = &mut out[y * w * 4..(y + 1) * w * 4];
-                    for (d, &i) in dst.chunks_exact_mut(4).zip(row) {
-                        d.copy_from_slice(&lut[usize::from(i)]);
+                    for (d, &i) in dst.as_chunks_mut::<4>().0.iter_mut().zip(row) {
+                        *d = lut[usize::from(i)];
                     }
                 }
             }
@@ -602,9 +602,13 @@ impl GifImage {
                 for y in 0..h {
                     let row = &src[y * stride..y * stride + w * 3];
                     let dst = &mut out[y * w * 4..(y + 1) * w * 4];
-                    for (d, s) in dst.chunks_exact_mut(4).zip(row.chunks_exact(3)) {
-                        d[..3].copy_from_slice(s);
-                        d[3] = 255;
+                    for (d, s) in dst
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(row.as_chunks::<3>().0)
+                    {
+                        *d = [s[0], s[1], s[2], 255];
                     }
                 }
             }
@@ -636,7 +640,7 @@ impl GifImage {
                 for y in 0..h {
                     let row = &src[y * stride..y * stride + w];
                     let dst = &mut out[y * w * 3..(y + 1) * w * 3];
-                    for (d, &i) in dst.chunks_exact_mut(3).zip(row) {
+                    for (d, &i) in dst.as_chunks_mut::<3>().0.iter_mut().zip(row) {
                         d.copy_from_slice(&lut[usize::from(i)][..3]);
                     }
                 }
@@ -651,7 +655,12 @@ impl GifImage {
                 for y in 0..h {
                     let row = &src[y * stride..y * stride + w * 4];
                     let dst = &mut out[y * w * 3..(y + 1) * w * 3];
-                    for (d, s) in dst.chunks_exact_mut(3).zip(row.chunks_exact(4)) {
+                    for (d, s) in dst
+                        .as_chunks_mut::<3>()
+                        .0
+                        .iter_mut()
+                        .zip(row.as_chunks::<4>().0)
+                    {
                         d.copy_from_slice(&s[..3]);
                     }
                 }

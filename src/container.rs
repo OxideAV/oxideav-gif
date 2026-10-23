@@ -93,16 +93,16 @@
 use std::io::{Read, SeekFrom, Write};
 
 use oxideav_core::{
-    parse_options, CodecId, CodecParameters, CodecResolver, ContainerRegistry, Demuxer,
-    Error as CoreError, MediaType, Muxer, Packet, PixelFormat, ProbeData, ProbeScore, ReadSeek,
-    Result as CoreResult, Rounding, StreamInfo, TimeBase, WriteSeek, MAX_PROBE_SCORE,
-    PROBE_SCORE_EXTENSION,
+    CodecId, CodecParameters, CodecResolver, ContainerRegistry, Demuxer, Error as CoreError,
+    MAX_PROBE_SCORE, MediaType, Muxer, PROBE_SCORE_EXTENSION, Packet, PixelFormat, ProbeData,
+    ProbeScore, ReadSeek, Result as CoreResult, Rounding, StreamInfo, TimeBase, WriteSeek,
+    parse_options,
 };
 
 use crate::api::first_frame_native;
 use crate::app_ext::{AnimextsLoopControl, LoopControl};
 use crate::decoder::scan;
-use crate::encoder::{encode_file_with, EncodeOptions};
+use crate::encoder::{EncodeOptions, encode_file_with};
 use crate::image::{Block, DisposalMethod, GifFile, GraphicControl};
 use crate::options::DecodeOptions;
 use crate::registry::{
@@ -585,14 +585,12 @@ fn merge_packets(
             }
         }
     }
-    if !has_loop {
-        if let Some(n) = loop_count {
-            let ctl = LoopControl {
-                loop_count: Some(n),
-                buffer_size: None,
-            };
-            blocks.insert(0, Block::Application(ctl.to_application()));
-        }
+    if !has_loop && let Some(n) = loop_count {
+        let ctl = LoopControl {
+            loop_count: Some(n),
+            buffer_size: None,
+        };
+        blocks.insert(0, Block::Application(ctl.to_application()));
     }
     let missing = missing_stream_blocks(stream_blocks, &blocks);
     blocks.splice(0..0, missing);

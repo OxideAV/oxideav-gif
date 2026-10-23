@@ -12,7 +12,7 @@
 //! placement, transparency + disposal, and the `optimize_frame_rects`
 //! encoder pass.
 
-use oxideav_gif::{compose, encode_file, parse, AnimationBuilder, DisposalMethod, GifFile, Rgb};
+use oxideav_gif::{AnimationBuilder, DisposalMethod, GifFile, Rgb, compose, encode_file, parse};
 
 /// A 16-entry greyscale palette (plus one distinct colour for
 /// transparency corners) — enough distinct rows that Appendix E's row

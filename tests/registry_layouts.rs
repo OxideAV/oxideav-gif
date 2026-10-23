@@ -10,7 +10,7 @@ use oxideav_core::{
     CodecId, CodecParameters, Error as CoreError, Frame as CoreFrame, PixelFormat, RuntimeContext,
     VideoFrame, VideoPlane,
 };
-use oxideav_gif::{decode, make_decoder, make_encoder, ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR};
+use oxideav_gif::{ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR, decode, make_decoder, make_encoder};
 
 const W: u32 = 3;
 const H: u32 = 2;

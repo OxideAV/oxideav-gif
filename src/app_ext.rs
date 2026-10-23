@@ -965,9 +965,11 @@ mod tests {
         // still classified Netscape — classification is by namespace
         // key, not by what the payload parses to.
         let empty_netscape = app(NETSCAPE_IDENTIFIER, NETSCAPE_AUTH_CODE);
-        assert!(LoopControl::from_application(&empty_netscape)
-            .and_then(|lc| lc.loop_count)
-            .is_none());
+        assert!(
+            LoopControl::from_application(&empty_netscape)
+                .and_then(|lc| lc.loop_count)
+                .is_none()
+        );
         assert_eq!(empty_netscape.kind(), ApplicationKind::Netscape);
     }
 }

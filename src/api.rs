@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use crate::app_ext::{ExifMetadata, IccProfile, XmpPacket};
 use crate::compose::compose;
 use crate::decoder::{parse_with, scan};
-use crate::encoder::{encode_file_with, EncodeOptions};
+use crate::encoder::{EncodeOptions, encode_file_with};
 use crate::error::{GifError as Error, Result};
 use crate::image::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
 use crate::options::DecodeOptions;
@@ -770,7 +770,12 @@ mod tests {
         let canvas = &compose(&file).unwrap()[0].canvas;
         let rgba = img.to_rgba8();
         assert_eq!(rgba.len(), canvas.pixels.len());
-        for (a, b) in rgba.chunks_exact(4).zip(canvas.pixels.chunks_exact(4)) {
+        for (a, b) in rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(canvas.pixels.as_chunks::<4>().0)
+        {
             assert_eq!(a[3], b[3], "alpha differs");
             if a[3] == 255 {
                 assert_eq!(a, b);

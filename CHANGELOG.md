@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - **Palette-alpha record on the registry path** (core 0.1.40,

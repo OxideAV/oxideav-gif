@@ -8,9 +8,9 @@
 //! [`Block::Application`] payload survive unchanged.
 
 use oxideav_gif::app_ext::{
-    ExifMetadata, IccProfile, LoopControl, XmpPacket, EXIF_AUTH_CODE_DEFAULT, EXIF_IDENTIFIER,
+    EXIF_AUTH_CODE_DEFAULT, EXIF_IDENTIFIER, ExifMetadata, IccProfile, LoopControl, XmpPacket,
 };
-use oxideav_gif::{encode_file, parse, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{Block, GifFile, GifFrameData, Rgb, Version, encode_file, parse};
 
 fn three_frame_gif(extra: Vec<Block>) -> GifFile {
     // Smallest legal palette per §18.c.vi (size field = 0 → 2 entries).

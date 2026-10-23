@@ -8,7 +8,7 @@
 //! and Appendix F.
 
 use oxideav_gif::{
-    encode_file, parse, Block, DisposalMethod, GifFile, GraphicControl, Rgb, Version,
+    Block, DisposalMethod, GifFile, GraphicControl, Rgb, Version, encode_file, parse,
 };
 
 /// 1×1 pixel image, GIF87a, single colour palette of two entries

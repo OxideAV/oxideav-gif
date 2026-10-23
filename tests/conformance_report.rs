@@ -16,8 +16,8 @@
 //!    fatal encoder validation never disagree on those shared rules.
 
 use oxideav_gif::{
-    encode_file, parse, AnimationBuilder, Block, ConformanceRule, ConformanceSeverity,
-    DisposalMethod, GifFile, GifFrameData, GraphicControl, PlainText, Rgb, Version,
+    AnimationBuilder, Block, ConformanceRule, ConformanceSeverity, DisposalMethod, GifFile,
+    GifFrameData, GraphicControl, PlainText, Rgb, Version, encode_file, parse,
 };
 
 /// A minimal well-formed GIF89a animation: 2×2, two frames, looping.
@@ -123,9 +123,11 @@ fn shared_rules_agree_with_encoder() {
         f.indices.pop();
     }
     let report = bad_len.conformance_report();
-    assert!(report
-        .errors()
-        .any(|i| i.rule == ConformanceRule::FrameIndicesLength));
+    assert!(
+        report
+            .errors()
+            .any(|i| i.rule == ConformanceRule::FrameIndicesLength)
+    );
     assert!(
         encode_file(&bad_len).is_err(),
         "an indices-length error must make encode fail too"
@@ -135,9 +137,11 @@ fn shared_rules_agree_with_encoder() {
     let mut bad_ver = builder_animation();
     bad_ver.version = Version::Gif87a;
     let report = bad_ver.conformance_report();
-    assert!(report
-        .errors()
-        .any(|i| i.rule == ConformanceRule::VersionTooLow));
+    assert!(
+        report
+            .errors()
+            .any(|i| i.rule == ConformanceRule::VersionTooLow)
+    );
     assert!(encode_file(&bad_ver).is_err());
 }
 
@@ -171,9 +175,11 @@ fn placement_and_pixel_range_are_diagnostic_only() {
         })],
     };
     let report = escaping.conformance_report();
-    assert!(report
-        .errors()
-        .any(|i| i.rule == ConformanceRule::FrameEscapesScreen));
+    assert!(
+        report
+            .errors()
+            .any(|i| i.rule == ConformanceRule::FrameEscapesScreen)
+    );
     assert!(
         encode_file(&escaping).is_ok(),
         "§20.a placement is diagnostic-only; the encoder tolerates it"
@@ -248,10 +254,12 @@ fn plain_text_index_bounds() {
         }],
     };
     assert!(mk(1, 0).conformance_report().is_clean());
-    assert!(mk(9, 0)
-        .conformance_report()
-        .errors()
-        .any(|i| i.rule == ConformanceRule::PlainTextIndexRange));
+    assert!(
+        mk(9, 0)
+            .conformance_report()
+            .errors()
+            .any(|i| i.rule == ConformanceRule::PlainTextIndexRange)
+    );
 }
 
 /// `validate_strict` end-to-end: a decoded, well-formed stream gates

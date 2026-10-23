@@ -7,7 +7,7 @@
 #![cfg(feature = "registry")]
 
 use oxideav_core::{CodecId, CodecParameters, Frame as CoreFrame, PixelFormat, VideoFrame};
-use oxideav_gif::{make_encoder, parse, quality_to_max_colors, GifImage, CODEC_ID_STR};
+use oxideav_gif::{CODEC_ID_STR, GifImage, make_encoder, parse, quality_to_max_colors};
 
 const W: u32 = 17;
 const H: u32 = 16;
@@ -38,8 +38,12 @@ fn encode_with(options: &[(&str, &str)]) -> Vec<u8> {
 /// to a power of two, so its length is not the budget).
 fn colours(bytes: &[u8]) -> usize {
     let rgb = oxideav_gif::decode(bytes).unwrap().to_rgb8();
-    let set: std::collections::BTreeSet<[u8; 3]> =
-        rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let set: std::collections::BTreeSet<[u8; 3]> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
     set.len()
 }
 

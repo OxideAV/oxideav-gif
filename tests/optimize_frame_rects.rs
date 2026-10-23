@@ -8,8 +8,8 @@
 //! anything a viewer displays.
 
 use oxideav_gif::{
-    compose, encode_file, parse, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl,
-    PlainText, Rgb, Version,
+    Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, PlainText, Rgb, Version, compose,
+    encode_file, parse,
 };
 
 fn palette_4() -> Vec<Rgb> {

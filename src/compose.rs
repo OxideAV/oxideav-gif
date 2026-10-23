@@ -455,12 +455,13 @@ fn plan_frame_crops(image: &GifFile) -> Result<Vec<CropPlan>> {
         // §25 Plain Text blocks are never cropped (their rectangle is
         // a text grid, not a pixel raster); they still participate in
         // the state machine above so image-frame diffs stay exact.
-        if let BlockKind::Image(f) = kind {
-            if disposal != DisposalMethod::RestoreBackground && f.width > 0 && f.height > 0 {
-                if let Some(plan) = plan_for_frame(block_index, f, &pre_render_snapshot, &canvas) {
-                    plans.push(plan);
-                }
-            }
+        if let BlockKind::Image(f) = kind
+            && disposal != DisposalMethod::RestoreBackground
+            && f.width > 0
+            && f.height > 0
+            && let Some(plan) = plan_for_frame(block_index, f, &pre_render_snapshot, &canvas)
+        {
+            plans.push(plan);
         }
 
         match disposal {

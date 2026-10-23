@@ -5,7 +5,7 @@
 //! a conformant GIF89a byte stream out, decoded + composed back to RGBA,
 //! and the composed output checked against the source colours.
 
-use oxideav_gif::{compose, encode_file, parse, DisposalMethod, GifFile, Playback, Rgb};
+use oxideav_gif::{DisposalMethod, GifFile, Playback, Rgb, compose, encode_file, parse};
 
 /// Build a `width * height` solid-colour RGBA frame.
 fn solid(width: usize, height: usize, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
@@ -36,10 +36,10 @@ fn single_truecolor_still_round_trips_to_a_decodable_gif() {
     assert_eq!(canvas.height as usize, h);
     // Every pixel composites back to its exact source colour (the
     // gradient has fewer than 256 distinct colours → lossless palette).
-    for (i, px) in canvas.pixels.chunks_exact(4).enumerate() {
+    for (i, px) in canvas.pixels.as_chunks::<4>().0.iter().enumerate() {
         let x = i % w;
         let v = (x * 255 / (w - 1)) as u8;
-        assert_eq!(px, [v, 0, 255 - v, 255], "pixel {i}");
+        assert_eq!(*px, [v, 0, 255 - v, 255], "pixel {i}");
     }
 }
 
@@ -65,7 +65,7 @@ fn high_color_count_still_quantises_within_palette_limit() {
     // right shape with every pixel opaque.
     let canvas = &composed[0].canvas;
     assert_eq!(canvas.pixels.len(), w * h * 4);
-    for px in canvas.pixels.chunks_exact(4) {
+    for px in canvas.pixels.as_chunks::<4>().0 {
         assert_eq!(px[3], 0xFF);
     }
 }
@@ -100,7 +100,7 @@ fn multi_frame_animation_composes_each_frame_to_its_source_colour() {
     let delays = [10u16, 20, 30];
     for (f, frame) in composed.iter().enumerate() {
         assert_eq!(frame.delay_centis, delays[f], "frame {f} delay");
-        for px in frame.canvas.pixels.chunks_exact(4) {
+        for px in frame.canvas.pixels.as_chunks::<4>().0 {
             assert_eq!([px[0], px[1], px[2]], expected[f], "frame {f} pixel colour");
             assert_eq!(px[3], 0xFF, "frame {f} opaque");
         }
@@ -112,7 +112,7 @@ fn multi_frame_animation_composes_each_frame_to_its_source_colour() {
     let lazy: Vec<_> = play.frames().collect::<Result<_, _>>().unwrap();
     assert_eq!(lazy.len(), 3);
     for (f, pf) in lazy.iter().enumerate() {
-        for px in pf.canvas.pixels.chunks_exact(4) {
+        for px in pf.canvas.pixels.as_chunks::<4>().0 {
             assert_eq!([px[0], px[1], px[2]], expected[f]);
         }
     }
@@ -228,7 +228,7 @@ fn dithered_still_round_trips_to_a_decodable_gif() {
     assert_eq!(canvas.width as usize, w);
     assert_eq!(canvas.height as usize, h);
     // Every composed pixel must be one of the (opaque) palette entries.
-    for px in canvas.pixels.chunks_exact(4) {
+    for px in canvas.pixels.as_chunks::<4>().0 {
         assert_eq!(px[3], 255);
         let c = Rgb::new(px[0], px[1], px[2]);
         assert!(pal.contains(&c), "composed colour {c:?} not in palette");
@@ -272,7 +272,7 @@ fn every_dither_variant_round_trips_to_a_decodable_gif() {
         let canvas = &composed[0].canvas;
         assert_eq!(canvas.width as usize, w);
         assert_eq!(canvas.height as usize, h);
-        for px in canvas.pixels.chunks_exact(4) {
+        for px in canvas.pixels.as_chunks::<4>().0 {
             assert_eq!(px[3], 255, "{d:?} opaque");
             let c = Rgb::new(px[0], px[1], px[2]);
             assert!(
@@ -315,7 +315,7 @@ fn serpentine_dither_round_trips_through_the_encode_constructor() {
         let pal = img.global_palette.as_ref().unwrap();
         let composed = compose(&parse(bytes).unwrap()).unwrap();
         assert_eq!(composed.len(), 1);
-        for px in composed[0].canvas.pixels.chunks_exact(4) {
+        for px in composed[0].canvas.pixels.as_chunks::<4>().0 {
             assert!(pal.contains(&Rgb::new(px[0], px[1], px[2])));
         }
     }
@@ -428,7 +428,7 @@ fn shared_palette_animation_uses_one_gct_and_no_lcts() {
     assert_eq!(composed.len(), 3);
     let expected = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
     for (f, frame) in composed.iter().enumerate() {
-        for px in frame.canvas.pixels.chunks_exact(4) {
+        for px in frame.canvas.pixels.as_chunks::<4>().0 {
             assert_eq!([px[0], px[1], px[2]], expected[f], "frame {f}");
             assert_eq!(px[3], 0xFF);
         }

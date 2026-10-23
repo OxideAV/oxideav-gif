@@ -783,26 +783,26 @@ pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<V
 
         // Add `prev + entry_first_byte` as the next entry, mirroring
         // the encoder's table growth (lagged by one — see module docs).
-        if let Some(p) = prev_code {
-            if next_code < MAX_TABLE_SIZE as u16 {
-                parent[next_code as usize] = p;
-                suffix[next_code as usize] = entry_first_byte;
-                let assigned = next_code;
-                next_code += 1;
-                // Decoder bump rule: assigned == 2^W − 1 (one entry
-                // earlier than the encoder's own bump trigger at 2^W).
-                // See the module-level `When the bit-width grows`
-                // derivation — the decoder lags the encoder by one
-                // assignment in normal flow because the decoder's first
-                // non-Clear code adds no entry.
-                let threshold = (1u16 << width) - 1;
-                if assigned == threshold && width < MAX_CODE_WIDTH {
-                    width += 1;
-                }
+        if let Some(p) = prev_code
+            && next_code < MAX_TABLE_SIZE as u16
+        {
+            parent[next_code as usize] = p;
+            suffix[next_code as usize] = entry_first_byte;
+            let assigned = next_code;
+            next_code += 1;
+            // Decoder bump rule: assigned == 2^W − 1 (one entry
+            // earlier than the encoder's own bump trigger at 2^W).
+            // See the module-level `When the bit-width grows`
+            // derivation — the decoder lags the encoder by one
+            // assignment in normal flow because the decoder's first
+            // non-Clear code adds no entry.
+            let threshold = (1u16 << width) - 1;
+            if assigned == threshold && width < MAX_CODE_WIDTH {
+                width += 1;
             }
-            // else: deferred-clear regime — keep decoding without
-            // growing the table until a Clear arrives.
         }
+        // else: deferred-clear regime — keep decoding without
+        // growing the table until a Clear arrives.
         prev_code = Some(code);
     }
 }

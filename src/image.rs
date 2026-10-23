@@ -1255,19 +1255,19 @@ impl GifFile {
     /// NETSCAPE2.0 superseded ANIMEXTS1.0.
     pub fn loop_count(&self) -> Option<u16> {
         for app in self.application_extensions() {
-            if let Some(lc) = crate::app_ext::LoopControl::from_application(app) {
-                if let Some(n) = lc.loop_count {
-                    return Some(n);
-                }
+            if let Some(lc) = crate::app_ext::LoopControl::from_application(app)
+                && let Some(n) = lc.loop_count
+            {
+                return Some(n);
             }
         }
         // Fall back to ANIMEXTS1.0 if NETSCAPE2.0 was absent or carried
         // no *Looping* sub-block.
         for app in self.application_extensions() {
-            if let Some(lc) = crate::app_ext::AnimextsLoopControl::from_application(app) {
-                if let Some(n) = lc.loop_count {
-                    return Some(n);
-                }
+            if let Some(lc) = crate::app_ext::AnimextsLoopControl::from_application(app)
+                && let Some(n) = lc.loop_count
+            {
+                return Some(n);
             }
         }
         None
@@ -1279,10 +1279,10 @@ impl GifFile {
     /// re-emit it.
     pub fn netscape_buffer_hint(&self) -> Option<u32> {
         for app in self.application_extensions() {
-            if let Some(lc) = crate::app_ext::LoopControl::from_application(app) {
-                if let Some(n) = lc.buffer_size {
-                    return Some(n);
-                }
+            if let Some(lc) = crate::app_ext::LoopControl::from_application(app)
+                && let Some(n) = lc.buffer_size
+            {
+                return Some(n);
             }
         }
         None
@@ -1383,10 +1383,10 @@ impl GifFile {
         // Phase 2 — install the GCT and clear identical LCTs.
         self.global_palette = Some(palette.clone());
         for block in &mut self.blocks {
-            if let Block::Image(frame) = block {
-                if frame.local_palette.as_ref() == Some(&palette) {
-                    frame.local_palette = None;
-                }
+            if let Block::Image(frame) = block
+                && frame.local_palette.as_ref() == Some(&palette)
+            {
+                frame.local_palette = None;
             }
         }
         true
@@ -2484,10 +2484,10 @@ impl GifFile {
             Some(0) => None, // forever
             Some(n) => Some(n as u64 + 1),
         };
-        if let Some(limit) = pass_limit {
-            if pass >= limit {
-                return None; // playback finished
-            }
+        if let Some(limit) = pass_limit
+            && pass >= limit
+        {
+            return None; // playback finished
         }
 
         let within = Duration::from_nanos((global_nanos % per_pass_nanos) as u64);
@@ -3443,24 +3443,30 @@ mod tests {
         assert!(indefinite.blocks_indefinitely_for_user_input());
 
         // Per-GCE predicate matches the stream-level any-block roll-up.
-        assert!(GraphicControl {
-            user_input: true,
-            delay_centis: 0,
-            ..GraphicControl::default()
-        }
-        .waits_for_user_input_indefinitely());
-        assert!(!GraphicControl {
-            user_input: true,
-            delay_centis: 1,
-            ..GraphicControl::default()
-        }
-        .waits_for_user_input_indefinitely());
-        assert!(!GraphicControl {
-            user_input: false,
-            delay_centis: 0,
-            ..GraphicControl::default()
-        }
-        .waits_for_user_input_indefinitely());
+        assert!(
+            GraphicControl {
+                user_input: true,
+                delay_centis: 0,
+                ..GraphicControl::default()
+            }
+            .waits_for_user_input_indefinitely()
+        );
+        assert!(
+            !GraphicControl {
+                user_input: true,
+                delay_centis: 1,
+                ..GraphicControl::default()
+            }
+            .waits_for_user_input_indefinitely()
+        );
+        assert!(
+            !GraphicControl {
+                user_input: false,
+                delay_centis: 0,
+                ..GraphicControl::default()
+            }
+            .waits_for_user_input_indefinitely()
+        );
     }
 
     /// §23.c.iv — `frame_disposals` yields the GCE Disposal Method per
@@ -5768,10 +5774,11 @@ mod tests {
         let frames: Vec<(&[u8], u16, DisposalMethod)> = vec![(&red, 5, DisposalMethod::None)];
         let img = GifFile::from_rgba_frames(&frames, 2, 2, 256, None).unwrap();
         // No NETSCAPE Application Extension when loop_count is None.
-        assert!(img
-            .blocks
-            .iter()
-            .all(|b| !matches!(b, Block::Application(_))));
+        assert!(
+            img.blocks
+                .iter()
+                .all(|b| !matches!(b, Block::Application(_)))
+        );
         assert_eq!(img.loop_count(), None);
     }
 }

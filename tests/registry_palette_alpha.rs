@@ -14,8 +14,8 @@ use oxideav_core::{
 use oxideav_gif::quantize::ALPHA_OPAQUE_THRESHOLD;
 use oxideav_gif::registry::{palette_alpha_record, palette_from_frame};
 use oxideav_gif::{
-    compose, decode, encode, make_decoder, make_encoder, parse, EncodeOptions, GifImage, Palette,
-    CODEC_ID_STR,
+    CODEC_ID_STR, EncodeOptions, GifImage, Palette, compose, decode, encode, make_decoder,
+    make_encoder, parse,
 };
 
 fn still_params(w: u32, h: u32, pf: PixelFormat) -> CodecParameters {

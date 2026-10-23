@@ -575,21 +575,21 @@ fn check_gce(
 ) {
     // §23.c.viii: "The index is present if and only if the Transparency
     // Flag is set." When present it indexes the active palette.
-    if let Some(t) = gce.transparent_index {
-        if let Some(palette) = active {
-            if !palette.is_empty() && (t as usize) >= palette.len() {
-                report.push(
-                    ConformanceRule::TransparentIndexRange,
-                    ConformanceSeverity::Error,
-                    Some(block_index),
-                    format!(
-                        "§23.c.viii: Transparent Color Index {t} references past the {}-entry \
+    if let Some(t) = gce.transparent_index
+        && let Some(palette) = active
+        && !palette.is_empty()
+        && (t as usize) >= palette.len()
+    {
+        report.push(
+            ConformanceRule::TransparentIndexRange,
+            ConformanceSeverity::Error,
+            Some(block_index),
+            format!(
+                "§23.c.viii: Transparent Color Index {t} references past the {}-entry \
                          active palette",
-                        palette.len()
-                    ),
-                );
-            }
-        }
+                palette.len()
+            ),
+        );
     }
 
     // §23.e.ii: "It is recommended that the encoder not set the User
@@ -741,9 +741,11 @@ mod tests {
         img.global_palette = Some(vec![]);
         // An empty palette also strips the pixels' active table.
         let report = img.conformance_report();
-        assert!(report
-            .errors()
-            .any(|i| i.rule == ConformanceRule::ColorTableSize));
+        assert!(
+            report
+                .errors()
+                .any(|i| i.rule == ConformanceRule::ColorTableSize)
+        );
 
         let mut big = clean_image();
         big.global_palette = Some(vec![rgb(0, 0, 0); 257]);
@@ -769,9 +771,11 @@ mod tests {
             });
         }
         let report = img.conformance_report();
-        assert!(report
-            .errors()
-            .any(|i| i.rule == ConformanceRule::VersionTooLow));
+        assert!(
+            report
+                .errors()
+                .any(|i| i.rule == ConformanceRule::VersionTooLow)
+        );
     }
 
     #[test]
@@ -786,9 +790,11 @@ mod tests {
             });
         }
         let report = img.conformance_report();
-        assert!(report
-            .errors()
-            .any(|i| i.rule == ConformanceRule::TransparentIndexRange));
+        assert!(
+            report
+                .errors()
+                .any(|i| i.rule == ConformanceRule::TransparentIndexRange)
+        );
     }
 
     #[test]
@@ -806,9 +812,11 @@ mod tests {
         // §23.e.ii is the only departure; it is recommendation-level.
         assert!(!report.has_errors(), "issues: {:?}", report.issues());
         assert_eq!(report.count(ConformanceSeverity::Recommendation), 1);
-        assert!(report
-            .recommendations()
-            .any(|i| i.rule == ConformanceRule::UserInputWithoutDelay));
+        assert!(
+            report
+                .recommendations()
+                .any(|i| i.rule == ConformanceRule::UserInputWithoutDelay)
+        );
         assert!(!report.is_clean());
     }
 
@@ -833,9 +841,11 @@ mod tests {
             graphic_control: None,
         }];
         let report = img.conformance_report();
-        assert!(report
-            .errors()
-            .any(|i| i.rule == ConformanceRule::PlainTextIndexRange));
+        assert!(
+            report
+                .errors()
+                .any(|i| i.rule == ConformanceRule::PlainTextIndexRange)
+        );
     }
 
     #[test]
@@ -856,9 +866,11 @@ mod tests {
             graphic_control: None,
         }];
         let report = img.conformance_report();
-        assert!(report
-            .errors()
-            .any(|i| i.rule == ConformanceRule::PlainTextIndexRange));
+        assert!(
+            report
+                .errors()
+                .any(|i| i.rule == ConformanceRule::PlainTextIndexRange)
+        );
     }
 
     #[test]
@@ -868,9 +880,11 @@ mod tests {
             f.indices = vec![0, 1]; // 2 != 2×2
         }
         let report = img.conformance_report();
-        assert!(report
-            .errors()
-            .any(|i| i.rule == ConformanceRule::FrameIndicesLength));
+        assert!(
+            report
+                .errors()
+                .any(|i| i.rule == ConformanceRule::FrameIndicesLength)
+        );
     }
 
     #[test]
@@ -878,9 +892,11 @@ mod tests {
         let mut img = clean_image();
         img.color_resolution = 8; // 3-bit field max is 7
         let report = img.conformance_report();
-        assert!(report
-            .errors()
-            .any(|i| i.rule == ConformanceRule::ColorResolutionRange));
+        assert!(
+            report
+                .errors()
+                .any(|i| i.rule == ConformanceRule::ColorResolutionRange)
+        );
     }
 
     #[test]

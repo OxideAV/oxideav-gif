@@ -7,10 +7,10 @@
 use std::time::Duration;
 
 use oxideav_gif::{
-    compose, decode, decode_all, decode_rgb8, decode_rgba8, decode_with, encode, encode_all,
-    encode_animation, encode_file, encode_rgb8, encode_rgba8, info, parse, probe, AnimationBuilder,
-    DecodeOptions, DisposalMethod, EncodeOptions, Error, Frame, GifImage, Palette, PixelFormat,
-    Rgb,
+    AnimationBuilder, DecodeOptions, DisposalMethod, EncodeOptions, Error, Frame, GifImage,
+    Palette, PixelFormat, Rgb, compose, decode, decode_all, decode_rgb8, decode_rgba8, decode_with,
+    encode, encode_all, encode_animation, encode_file, encode_rgb8, encode_rgba8, info, parse,
+    probe,
 };
 
 /// Tiny deterministic PRNG so the fixtures need no dev-dependency.
@@ -86,7 +86,13 @@ fn random_animation(seed: u64) -> Vec<u8> {
 /// (alpha 0) only the alpha must match; elsewhere every channel must.
 fn assert_rgba_shows_same(rgba: &[u8], canvas: &[u8]) {
     assert_eq!(rgba.len(), canvas.len());
-    for (i, (a, b)) in rgba.chunks_exact(4).zip(canvas.chunks_exact(4)).enumerate() {
+    for (i, (a, b)) in rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(canvas.as_chunks::<4>().0)
+        .enumerate()
+    {
         assert_eq!(a[3], b[3], "pixel {i}: alpha differs ({a:?} vs {b:?})");
         if a[3] == 255 {
             assert_eq!(a, b, "pixel {i}");
@@ -188,7 +194,7 @@ fn raw_paths_quantise_deterministically() {
         .collect();
     let bytes = encode_rgba8(w, h, &rgba, &EncodeOptions::default()).unwrap();
     let out = decode_rgba8(&bytes).unwrap().data;
-    for (i, px) in out.chunks_exact(4).enumerate() {
+    for (i, px) in out.as_chunks::<4>().0.iter().enumerate() {
         assert_eq!(px[3], if i % 2 == 0 { 0 } else { 255 }, "pixel {i}");
     }
 }

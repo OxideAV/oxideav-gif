@@ -447,7 +447,7 @@ pub fn quantize_rgba_with_options(
     // back together in source order afterwards.
     let mut opaque_samples: Vec<[u8; 3]> = Vec::new();
     let mut is_transparent: Vec<bool> = Vec::with_capacity(pixel_count);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         let transparent = px[3] < ALPHA_OPAQUE_THRESHOLD;
         is_transparent.push(transparent);
         if !transparent {
@@ -507,7 +507,12 @@ pub fn quantize_rgba_with_options(
         // (a transparent entry must never be chosen for an opaque pixel), so
         // dither against the leading `opaque_len` entries.
         let opaque_len = palette.len() - usize::from(any_transparent);
-        let samples: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+        let samples: Vec<[u8; 3]> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
         assign_indices_with_dither(
             opts.dither,
             DitherInput {
@@ -580,7 +585,12 @@ pub fn quantize_rgb_with_options(
         )));
     }
     let budget = opts.max_colors.clamp(1, MAX_PALETTE);
-    let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let samples: Vec<[u8; 3]> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
     let (palette, lookup) = median_cut_refined(
         &samples,
         budget,
@@ -657,7 +667,12 @@ pub fn remap_rgb_to_palette(
             palette.len()
         )));
     }
-    let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let samples: Vec<[u8; 3]> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
     let opaque = vec![false; pixel_count];
     let indices = assign_indices_with_dither(
         opts.dither,
@@ -749,12 +764,17 @@ pub fn remap_rgba_to_palette(
     }
 
     let mut is_transparent: Vec<bool> = Vec::with_capacity(pixel_count);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         is_transparent.push(transparent_index.is_some() && px[3] < ALPHA_OPAQUE_THRESHOLD);
     }
     let any_transparent = is_transparent.iter().any(|&t| t);
 
-    let samples: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+    let samples: Vec<[u8; 3]> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
     // The opaque search omits the trailing reserved slot, if any, so an
     // opaque pixel can never land on the transparency index.
     let search: &[Rgb] = if transparent_index.is_some() {
@@ -860,7 +880,7 @@ pub fn quantize_frames_shared(
     let mut pooled: Vec<[u8; 3]> = Vec::new();
     for frame in frames {
         let mut mask = Vec::with_capacity(pixel_count);
-        for px in frame.chunks_exact(4) {
+        for px in frame.as_chunks::<4>().0 {
             let transparent = px[3] < ALPHA_OPAQUE_THRESHOLD;
             mask.push(transparent);
             if !transparent {
@@ -901,7 +921,12 @@ pub fn quantize_frames_shared(
     let opaque_palette = &palette[..opaque_len];
     let mut frame_indices = Vec::with_capacity(frames.len());
     for (frame, mask) in frames.iter().zip(&masks) {
-        let samples: Vec<[u8; 3]> = frame.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+        let samples: Vec<[u8; 3]> = frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
         let plane = if opts.dither == Dither::None {
             samples
                 .iter()
@@ -1917,7 +1942,7 @@ mod tests {
         let opts = QuantizeOptions::with_max_colors(8).dither(Dither::FloydSteinberg);
         let q = quantize_rgba_with_options(&rgba, w, h, opts).unwrap();
         let ti = q.transparent_index.expect("has transparent pixels");
-        for (i, px) in rgba.chunks_exact(4).enumerate() {
+        for (i, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
             if px[3] < ALPHA_OPAQUE_THRESHOLD {
                 assert_eq!(
                     q.indices[i], ti,
@@ -1954,7 +1979,12 @@ mod tests {
                 rgb.extend_from_slice(&[x * 36, y * 36, (x ^ y) * 30]);
             }
         }
-        let samples: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+        let samples: Vec<[u8; 3]> = rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
         let (pal, _) = median_cut(&samples, 6);
         let mask = vec![false; 64];
         let via_wrapper = dither_samples_floyd_steinberg(&samples, 8, 8, &pal, &mask, None);
@@ -2093,7 +2123,7 @@ mod tests {
             let opts = QuantizeOptions::with_max_colors(8).dither(d);
             let q = quantize_rgba_with_options(&rgba, w, h, opts).unwrap();
             let ti = q.transparent_index.expect("has transparent pixels");
-            for (i, px) in rgba.chunks_exact(4).enumerate() {
+            for (i, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
                 if px[3] < ALPHA_OPAQUE_THRESHOLD {
                     assert_eq!(q.indices[i], ti, "{d:?}: transparent pixel {i}");
                 } else {
@@ -2150,7 +2180,7 @@ mod tests {
                 );
             }
             // Every transparent pixel of frame b maps to the reserved slot.
-            for (i, px) in b.chunks_exact(4).enumerate() {
+            for (i, px) in b.as_chunks::<4>().0.iter().enumerate() {
                 if px[3] < ALPHA_OPAQUE_THRESHOLD {
                     assert_eq!(s.frame_indices[1][i], ti, "{d:?} transparent routing");
                 }
@@ -2323,10 +2353,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(raster.palette, serp.palette, "palette must not change");
-        assert!(serp
-            .indices
-            .iter()
-            .all(|&i| (i as usize) < serp.palette.len()));
+        assert!(
+            serp.indices
+                .iter()
+                .all(|&i| (i as usize) < serp.palette.len())
+        );
         assert_ne!(
             raster.indices, serp.indices,
             "serpentine scan should change the diffused plane"

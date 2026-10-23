@@ -31,11 +31,11 @@
 //! looks up.
 
 use oxideav_core::{
-    frame::VideoPlane, parse_options, BlobKind, CodecCapabilities, CodecId, CodecInfo,
-    CodecOptionsStruct, CodecParameters, CodecRegistry, ColorPrimaries, ColorSignal,
-    ContainerRegistry, Decoder, Encoder, Error as CoreError, Frame as CoreFrame,
-    MatrixCoefficients, MetadataBlob, OptionField, OptionKind, OptionValue, Packet, PixelFormat,
-    Result as CoreResult, RuntimeContext, TimeBase, TransferCharacteristics, VideoFrame,
+    BlobKind, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
+    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, Decoder, Encoder,
+    Error as CoreError, Frame as CoreFrame, MatrixCoefficients, MetadataBlob, OptionField,
+    OptionKind, OptionValue, Packet, PixelFormat, Result as CoreResult, RuntimeContext, TimeBase,
+    TransferCharacteristics, VideoFrame, frame::VideoPlane, parse_options,
 };
 
 use crate::app_ext::{
@@ -215,7 +215,7 @@ fn normalise_planes(
             };
             let mut out = Vec::with_capacity(w * h * 4);
             for y in 0..h {
-                for px in row0(y).chunks_exact(4) {
+                for px in row0(y).as_chunks::<4>().0 {
                     out.extend_from_slice(&[px[r], px[g], px[b], px[a]]);
                 }
             }
@@ -224,7 +224,7 @@ fn normalise_planes(
         PixelFormat::Bgr24 => {
             let mut out = Vec::with_capacity(w * h * 3);
             for y in 0..h {
-                for px in row0(y).chunks_exact(3) {
+                for px in row0(y).as_chunks::<3>().0 {
                     out.extend_from_slice(&[px[2], px[1], px[0]]);
                 }
             }
@@ -242,7 +242,7 @@ fn normalise_planes(
         PixelFormat::Ya8 => {
             let mut out = Vec::with_capacity(w * h * 4);
             for y in 0..h {
-                for px in row0(y).chunks_exact(2) {
+                for px in row0(y).as_chunks::<2>().0 {
                     out.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
                 }
             }
@@ -476,7 +476,9 @@ pub fn palette_from_frame(frame: &VideoFrame) -> Option<Palette> {
     let rgb = frame.palette()?;
     let alpha = frame.palette_alpha().unwrap_or(&[]);
     Some(Palette::new(
-        rgb.chunks_exact(3)
+        rgb.as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
             .map(|(i, c)| [c[0], c[1], c[2], alpha.get(i).copied().unwrap_or(255)])
             .collect(),
@@ -1320,7 +1322,7 @@ mod tests {
 
     #[test]
     fn decoder_emits_native_pal8_for_stills_and_composited_rgba_for_animations() {
-        use crate::{decode_all, encode_all, EncodeOptions, Frame, GifImage};
+        use crate::{EncodeOptions, Frame, GifImage, decode_all, encode_all};
         // Still: a 2-colour 4×2 Pal8 image.
         let still = GifImage::from_rgb8(
             4,

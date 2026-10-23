@@ -497,7 +497,7 @@ pub(crate) fn scan(bytes: &[u8], opts: &DecodeOptions, expand_first: bool) -> Re
     // `Err` ends the walk instead of failing it (the fault is kept in
     // `walk_error` for callers that need the whole stream).
     macro_rules! step {
-        ($e:expr) => {
+        ($e:expr_2021) => {
             match $e {
                 Ok(v) => v,
                 Err(e) => {
@@ -1173,10 +1173,10 @@ mod tests {
         let img = one_frame_image_no_extensions();
         let bytes = encode(&img).unwrap();
         let truncated = &bytes[..bytes.len() - 1]; // drop the 0x3B Trailer
-                                                   // Strict still works if the §22 sub-block terminator + GCE
-                                                   // already ended the parse before the trailer — but it more
-                                                   // often won't, depending on the stream. Lenient must always
-                                                   // succeed.
+        // Strict still works if the §22 sub-block terminator + GCE
+        // already ended the parse before the trailer — but it more
+        // often won't, depending on the stream. Lenient must always
+        // succeed.
         let lenient = parse_lenient(truncated).unwrap();
         assert_eq!(lenient.blocks.len(), 1);
     }

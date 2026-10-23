@@ -28,9 +28,9 @@
 //! Run with:
 //!     cargo bench -p oxideav-gif --bench encode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_gif::{encode_file, image::Rgb, AnimationBuilder, DisposalMethod};
+use oxideav_gif::{AnimationBuilder, DisposalMethod, encode_file, image::Rgb};
 
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;

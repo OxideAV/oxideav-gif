@@ -4,7 +4,7 @@
 //! image and verify that decoding the result reproduces the original
 //! pixel raster, palette and header.
 
-use oxideav_gif::{encode_file, parse, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{Block, GifFile, GifFrameData, Rgb, Version, encode_file, parse};
 
 /// Reproducible xorshift32 — keeps the suite deterministic without a
 /// crate-level RNG dependency.

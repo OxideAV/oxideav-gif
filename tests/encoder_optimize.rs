@@ -12,7 +12,7 @@
 //! must be identical before and after, since §21 says a frame with
 //! the LCT flag clear uses the §18 Global Color Table.
 
-use oxideav_gif::{compose, encode_file, parse, Block, GifFile, GifFrameData, Rgb, Version};
+use oxideav_gif::{Block, GifFile, GifFrameData, Rgb, Version, compose, encode_file, parse};
 
 fn frame_with_local(palette: Vec<Rgb>, fill: u8) -> GifFrameData {
     GifFrameData {

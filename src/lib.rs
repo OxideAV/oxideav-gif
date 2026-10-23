@@ -193,23 +193,23 @@ pub use types::{
 // ---- GIF-specific depth (the contract is a floor, not a ceiling) ----------
 pub use app_ext::ApplicationKind;
 pub use builder::AnimationBuilder;
-pub use compose::{compose, compose_frame_at_global, ComposedFrame, RgbaCanvas, SeekResult};
+pub use compose::{ComposedFrame, RgbaCanvas, SeekResult, compose, compose_frame_at_global};
 pub use conformance::{ConformanceIssue, ConformanceReport, ConformanceRule, ConformanceSeverity};
 #[allow(deprecated)]
 pub use decoder::{decode_first_frame, decode_lenient};
 pub use decoder::{parse, parse_first_frame, parse_first_frame_with, parse_lenient, parse_with};
 #[allow(deprecated)]
 pub use encoder::encode_with_options;
-pub use encoder::{encode_file, encode_file_with, EncodeOptions, LzwStrategy};
+pub use encoder::{EncodeOptions, LzwStrategy, encode_file, encode_file_with};
 pub use image::{
     Application, Block, BlockClass, DisposalMethod, FramePresentation, GifFile, GifFrameData,
     GraphicControl, PlainText, Rgb, Version,
 };
 pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};
 pub use quantize::{
-    quantize_frames_shared, quantize_rgb, quantize_rgb_with_options, quantize_rgba,
-    quantize_rgba_with_options, remap_rgb_to_palette, remap_rgba_to_palette, BoxPriority, Dither,
-    QuantizeOptions, Quantized, SharedQuantized,
+    BoxPriority, Dither, QuantizeOptions, Quantized, SharedQuantized, quantize_frames_shared,
+    quantize_rgb, quantize_rgb_with_options, quantize_rgba, quantize_rgba_with_options,
+    remap_rgb_to_palette, remap_rgba_to_palette,
 };
 
 // Registry-gated public surface. The `__oxideav_entry` re-export is
@@ -221,9 +221,8 @@ pub use quantize::{
 pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{
-    blobs_to_gif, comment_blob, comment_blob_kind, effective_blobs, from_color_signal,
-    make_decoder, make_encoder, metadata_blobs, palette_alpha_record, palette_from_frame,
-    quality_to_max_colors, register, register_codecs, register_containers, to_color_signal,
-    to_core_pixel_format, GifDecoder, GifEncoder, ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR,
-    COMMENT_BLOB_KIND,
+    ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR, COMMENT_BLOB_KIND, GifDecoder, GifEncoder, blobs_to_gif,
+    comment_blob, comment_blob_kind, effective_blobs, from_color_signal, make_decoder,
+    make_encoder, metadata_blobs, palette_alpha_record, palette_from_frame, quality_to_max_colors,
+    register, register_codecs, register_containers, to_color_signal, to_core_pixel_format,
 };

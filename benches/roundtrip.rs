@@ -28,10 +28,10 @@
 //! Run with:
 //!     cargo bench -p oxideav-gif --bench roundtrip
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_gif::{
-    compose, encode_file, image::Rgb, parse, playback::Playback, AnimationBuilder, DisposalMethod,
+    AnimationBuilder, DisposalMethod, compose, encode_file, image::Rgb, parse, playback::Playback,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {

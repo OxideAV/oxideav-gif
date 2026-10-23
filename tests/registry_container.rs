@@ -13,11 +13,11 @@ use oxideav_core::{
     CodecId, CodecParameters, Error as CoreError, Frame as CoreFrame, Packet, PixelFormat,
     RuntimeContext, StreamInfo, TimeBase, VideoFrame,
 };
-use oxideav_gif::container::{self, extradata_palette, is_animation_stream, TIME_BASE};
+use oxideav_gif::container::{self, TIME_BASE, extradata_palette, is_animation_stream};
 use oxideav_gif::{
-    app_ext::LoopControl, decode, decode_all, encode, encode_all, info, Block, DisposalMethod,
-    EncodeOptions, Frame, GifFile, GifFrameData, GifImage, GraphicControl, Palette, Rgb, Version,
-    CODEC_ID_STR,
+    Block, CODEC_ID_STR, DisposalMethod, EncodeOptions, Frame, GifFile, GifFrameData, GifImage,
+    GraphicControl, Palette, Rgb, Version, app_ext::LoopControl, decode, decode_all, encode,
+    encode_all, info,
 };
 
 // ---- fixtures (built with Layer 1, no files on disk) ----------------------
@@ -300,10 +300,11 @@ fn probe_names_gif_from_magic_alone_and_with_hint_and_rejects_foreign_files() {
         b"farbfeld\0\0\0\x01\0\0\0\x01".to_vec(),
     ] {
         let mut cur = Cursor::new(foreign.clone());
-        assert!(ctx
-            .containers
-            .probe_input(&mut cur as &mut dyn oxideav_core::ReadSeek, None)
-            .is_err());
+        assert!(
+            ctx.containers
+                .probe_input(&mut cur as &mut dyn oxideav_core::ReadSeek, None)
+                .is_err()
+        );
         // With the wrong extension hint the magic still has to match:
         // the probe answers 0 for foreign bytes, so the registry falls
         // back to the extension's container, whose demuxer then rejects
@@ -759,9 +760,10 @@ fn muxer_rejects_wrong_streams_and_non_gif_packets() {
     let pkt = Packet::new(0, TIME_BASE, still_pal8_opaque());
     assert!(m.write_packet(&pkt).is_err());
     m.write_header().unwrap();
-    assert!(m
-        .write_packet(&Packet::new(0, TIME_BASE, b"not a gif".to_vec()))
-        .is_err());
+    assert!(
+        m.write_packet(&Packet::new(0, TIME_BASE, b"not a gif".to_vec()))
+            .is_err()
+    );
     // No packets → the trailer refuses to write an empty file.
     assert!(m.write_trailer().is_err());
 }
@@ -835,16 +837,18 @@ fn hostile_inputs_fail_cleanly() {
     anim.extradata = vec![container::EXTRADATA_VERSION, container::EXTRADATA_ANIMATION];
     for params in [&still, &anim] {
         let mut dec = oxideav_gif::make_decoder(params).unwrap();
-        assert!(dec
-            .send_packet(&Packet::new(0, TIME_BASE, Vec::new()))
-            .is_err());
-        assert!(dec
-            .send_packet(&Packet::new(
+        assert!(
+            dec.send_packet(&Packet::new(0, TIME_BASE, Vec::new()))
+                .is_err()
+        );
+        assert!(
+            dec.send_packet(&Packet::new(
                 0,
                 TIME_BASE,
                 b"GIF89a\x01\x00\x01\x00".to_vec()
             ))
-            .is_err());
+            .is_err()
+        );
         assert!(matches!(dec.receive_frame(), Err(CoreError::NeedMore)));
     }
     // Animation mode: a packet whose Logical Screen differs from the
@@ -853,9 +857,10 @@ fn hostile_inputs_fail_cleanly() {
     let mut dec = ctx.codecs.first_decoder(&stream.params).unwrap();
     dec.send_packet(&packets[0]).unwrap();
     assert!(dec.receive_frame().is_ok());
-    assert!(dec
-        .send_packet(&Packet::new(0, TIME_BASE, still_pal8_opaque()))
-        .is_err());
+    assert!(
+        dec.send_packet(&Packet::new(0, TIME_BASE, still_pal8_opaque()))
+            .is_err()
+    );
     dec.send_packet(&packets[1]).unwrap();
     assert!(dec.receive_frame().is_ok());
     // reset() forgets the canvas and clears the Eof latch.
