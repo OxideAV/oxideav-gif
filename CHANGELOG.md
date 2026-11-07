@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.16](https://github.com/OxideAV/oxideav-gif/compare/v0.0.15...v0.0.16) - 2026-11-07
+
+### Other
+
+- registry encoder version / background_index / pixel_aspect_ratio / color_table options ([#14](https://github.com/OxideAV/oxideav-gif/pull/14))
+- caller control over the container structure ([#14](https://github.com/OxideAV/oxideav-gif/pull/14))
+- API hygiene: non_exhaustive option/result records + growable enums, hide internals
+
 ### Changed
 
 - `#[non_exhaustive]` on the `ApplicationKind`, `ConformanceSeverity`, `ConformanceRule`, `LzwStrategy`, `Dither` and `BoxPriority` enums and on the `QuantizeOptions`, `ConformanceIssue`, `Quantized`, `SharedQuantized`, `ComposedFrame`, `SeekResult` and `PlaybackFrame` records. Build `QuantizeOptions` with `Default` / `QuantizeOptions::with_max_colors` and its builders; the result records come from the crate's entry points. `Version`, `DisposalMethod`, `Block`, `BlockClass` and the GIF89a syntax records (`GifFile`, `GifFrameData`, `GraphicControl`, `PlainText`, `Application`, the `app_ext` payloads) stay exhaustive: the spec fixes their fields and values.
