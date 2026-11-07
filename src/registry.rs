@@ -41,9 +41,9 @@ use oxideav_core::{
 use crate::app_ext::{
     EXIF_IDENTIFIER, ICC_AUTH_CODE, ICC_IDENTIFIER, XMP_AUTH_CODE, XMP_IDENTIFIER,
 };
-use crate::encoder::{EncodeOptions, LzwStrategy};
+use crate::encoder::{ColorTableMode, EncodeOptions, LzwStrategy};
 use crate::error::GifError;
-use crate::image::{Application, Block, GifFile};
+use crate::image::{Application, Block, GifFile, Version};
 use crate::quantize::Dither;
 use crate::types::{ColorInfo, ColorRange, GifImage, GifPixelFormat, Metadata, Palette};
 
@@ -743,6 +743,35 @@ impl CodecOptionsStruct for EncodeOptions {
                    the §24 Comment blocks from the stream's and the frame's \
                    metadata blobs (`icc` / `exif` / `xmp` / `gif-comment`).",
         },
+        OptionField {
+            name: "version",
+            kind: OptionKind::Enum(&["auto", "87a", "89a"]),
+            default: OptionValue::String(String::new()),
+            help: "§17 header version: `auto` (default; the earliest version \
+                   covering every block, §7), `89a`, or `87a` (refused at \
+                   encode time when the picture needs an 89a block).",
+        },
+        OptionField {
+            name: "background_index",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "§18.c.vii Background Color Index (0..=255).",
+        },
+        OptionField {
+            name: "pixel_aspect_ratio",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "§18.c.viii Pixel Aspect Ratio raw byte (0..=255; 0 = none, \
+                   else the ratio is (value + 15) / 64).",
+        },
+        OptionField {
+            name: "color_table",
+            kind: OptionKind::Enum(&["auto", "global", "local"]),
+            default: OptionValue::String(String::new()),
+            help: "`auto` / `global` (default; a §19 Global Color Table) or \
+                   `local` (no Global Color Table; the picture carries a §21 \
+                   Local Color Table).",
+        },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> CoreResult<()> {
         match key {
@@ -800,6 +829,35 @@ impl CodecOptionsStruct for EncodeOptions {
                 }
             }
             "embed_metadata" => self.embed_metadata = v.as_bool()?,
+            "version" => {
+                self.version = match v.as_str()? {
+                    "" | "auto" => None,
+                    "87a" => Some(Version::Gif87a),
+                    "89a" => Some(Version::Gif89a),
+                    _ => unreachable!("guarded by SCHEMA"),
+                }
+            }
+            "background_index" | "pixel_aspect_ratio" => {
+                let n = v.as_u32()?;
+                let byte = u8::try_from(n).map_err(|_| {
+                    CoreError::invalid(format!(
+                        "GIF encoder: option `{key}` got {n}; expected 0..=255"
+                    ))
+                })?;
+                if key == "background_index" {
+                    self.background_index = byte;
+                } else {
+                    self.pixel_aspect_ratio = byte;
+                }
+            }
+            "color_table" => {
+                self.color_table = match v.as_str()? {
+                    "" | "auto" => ColorTableMode::Auto,
+                    "global" => ColorTableMode::Global,
+                    "local" => ColorTableMode::Local,
+                    _ => unreachable!("guarded by SCHEMA"),
+                }
+            }
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())
@@ -1523,5 +1581,38 @@ mod tests {
         params.options.insert("max_colors", "2");
         params.options.insert("dither", "bogus");
         assert!(make_encoder(&params).is_err());
+    }
+
+    /// The stream-structure options (#14) reach the written header.
+    #[test]
+    fn encoder_stream_structure_options() {
+        let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        params.width = Some(2);
+        params.height = Some(1);
+        params.pixel_format = Some(PixelFormat::Rgb24);
+        params.options.insert("version", "89a");
+        params.options.insert("background_index", "1");
+        params.options.insert("pixel_aspect_ratio", "49");
+        params.options.insert("color_table", "local");
+        let mut enc = make_encoder(&params).unwrap();
+        let img = GifImage::from_rgb8(2, 1, vec![9, 9, 9, 200, 0, 0]).unwrap();
+        enc.send_frame(&CoreFrame::Video(VideoFrame::from(&img)))
+            .unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        assert_eq!(&pkt.data[..6], b"GIF89a");
+        let file = GifFile::parse(&pkt.data).unwrap();
+        assert_eq!((file.background_index, file.pixel_aspect_ratio), (1, 49));
+        assert!(file.global_palette.is_none());
+        assert!(file.frames().next().unwrap().local_palette.is_some());
+        assert_eq!(crate::decode_rgb8(&pkt.data).unwrap().data, img.to_rgb8());
+
+        for (key, bad) in [("background_index", "256"), ("pixel_aspect_ratio", "300")] {
+            let mut p = params.clone();
+            p.options.insert(key, bad);
+            assert!(make_encoder(&p).is_err(), "{key}={bad}");
+        }
+        let mut p = params.clone();
+        p.options.insert("version", "88a");
+        assert!(make_encoder(&p).is_err());
     }
 }

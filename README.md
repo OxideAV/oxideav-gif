@@ -83,7 +83,8 @@ per frame in any of the 21 declared input layouts (`Pal8` / `Rgba` /
 `Rgb24` and their reorderings, grey, mono, 16-bit — see *Supported
 layouts*; `encode` after normalisation), with `params.options` parsed
 into `EncodeOptions` (`lzw_strategy`, `interlace`, `max_colors`,
-`dither`, `loop_count`, `embed_metadata`); its `output_params` label the
+`dither`, `loop_count`, `embed_metadata`, `quality`, `version`,
+`background_index`, `pixel_aspect_ratio`, `color_table`); its `output_params` label the
 coded layout, `Pal8`. Drained, `receive_frame` /
 `receive_packet` return `NeedMore` until `flush`, then `Eof`.
 
@@ -328,6 +329,13 @@ Every container field is under the caller's control (#14):
 | Per-frame offset, interlace, disposal, delay, Transparency Index, User Input Flag, GCE present or not | `GifFrameData` / `GraphicControl`; `FrameSpec::{with_offset, with_interlaced, with_disposal, with_delay_centis, with_delay, with_transparent_index, with_user_input, without_graphic_control}`, `FrameSpec::from_rgba8` (own table + Transparency Index) | `GifFile::frames()` |
 | NETSCAPE2.0 loop | `GifFile::set_iterations` / `set_loop_count`, `AnimationBuilder::iterations`, `EncodeOptions::with_iterations` (`1` writes no extension) | `GifFile::iterations` / `loop_count`, `ImageInfo::loop_count` |
 | §24 comments | `GifFile::add_comment` / `set_comments` / `clear_comments`, `AnimationBuilder::comment`, `EncodeOptions::comments` | `GifFile::comments`, `ImageInfo::comments` |
+
+On the registry path the `gif` encoder takes the same header knobs as
+options — `version` (`auto` / `87a` / `89a`), `background_index`,
+`pixel_aspect_ratio` (0..=255) and `color_table` (`auto` / `global` /
+`local`) — and the muxer keeps them when it merges packets; comments
+ride the `gif-comment` blobs / `comment` metadata pairs and the loop
+the `loop_count` option / metadata pair, as before.
 
 Cross-checked with ImageMagick 7.1.2 as a black box: frame geometry
 and offsets, disposal, delay, interlace, transparent colour, background

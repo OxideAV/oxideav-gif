@@ -14,6 +14,7 @@
 - `GifFile::iterations` / `set_iterations` (`0` = forever, `1` = once with no NETSCAPE2.0 block, `n` = loop count `n - 1`), `GifFile::set_loop_count`, `GifFile::add_comment` / `set_comments` / `clear_comments`.
 - `EncodeOptions::version`, `background_index`, `pixel_aspect_ratio`, `comments` and `color_table` (`ColorTableMode::{Auto, Global, Local}`), plus `with_iterations`, for `encode` / `encode_rgb8` / `encode_rgba8` / `encode_all`.
 - `ImageInfo::background_index` and `ImageInfo::comments`.
+- Registry encoder options `version` (`auto` / `87a` / `89a`), `background_index`, `pixel_aspect_ratio` and `color_table` (`auto` / `global` / `local`); the muxer keeps them across the packet merge (#14).
 
 ## [0.0.15](https://github.com/OxideAV/oxideav-gif/compare/v0.0.14...v0.0.15) - 2026-11-07
 

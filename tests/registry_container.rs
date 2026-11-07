@@ -667,6 +667,43 @@ fn muxer_merges_encoder_packets_into_an_animation_with_delays_and_loop() {
     );
 }
 
+/// The stream-structure encoder options (#14) survive the packet merge:
+/// header version, Background Color Index, Pixel Aspect Ratio, and
+/// local-only colour tables.
+#[test]
+fn muxer_keeps_the_stream_structure_options() {
+    let ctx = ctx();
+    let frames: Vec<GifImage> = [[255u8, 0, 0], [0, 0, 255]]
+        .iter()
+        .map(|c| GifImage::from_rgb8(2, 1, [*c, [7, 7, 7]].concat()).unwrap())
+        .collect();
+    let (stream, packets) = encoder_packets(
+        &ctx,
+        &frames,
+        TimeBase::new(1, 100),
+        &[5, 5],
+        &[
+            ("background_index", "1"),
+            ("pixel_aspect_ratio", "49"),
+            ("color_table", "local"),
+            ("version", "89a"),
+        ],
+    );
+    let file = mux(&stream, &packets);
+    assert_eq!(&file[..6], b"GIF89a");
+    let parsed = GifFile::parse(&file).unwrap();
+    assert_eq!(
+        (parsed.background_index, parsed.pixel_aspect_ratio),
+        (1, 49)
+    );
+    assert!(parsed.global_palette.is_none());
+    assert!(parsed.frames().all(|f| f.local_palette.is_some()));
+    let got = decode_all(&file).unwrap();
+    for (f, want) in got.iter().zip(&frames) {
+        assert_eq!(f.image.to_rgb8(), want.to_rgb8());
+    }
+}
+
 #[test]
 fn demux_then_mux_then_demux_preserves_frames_timing_and_loop() {
     let ctx = ctx();
