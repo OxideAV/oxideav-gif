@@ -836,6 +836,12 @@ pub struct ImageInfo {
     pub loop_count: Option<u16>,
     /// §18.c.viii Pixel Aspect Ratio raw byte (`0` = none given).
     pub pixel_aspect_ratio: u8,
+    /// §18.c.vii Background Color Index (meaningful only with a Global
+    /// Color Table).
+    pub background_index: u8,
+    /// Every §24 Comment Extension payload the walk reached, in source
+    /// order.
+    pub comments: Vec<Vec<u8>>,
 }
 
 impl ImageInfo {
@@ -859,6 +865,8 @@ impl ImageInfo {
             interlaced: false,
             loop_count: None,
             pixel_aspect_ratio: 0,
+            background_index: 0,
+            comments: Vec::new(),
         }
     }
 }

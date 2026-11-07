@@ -32,6 +32,27 @@ pub enum LzwStrategy {
     ClearOnFull,
 }
 
+/// Which colour tables the pixel-building encoders
+/// ([`crate::encode`], [`crate::encode_rgb8`], [`crate::encode_rgba8`],
+/// [`crate::encode_all`]) write. A [`GifFile`] keeps its own tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ColorTableMode {
+    /// A single image gets a §19 Global Color Table; each animation frame
+    /// gets its own §21 Local Color Table (quantised independently).
+    #[default]
+    Auto,
+    /// One §19 Global Color Table for the whole stream; no image carries
+    /// a Local Color Table. Animation frames are quantised together
+    /// ([`GifFile::from_rgba_frames_shared_palette`]), so every frame
+    /// shares one palette and, when any frame has transparent pixels,
+    /// one §23.c.viii Transparency Index.
+    Global,
+    /// No Global Color Table; every image carries its own §21 Local
+    /// Color Table (§18.c.i Global Color Table Flag clear).
+    Local,
+}
+
 /// Encoder tuning knobs for every encode entry point
 /// ([`crate::encode_file`], [`crate::encode_rgb8`], [`crate::encode_rgba8`],
 /// [`crate::encode_animation`], [`encode_file_with`]).
@@ -64,6 +85,31 @@ pub struct EncodeOptions {
     /// Write the ICC / Exif / XMP Application Extensions from the
     /// image's [`crate::Metadata`]. Default `true`.
     pub embed_metadata: bool,
+    /// §17.c.ii header version for the pixel-building encoders. `None`
+    /// (default) picks the earliest version that covers every block
+    /// written (§7) — `GIF87a` for a plain still image, `GIF89a` once any
+    /// extension is present. `Some(Version::Gif89a)` forces `GIF89a`;
+    /// `Some(Version::Gif87a)` is refused with
+    /// [`Error::InvalidInput`] when the stream needs an 89a block (a
+    /// Transparency Index, an animation's Graphic Control, a comment,
+    /// metadata or a loop count).
+    pub version: Option<Version>,
+    /// §18.c.vii Background Color Index written by the pixel-building
+    /// encoders. Default `0`.
+    pub background_index: u8,
+    /// §18.c.viii Pixel Aspect Ratio raw byte written by the
+    /// pixel-building encoders (`0` = no information, else the aspect
+    /// ratio is `(value + 15) / 64`; see
+    /// [`GifFile::raw_pixel_aspect_ratio_for`]). Default `0`.
+    pub pixel_aspect_ratio: u8,
+    /// §24 Comment Extensions written by the pixel-building encoders, in
+    /// order, at the head of the stream (after the looping / metadata
+    /// Application Extensions, before the first image — §24.e.ii).
+    /// Default empty.
+    pub comments: Vec<Vec<u8>>,
+    /// Global vs local colour tables for the pixel-building encoders
+    /// ([`ColorTableMode`]). Default [`ColorTableMode::Auto`].
+    pub color_table: ColorTableMode,
 }
 
 impl EncodeOptions {
@@ -113,6 +159,73 @@ impl EncodeOptions {
         self.embed_metadata = embed_metadata;
         self
     }
+
+    /// Set the animation's total play count: `0` loops forever, `1` plays
+    /// once (no NETSCAPE2.0 extension is written), `n` writes loop count
+    /// `n - 1`; values above 65 536 saturate there. Same convention as
+    /// [`GifFile::set_iterations`]; [`Self::loop_count`] holds the result.
+    pub fn with_iterations(mut self, iterations: u32) -> Self {
+        self.loop_count = crate::edit::loop_count_for_iterations(iterations);
+        self
+    }
+
+    /// Set (or leave to the encoder, `None`) the header version.
+    pub fn with_version(mut self, version: impl Into<Option<Version>>) -> Self {
+        self.version = version.into();
+        self
+    }
+
+    /// Set the §18.c.vii Background Color Index.
+    pub fn with_background_index(mut self, background_index: u8) -> Self {
+        self.background_index = background_index;
+        self
+    }
+
+    /// Set the §18.c.viii Pixel Aspect Ratio raw byte.
+    pub fn with_pixel_aspect_ratio(mut self, pixel_aspect_ratio: u8) -> Self {
+        self.pixel_aspect_ratio = pixel_aspect_ratio;
+        self
+    }
+
+    /// Append one §24 Comment Extension.
+    pub fn with_comment(mut self, comment: impl Into<Vec<u8>>) -> Self {
+        self.comments.push(comment.into());
+        self
+    }
+
+    /// Replace the §24 Comment Extensions.
+    pub fn with_comments<I, C>(mut self, comments: I) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: Into<Vec<u8>>,
+    {
+        self.comments = comments.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Choose global vs local colour tables.
+    pub fn with_color_table(mut self, color_table: ColorTableMode) -> Self {
+        self.color_table = color_table;
+        self
+    }
+
+    /// Apply the stream-level fields (Background Color Index, Pixel
+    /// Aspect Ratio, comments, version) to a `file` the pixel-building
+    /// encoders assembled.
+    pub(crate) fn apply_stream_fields(&self, file: &mut GifFile) {
+        file.background_index = self.background_index;
+        file.pixel_aspect_ratio = self.pixel_aspect_ratio;
+        for c in &self.comments {
+            file.add_comment(c.clone());
+        }
+        match self.version {
+            Some(v) => file.version = v,
+            None => {
+                file.version = Version::Gif87a;
+                file.upgrade_version_if_needed();
+            }
+        }
+    }
 }
 
 impl Default for EncodeOptions {
@@ -123,6 +236,11 @@ impl Default for EncodeOptions {
             quantize: crate::quantize::QuantizeOptions::default(),
             loop_count: Some(0),
             embed_metadata: true,
+            version: None,
+            background_index: 0,
+            pixel_aspect_ratio: 0,
+            comments: Vec::new(),
+            color_table: ColorTableMode::Auto,
         }
     }
 }

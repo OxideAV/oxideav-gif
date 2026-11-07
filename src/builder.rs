@@ -51,9 +51,12 @@
 //! assert_eq!(img.loop_count(), Some(0)); // loop forever
 //! ```
 
+use core::time::Duration;
+
 use crate::app_ext::LoopControl;
 use crate::error::{Error, Result};
 use crate::image::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
+use crate::quantize::QuantizeOptions;
 
 /// How a freshly-built animation should loop, mapped to the de-facto
 /// NETSCAPE2.0 *Looping* sub-block convention documented in
@@ -72,26 +75,198 @@ enum LoopBehaviour {
     Repeat(u16),
 }
 
+/// One image of an [`AnimationBuilder`] stream with every per-image
+/// container field under the caller's control: the §20 placement
+/// rectangle and Interlace Flag, an optional §21 Local Color Table (and
+/// its §20.c.viii Sort Flag), and the §23 Graphic Control Extension —
+/// Disposal Method, User Input Flag, Transparency Index, Delay Time — or
+/// no Graphic Control Extension at all.
+///
+/// [`FrameSpec::new`] starts a frame at `(0, 0)` that uses the Global
+/// Color Table and carries a default Graphic Control Extension (no
+/// disposal, no delay, no transparency, no user input);
+/// [`FrameSpec::from_rgba8`] quantises truecolour pixels into a frame
+/// with its own Local Color Table. Adjust with the `with_*` builders and
+/// hand it to [`AnimationBuilder::add_frame`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FrameSpec {
+    /// §20.c.ii Image Left Position.
+    pub left: u16,
+    /// §20.c.iii Image Top Position.
+    pub top: u16,
+    /// §20.c.iv Image Width.
+    pub width: u16,
+    /// §20.c.v Image Height.
+    pub height: u16,
+    /// One colour-table index per pixel, row-major, `width × height`.
+    pub indices: Vec<u8>,
+    /// `Some` writes a §21 Local Color Table (1..=256 entries) for this
+    /// image; `None` uses the builder's Global Color Table.
+    pub local_palette: Option<Vec<Rgb>>,
+    /// §20.c.viii Sort Flag of the Local Color Table.
+    pub palette_sorted: bool,
+    /// §20.c.vii Interlace Flag; `None` takes the builder's current
+    /// [`AnimationBuilder::interlaced`] setting.
+    pub interlaced: Option<bool>,
+    /// The §23 Graphic Control Extension written ahead of the image;
+    /// `None` writes none (the only GIF87a-compatible choice).
+    pub graphic_control: Option<GraphicControl>,
+}
+
+impl FrameSpec {
+    /// A `width × height` frame at `(0, 0)` against the Global Color
+    /// Table, with a default Graphic Control Extension.
+    pub fn new(width: u16, height: u16, indices: Vec<u8>) -> Self {
+        Self {
+            left: 0,
+            top: 0,
+            width,
+            height,
+            indices,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: None,
+            graphic_control: Some(GraphicControl::default()),
+        }
+    }
+
+    /// Quantise tightly packed RGBA (`4 × width × height` bytes) with
+    /// `quantize` into a frame carrying its own §21 Local Color Table.
+    /// Pixels with alpha below
+    /// [`crate::quantize::ALPHA_OPAQUE_THRESHOLD`] map to one entry,
+    /// which becomes the frame's §23.c.viii Transparency Index.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` when `rgba` is not exactly `4 × width × height`
+    /// bytes or the quantiser options are out of range.
+    pub fn from_rgba8(
+        width: u16,
+        height: u16,
+        rgba: &[u8],
+        quantize: QuantizeOptions,
+    ) -> Result<Self> {
+        let (w, h) = (usize::from(width), usize::from(height));
+        if rgba.len() != w * h * 4 {
+            return Err(Error::InvalidInput(format!(
+                "FrameSpec::from_rgba8: {width}x{height} needs {} RGBA bytes, got {}",
+                w * h * 4,
+                rgba.len()
+            )));
+        }
+        let q = crate::quantize::quantize_rgba_with_options(rgba, w, h, quantize)?;
+        Ok(Self {
+            local_palette: Some(q.palette),
+            graphic_control: Some(GraphicControl {
+                transparent_index: q.transparent_index,
+                ..GraphicControl::default()
+            }),
+            ..Self::new(width, height, q.indices)
+        })
+    }
+
+    /// Place the frame at `(left, top)` on the Logical Screen.
+    pub fn with_offset(mut self, left: u16, top: u16) -> Self {
+        self.left = left;
+        self.top = top;
+        self
+    }
+
+    /// Give the frame its own Local Color Table (`Some`) or make it use
+    /// the Global Color Table (`None`).
+    pub fn with_local_palette(mut self, palette: impl Into<Option<Vec<Rgb>>>) -> Self {
+        self.local_palette = palette.into();
+        self
+    }
+
+    /// Set the Local Color Table's §20.c.viii Sort Flag.
+    pub fn with_palette_sorted(mut self, sorted: bool) -> Self {
+        self.palette_sorted = sorted;
+        self
+    }
+
+    /// Set this frame's Interlace Flag (overriding the builder's).
+    pub fn with_interlaced(mut self, interlaced: bool) -> Self {
+        self.interlaced = Some(interlaced);
+        self
+    }
+
+    /// Replace the whole Graphic Control Extension (`None` = write none).
+    pub fn with_graphic_control(mut self, gce: impl Into<Option<GraphicControl>>) -> Self {
+        self.graphic_control = gce.into();
+        self
+    }
+
+    /// Write no Graphic Control Extension for this frame.
+    pub fn without_graphic_control(self) -> Self {
+        self.with_graphic_control(None)
+    }
+
+    fn gce(&mut self) -> &mut GraphicControl {
+        self.graphic_control
+            .get_or_insert_with(GraphicControl::default)
+    }
+
+    /// Set the §23.c.vii Delay Time in hundredths of a second (adds a
+    /// Graphic Control Extension when the frame had none).
+    pub fn with_delay_centis(mut self, delay_centis: u16) -> Self {
+        self.gce().delay_centis = delay_centis;
+        self
+    }
+
+    /// Set the Delay Time from a [`Duration`], rounded to the nearest
+    /// hundredth of a second and saturating at 655.35 s.
+    pub fn with_delay(self, delay: Duration) -> Self {
+        let centis = u16::try_from((delay.as_millis() + 5) / 10).unwrap_or(u16::MAX);
+        self.with_delay_centis(centis)
+    }
+
+    /// Set the §23.c.iv Disposal Method.
+    pub fn with_disposal(mut self, disposal: DisposalMethod) -> Self {
+        self.gce().disposal = disposal;
+        self
+    }
+
+    /// Set (or clear) the §23.c.viii Transparency Index.
+    pub fn with_transparent_index(mut self, index: impl Into<Option<u8>>) -> Self {
+        self.gce().transparent_index = index.into();
+        self
+    }
+
+    /// Set the §23.c.v User Input Flag.
+    pub fn with_user_input(mut self, user_input: bool) -> Self {
+        self.gce().user_input = user_input;
+        self
+    }
+}
+
 /// Fluent assembler for an animated [`GifFile`].
 ///
 /// Construct with [`AnimationBuilder::new`], push frames with
 /// [`add_full_frame`](Self::add_full_frame) (a frame that fills the
-/// whole logical screen) or [`add_placed_frame`](Self::add_placed_frame)
-/// (a sub-rectangle), optionally pick the looping behaviour, then
-/// [`build`](Self::build) to get a validated [`GifFile`] ready for
-/// [`crate::encode_file`].
+/// whole logical screen), [`add_placed_frame`](Self::add_placed_frame)
+/// (a sub-rectangle) or [`add_frame`](Self::add_frame) (a [`FrameSpec`]
+/// with every per-image field: Local Color Table, Transparency Index,
+/// User Input Flag, Interlace Flag, or no Graphic Control Extension),
+/// optionally pick the looping behaviour, header version, Pixel Aspect
+/// Ratio and comments, then [`build`](Self::build) to get a validated
+/// [`GifFile`] ready for [`crate::encode_file`].
 ///
-/// Every frame is stored against the single Global Color Table supplied
-/// at construction (§18 / §21: a frame with the Local Color Table flag
-/// clear uses the GCT), so the builder never emits per-frame Local Color
-/// Tables. Callers that need per-frame palettes can construct
-/// [`GifFile`] directly.
+/// [`add_full_frame`](Self::add_full_frame) /
+/// [`add_placed_frame`](Self::add_placed_frame) frames use the Global
+/// Color Table supplied at construction; [`global_palette`](Self::global_palette)
+/// replaces or removes it (a stream without one needs a Local Color
+/// Table on every frame).
 #[derive(Debug, Clone)]
 pub struct AnimationBuilder {
     screen_width: u16,
     screen_height: u16,
-    palette: Vec<Rgb>,
+    palette: Option<Vec<Rgb>>,
     background_index: u8,
+    pixel_aspect_ratio: u8,
+    version: Option<Version>,
+    comments: Vec<Vec<u8>>,
     loop_behaviour: LoopBehaviour,
     /// §20.c.vii Interlace Flag stamped onto frames added *after* the
     /// most recent [`interlaced`](Self::interlaced) call. Captured per
@@ -115,12 +290,62 @@ impl AnimationBuilder {
         Self {
             screen_width,
             screen_height,
-            palette,
+            palette: Some(palette),
             background_index: 0,
+            pixel_aspect_ratio: 0,
+            version: None,
+            comments: Vec::new(),
             loop_behaviour: LoopBehaviour::Once,
             interlace: false,
             frames: Vec::new(),
         }
+    }
+
+    /// Replace the §19 Global Color Table (`Some`) or write none
+    /// (`None`; §18 Global Color Table Flag clear — every frame must
+    /// then bring a Local Color Table). Frames already added are
+    /// re-checked at [`build`](Self::build).
+    pub fn global_palette(mut self, palette: impl Into<Option<Vec<Rgb>>>) -> Self {
+        self.palette = palette.into();
+        self
+    }
+
+    /// Set the §17.c.ii header version. Without this call the builder
+    /// writes the earliest version covering every block (§7): `GIF89a`
+    /// as soon as any frame carries a Graphic Control Extension or the
+    /// stream carries a loop count or comment, `GIF87a` otherwise.
+    /// [`build`](Self::build) refuses a `Gif87a` request for a stream
+    /// that needs 89a.
+    pub fn version(mut self, version: Version) -> Self {
+        self.version = Some(version);
+        self
+    }
+
+    /// Set the §18.c.viii Pixel Aspect Ratio raw byte (`0` = none; see
+    /// [`GifFile::raw_pixel_aspect_ratio_for`]).
+    pub fn pixel_aspect_ratio(mut self, raw: u8) -> Self {
+        self.pixel_aspect_ratio = raw;
+        self
+    }
+
+    /// Append a §24 Comment Extension, written after the looping block
+    /// and before the first frame (§24.e.ii).
+    pub fn comment(mut self, text: impl Into<Vec<u8>>) -> Self {
+        self.comments.push(text.into());
+        self
+    }
+
+    /// Set the total play count: `0` loops forever, `1` plays once (no
+    /// NETSCAPE2.0 block), `n` repeats `n - 1` times after the first
+    /// pass; values above 65 536 saturate there. See
+    /// [`GifFile::set_iterations`].
+    pub fn iterations(mut self, iterations: u32) -> Self {
+        self.loop_behaviour = match crate::edit::loop_count_for_iterations(iterations) {
+            None => LoopBehaviour::Once,
+            Some(0) => LoopBehaviour::Forever,
+            Some(n) => LoopBehaviour::Repeat(n),
+        };
+        self
     }
 
     /// Set the §20.c.vii Interlace Flag applied to every frame added
@@ -134,7 +359,8 @@ impl AnimationBuilder {
     /// stream that mixes interlaced and progressive frames — §20.c.vii is
     /// a per-frame flag. Defaults to `false` (progressive). This is the
     /// fluent counterpart to [`crate::GifFile::set_frames_interlaced`],
-    /// which stamps a whole already-built stream at once.
+    /// which stamps a whole already-built stream at once. A
+    /// [`FrameSpec::interlaced`] value overrides it for that frame.
     pub fn interlaced(mut self, on: bool) -> Self {
         self.interlace = on;
         self
@@ -204,7 +430,7 @@ impl AnimationBuilder {
     /// * every index addresses an entry in the shared palette.
     #[allow(clippy::too_many_arguments)]
     pub fn add_placed_frame(
-        mut self,
+        self,
         left: u16,
         top: u16,
         width: u16,
@@ -213,34 +439,40 @@ impl AnimationBuilder {
         delay_centis: u16,
         disposal: DisposalMethod,
     ) -> Result<Self> {
-        self.validate_frame(left, top, width, height, &indices)?;
+        self.add_frame(
+            FrameSpec::new(width, height, indices)
+                .with_offset(left, top)
+                .with_delay_centis(delay_centis)
+                .with_disposal(disposal),
+        )
+    }
+
+    /// Append a frame described by a [`FrameSpec`].
+    ///
+    /// Validates that the placement rectangle stays within the §18
+    /// Logical Screen, `indices.len() == width × height`, the frame has
+    /// a colour table (its Local Color Table, else the builder's Global
+    /// Color Table, §21) of 1..=256 entries, and every index and the
+    /// Transparency Index address an entry of it.
+    pub fn add_frame(mut self, spec: FrameSpec) -> Result<Self> {
+        self.validate_frame(&spec)?;
+        let interlaced = spec.interlaced.unwrap_or(self.interlace);
         self.frames.push(GifFrameData {
-            left,
-            top,
-            width,
-            height,
-            local_palette: None,
-            palette_sorted: false,
-            interlaced: self.interlace,
-            indices,
-            graphic_control: Some(GraphicControl {
-                disposal,
-                user_input: false,
-                transparent_index: None,
-                delay_centis,
-            }),
+            left: spec.left,
+            top: spec.top,
+            width: spec.width,
+            height: spec.height,
+            local_palette: spec.local_palette,
+            palette_sorted: spec.palette_sorted,
+            interlaced,
+            indices: spec.indices,
+            graphic_control: spec.graphic_control,
         });
         Ok(self)
     }
 
-    fn validate_frame(
-        &self,
-        left: u16,
-        top: u16,
-        width: u16,
-        height: u16,
-        indices: &[u8],
-    ) -> Result<()> {
+    fn validate_frame(&self, spec: &FrameSpec) -> Result<()> {
+        let (left, top, width, height) = (spec.left, spec.top, spec.width, spec.height);
         // §18 / §20 — the placement rectangle must fit inside the
         // Logical Screen. Compute in u32 so no u16 add overflows.
         let right = left as u32 + width as u32;
@@ -253,58 +485,74 @@ impl AnimationBuilder {
             )));
         }
         let expected = width as usize * height as usize;
-        if indices.len() != expected {
+        if spec.indices.len() != expected {
             return Err(Error::InvalidInput(format!(
                 "frame indices length {} != width*height {expected}",
-                indices.len()
+                spec.indices.len()
             )));
         }
-        // §21 — with no Local Color Table the frame resolves indices
-        // against the shared Global Color Table; an index past the end
-        // of it has no colour.
-        if let Some(&bad) = indices
-            .iter()
-            .find(|&&i| (i as usize) >= self.palette.len())
+        if let Some(local) = &spec.local_palette
+            && (local.is_empty() || local.len() > 256)
         {
             return Err(Error::InvalidInput(format!(
-                "pixel index {bad} >= palette size {}",
-                self.palette.len()
+                "local colour table has {} entries; expected 1..=256",
+                local.len()
             )));
         }
-        Ok(())
+        check_indices(
+            spec.local_palette.as_deref().or(self.palette.as_deref()),
+            &spec.indices,
+            spec.graphic_control.and_then(|g| g.transparent_index),
+        )
     }
 
     /// Finalise the builder into a validated, animation-ready
     /// [`GifFile`].
     ///
-    /// The result is always [`Version::Gif89a`] (every frame carries a
-    /// §23 GCE, which requires 89a per §7). When the loop behaviour is
-    /// anything other than "play once" a NETSCAPE2.0 *Looping*
-    /// Application Extension is inserted ahead of the first frame.
+    /// The version is the one set with [`version`](Self::version), else
+    /// the earliest that covers every block (§7) — `GIF89a` whenever a
+    /// frame carries a §23 GCE (every [`add_full_frame`](Self::add_full_frame) /
+    /// [`add_placed_frame`](Self::add_placed_frame) frame does). When the
+    /// loop behaviour is anything other than "play once" a NETSCAPE2.0
+    /// *Looping* Application Extension is inserted ahead of the first
+    /// frame, followed by the [`comment`](Self::comment)s.
     ///
     /// # Errors
     ///
     /// * `InvalidInput` when no frame was added (an empty animation is
     ///   not a valid Data Stream — §B requires at least the Trailer, but
     ///   a frameless "animation" is almost certainly a caller bug).
-    /// * `InvalidInput` when the palette is empty or larger than 256
-    ///   entries (§19 colour-table size limits).
+    /// * `InvalidInput` when the Global Color Table is empty or larger
+    ///   than 256 entries (§19 colour-table size limits), or a frame
+    ///   without a Local Color Table is left with no table at all.
+    /// * `InvalidInput` when [`Version::Gif87a`] was requested for a
+    ///   stream that needs 89a blocks.
     pub fn build(self) -> Result<GifFile> {
         if self.frames.is_empty() {
             return Err(Error::InvalidInput(
                 "animation has no frames; add at least one before build()".into(),
             ));
         }
-        if self.palette.is_empty() {
-            return Err(Error::InvalidInput(
-                "global colour table must contain at least one entry".into(),
-            ));
+        if let Some(palette) = &self.palette {
+            if palette.is_empty() {
+                return Err(Error::InvalidInput(
+                    "global colour table must contain at least one entry".into(),
+                ));
+            }
+            if palette.len() > 256 {
+                return Err(Error::InvalidInput(format!(
+                    "global colour table has {} entries; max is 256",
+                    palette.len()
+                )));
+            }
         }
-        if self.palette.len() > 256 {
-            return Err(Error::InvalidInput(format!(
-                "global colour table has {} entries; max is 256",
-                self.palette.len()
-            )));
+        // `global_palette` may have changed after frames were added.
+        for f in &self.frames {
+            check_indices(
+                f.local_palette.as_deref().or(self.palette.as_deref()),
+                &f.indices,
+                f.graphic_control.and_then(|g| g.transparent_index),
+            )?;
         }
 
         let mut blocks: Vec<Block> = Vec::with_capacity(self.frames.len() + 1);
@@ -312,49 +560,86 @@ impl AnimationBuilder {
         // §26 — emit the NETSCAPE2.0 *Looping* block ahead of the first
         // frame for any non-"play once" behaviour. The de-facto reader
         // convention is that the block precedes the frames.
-        match self.loop_behaviour {
-            LoopBehaviour::Once => {}
-            LoopBehaviour::Forever => {
-                blocks.push(Block::Application(
-                    LoopControl {
-                        loop_count: Some(0),
-                        buffer_size: None,
-                    }
-                    .to_application(),
-                ));
-            }
-            LoopBehaviour::Repeat(n) => {
-                blocks.push(Block::Application(
-                    LoopControl {
-                        loop_count: Some(n),
-                        buffer_size: None,
-                    }
-                    .to_application(),
-                ));
-            }
+        let loop_count = match self.loop_behaviour {
+            LoopBehaviour::Once => None,
+            LoopBehaviour::Forever => Some(0),
+            LoopBehaviour::Repeat(n) => Some(n),
+        };
+        if let Some(n) = loop_count {
+            blocks.push(Block::Application(
+                LoopControl {
+                    loop_count: Some(n),
+                    buffer_size: None,
+                }
+                .to_application(),
+            ));
         }
+        // §24.e.ii — comments at the beginning of the Data Stream.
+        blocks.extend(self.comments.into_iter().map(Block::Comment));
 
+        // §18.c.iv — Color Resolution describes the *original*
+        // palette's bit depth; "bits to address the largest table minus
+        // 1" is the honest value.
+        let largest = self
+            .frames
+            .iter()
+            .filter_map(|f| f.local_palette.as_ref().map(Vec::len))
+            .chain(self.palette.as_ref().map(Vec::len))
+            .max()
+            .unwrap_or(1);
         for frame in self.frames {
             blocks.push(Block::Image(frame));
         }
 
-        Ok(GifFile {
-            // §7 — every frame carries a §23 GCE, so the minimum
-            // covering version is 89a.
-            version: Version::Gif89a,
+        let mut file = GifFile {
+            version: Version::Gif87a,
             screen_width: self.screen_width,
             screen_height: self.screen_height,
-            // §18.c.iv — Color Resolution describes the *original*
-            // palette's bit depth. With a shared GCT, "bits to address
-            // the table minus 1" is the honest value.
-            color_resolution: color_resolution_for(self.palette.len()),
+            color_resolution: color_resolution_for(largest),
             global_palette_sorted: false,
             background_index: self.background_index,
-            pixel_aspect_ratio: 0,
-            global_palette: Some(self.palette),
+            pixel_aspect_ratio: self.pixel_aspect_ratio,
+            global_palette: self.palette,
             blocks,
-        })
+        };
+        let required = file.required_version();
+        file.version = match self.version {
+            Some(v) if v < required => {
+                return Err(Error::InvalidInput(format!(
+                    "GIF87a requested but the stream needs GIF89a blocks (Graphic Control, \
+                     comment or loop extension) — §7; got required {required:?}"
+                )));
+            }
+            Some(v) => v,
+            None => required,
+        };
+        Ok(file)
     }
+}
+
+/// §21 / §23.c.viii — every index (and the Transparency Index) must
+/// address an entry of the frame's active colour table.
+fn check_indices(table: Option<&[Rgb]>, indices: &[u8], transparent: Option<u8>) -> Result<()> {
+    let table = table.ok_or_else(|| {
+        Error::InvalidInput(
+            "frame has no Local Color Table and the stream has no Global Color Table".into(),
+        )
+    })?;
+    if let Some(&bad) = indices.iter().find(|&&i| (i as usize) >= table.len()) {
+        return Err(Error::InvalidInput(format!(
+            "pixel index {bad} >= palette size {}",
+            table.len()
+        )));
+    }
+    if let Some(t) = transparent
+        && usize::from(t) >= table.len()
+    {
+        return Err(Error::InvalidInput(format!(
+            "transparency index {t} >= palette size {}",
+            table.len()
+        )));
+    }
+    Ok(())
 }
 
 /// §18.c.iv Color Resolution = "bits per primary minus 1". With a

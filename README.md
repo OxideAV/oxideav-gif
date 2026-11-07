@@ -39,7 +39,7 @@ if oxideav_gif::probe(&bytes) {
 | Item | What it does |
 |---|---|
 | `probe(&[u8]) -> bool` | `GIF87a` / `GIF89a` signature sniff; allocation-free. |
-| `info(&[u8]) -> Result<ImageInfo>` | Structural walk, no LZW expansion: `width`, `height`, `format`, `frames` (graphic-rendering blocks = `decode_all` length), `has_alpha`, `color`, `has_icc` / `has_exif` / `has_xmp`, plus `version`, `image_count`, `has_global_palette`, `palette_entries`, `interlaced`, `loop_count`, `pixel_aspect_ratio`. |
+| `info(&[u8]) -> Result<ImageInfo>` | Structural walk, no LZW expansion: `width`, `height`, `format`, `frames` (graphic-rendering blocks = `decode_all` length), `has_alpha`, `color`, `has_icc` / `has_exif` / `has_xmp`, plus `version`, `image_count`, `has_global_palette`, `palette_entries`, `interlaced`, `loop_count`, `pixel_aspect_ratio`, `background_index`, `comments`. |
 | `decode(&[u8]) -> Result<GifImage>` | The **first §20 image composed onto the §18 Logical Screen** — pixels outside the image rectangle and at the §23.c.viii Transparency Index are transparent, exactly as `compose` renders them. `Pal8` with the frame's colour table (see *Supported layouts*), `Rgba` when no single table can describe the canvas. Only the first raster is LZW-expanded. |
 | `decode_with(&[u8], &DecodeOptions)` | Same under explicit limits / `strict` / `lenient`. |
 | `decode_rgb8` / `decode_rgba8` | One call to `RgbImage { width, height, data }` / `RgbaImage` (3 / 4 bytes per pixel, row-major). |
@@ -222,6 +222,14 @@ Image Descriptor **before** any raster is allocated.
 | `quantize: QuantizeOptions` | 256 colours, no dither, extent priority, no Lloyd refinement | Reduction of `Rgb24` / `Rgba` input (`with_max_colors`, `with_dither` shortcuts). |
 | `loop_count: Option<u16>` | `Some(0)` (forever) | NETSCAPE2.0 loop count for `encode_all`; `None` plays once. |
 | `embed_metadata: bool` | `true` | Write ICC / Exif / XMP Application Extensions from `GifImage::metadata`. |
+| `version: Option<Version>` | `None` | §17 header version; `None` = earliest covering every block (§7), `Some(Gif87a)` is refused when an 89a block is needed. |
+| `background_index: u8` | `0` | §18.c.vii Background Color Index. |
+| `pixel_aspect_ratio: u8` | `0` | §18.c.viii Pixel Aspect Ratio raw byte. |
+| `comments: Vec<Vec<u8>>` | empty | §24 Comment Extensions, written before the first image. |
+| `color_table: ColorTableMode` | `Auto` | `Auto` = global table for a still, one local table per animation frame; `Global` = one shared table (animation frames quantised together); `Local` = no global table. |
+
+`with_iterations(n)` sets `loop_count` from a total play count: `0` =
+forever, `1` = once (no NETSCAPE2.0 block), `n` = loop count `n - 1`.
 
 **`quality` (registry path only, contract r476):** GIF's one
 meaningful knob is the colour-table budget, so the framework's
@@ -307,6 +315,24 @@ and `GifFile::from_rgba_frame*` author streams from truecolour input;
 toolkit; `app_ext` the typed NETSCAPE2.0 / ANIMEXTS1.0 / XMP / ICC /
 Exif views; `GifFile::conformance_report` / `validate_strict` the
 §7–§26 conformance walk; `lzw` the Appendix F codec on its own.
+
+### Container structure control
+
+Every container field is under the caller's control (#14):
+
+| Field | Write | Read |
+|---|---|---|
+| `GIF87a` / `GIF89a` | `GifFile::version`, `AnimationBuilder::version`, `EncodeOptions::version` (default: earliest version covering the blocks, §7; an impossible `Gif87a` is `InvalidInput`) | `GifFile::version`, `ImageInfo::version` |
+| Logical Screen size, Background Color Index, Pixel Aspect Ratio | `GifFile` fields; `AnimationBuilder::new` / `background_index` / `pixel_aspect_ratio`; `EncodeOptions::background_index` / `pixel_aspect_ratio` | `GifFile` fields, `ImageInfo::{width, height, background_index, pixel_aspect_ratio}` |
+| Global vs Local Color Table | `GifFile::global_palette`, `GifFrameData::local_palette`; `AnimationBuilder::global_palette`, `FrameSpec::with_local_palette`; `EncodeOptions::color_table` | same fields, `ImageInfo::has_global_palette` |
+| Per-frame offset, interlace, disposal, delay, Transparency Index, User Input Flag, GCE present or not | `GifFrameData` / `GraphicControl`; `FrameSpec::{with_offset, with_interlaced, with_disposal, with_delay_centis, with_delay, with_transparent_index, with_user_input, without_graphic_control}`, `FrameSpec::from_rgba8` (own table + Transparency Index) | `GifFile::frames()` |
+| NETSCAPE2.0 loop | `GifFile::set_iterations` / `set_loop_count`, `AnimationBuilder::iterations`, `EncodeOptions::with_iterations` (`1` writes no extension) | `GifFile::iterations` / `loop_count`, `ImageInfo::loop_count` |
+| §24 comments | `GifFile::add_comment` / `set_comments` / `clear_comments`, `AnimationBuilder::comment`, `EncodeOptions::comments` | `GifFile::comments`, `ImageInfo::comments` |
+
+Cross-checked with ImageMagick 7.1.2 as a black box: frame geometry
+and offsets, disposal, delay, interlace, transparent colour, background
+colour, comments and iterations (`0` / `2` / `5`, none for `1`) read
+back as written.
 
 ### Implemented (per the CompuServe specifications)
 

@@ -10,6 +10,10 @@
 ### Added
 
 - `QuantizeOptions::max_colors(self, n)` setter, alongside the existing `dither` / `box_priority` / `palette_refine_iterations` / `serpentine` builders.
+- Container structure control (#14). `FrameSpec` (with `AnimationBuilder::add_frame`) sets every per-image field: offset, Interlace Flag, Local Color Table and its Sort Flag, the Graphic Control Extension's disposal / delay / Transparency Index / User Input Flag, or no Graphic Control Extension; `FrameSpec::from_rgba8` quantises truecolour pixels into a frame with its own table. `AnimationBuilder::version` / `pixel_aspect_ratio` / `global_palette` (including none) / `comment` / `iterations`; without `version` the builder writes the earliest version covering the blocks (§7), so a stream without extensions is `GIF87a`.
+- `GifFile::iterations` / `set_iterations` (`0` = forever, `1` = once with no NETSCAPE2.0 block, `n` = loop count `n - 1`), `GifFile::set_loop_count`, `GifFile::add_comment` / `set_comments` / `clear_comments`.
+- `EncodeOptions::version`, `background_index`, `pixel_aspect_ratio`, `comments` and `color_table` (`ColorTableMode::{Auto, Global, Local}`), plus `with_iterations`, for `encode` / `encode_rgb8` / `encode_rgba8` / `encode_all`.
+- `ImageInfo::background_index` and `ImageInfo::comments`.
 
 ## [0.0.15](https://github.com/OxideAV/oxideav-gif/compare/v0.0.14...v0.0.15) - 2026-11-07
 

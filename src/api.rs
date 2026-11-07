@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use crate::app_ext::{ExifMetadata, IccProfile, XmpPacket};
 use crate::compose::compose;
 use crate::decoder::{parse_with, scan};
-use crate::encoder::{EncodeOptions, encode_file_with};
+use crate::encoder::{ColorTableMode, EncodeOptions, encode_file_with};
 use crate::error::{GifError as Error, Result};
 use crate::image::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
 use crate::options::DecodeOptions;
@@ -70,6 +70,8 @@ pub fn info(bytes: &[u8]) -> Result<ImageInfo> {
     out.interlaced = first.is_some_and(|f| f.interlaced);
     out.loop_count = file.loop_count();
     out.pixel_aspect_ratio = file.pixel_aspect_ratio;
+    out.background_index = file.background_index;
+    out.comments = s.comments.clone();
     Ok(out)
 }
 
@@ -207,11 +209,17 @@ pub fn encode_to<W: Write>(image: &GifImage, opts: &EncodeOptions, mut w: W) -> 
 /// [`EncodeOptions::loop_count`] writes the NETSCAPE2.0 extension;
 /// [`EncodeOptions::interlace`] sets every frame's Interlace Flag; the
 /// first frame's metadata is embedded when
-/// [`EncodeOptions::embed_metadata`].
+/// [`EncodeOptions::embed_metadata`]. [`EncodeOptions::color_table`]
+/// `Global` quantises every frame against one shared Global Color
+/// Table instead; [`EncodeOptions::comments`],
+/// [`EncodeOptions::background_index`],
+/// [`EncodeOptions::pixel_aspect_ratio`] and [`EncodeOptions::version`]
+/// set the stream-level fields.
 ///
-/// For anything finer (shared palettes, sub-rectangle frames, Plain
-/// Text, comments) build a [`GifFile`] — see [`crate::AnimationBuilder`]
-/// and [`GifFile::from_rgba_frames_shared_palette`].
+/// For anything finer (sub-rectangle frames with their own offsets,
+/// per-frame Transparency Index / table choice, frames without a
+/// Graphic Control Extension, Plain Text) build a [`GifFile`] — see
+/// [`crate::AnimationBuilder`] and [`crate::FrameSpec`].
 ///
 /// This is the contract's multi-image encoder (the mirror of
 /// [`decode_all`]); [`encode_animation`] is the GIF-named alias.
@@ -236,8 +244,18 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
         .zip(&rgba_frames)
         .map(|(f, rgba)| (rgba.as_slice(), delay_centis(f.delay), f.disposal))
         .collect();
-    let mut file =
-        GifFile::from_rgba_frames_with_options(&spec, w16, h16, opts.quantize, opts.loop_count)?;
+    let mut file = match opts.color_table {
+        ColorTableMode::Global => GifFile::from_rgba_frames_shared_palette(
+            &spec,
+            w16,
+            h16,
+            opts.quantize,
+            opts.loop_count,
+        )?,
+        _ => {
+            GifFile::from_rgba_frames_with_options(&spec, w16, h16, opts.quantize, opts.loop_count)?
+        }
+    };
     if opts.interlace {
         file.set_frames_interlaced(true);
     }
@@ -254,7 +272,7 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
             file.blocks.splice(at..at, extra);
         }
     }
-    file.upgrade_version_if_needed();
+    opts.apply_stream_fields(&mut file);
     encode_file_with(&file, opts)
 }
 
@@ -681,18 +699,27 @@ pub(crate) fn file_from_image_with_blocks(
         indices,
         graphic_control,
     }));
+    let color_resolution = color_resolution_for(table.len());
+    let global_palette = if opts.color_table == ColorTableMode::Local {
+        if let Some(Block::Image(img)) = blocks.last_mut() {
+            img.local_palette = Some(table);
+        }
+        None
+    } else {
+        Some(table)
+    };
     let mut file = GifFile {
         version: Version::Gif87a,
         screen_width: w16,
         screen_height: h16,
-        color_resolution: color_resolution_for(table.len()),
+        color_resolution,
         global_palette_sorted: false,
         background_index: 0,
         pixel_aspect_ratio: 0,
-        global_palette: Some(table),
+        global_palette,
         blocks,
     };
-    file.upgrade_version_if_needed();
+    opts.apply_stream_fields(&mut file);
     Ok(file)
 }
 

@@ -88,7 +88,10 @@
 //! [`parse_lenient`]). [`EncodeOptions`]: `lzw_strategy`
 //! ([`LzwStrategy`]), `interlace`, `quantize`
 //! ([`quantize::QuantizeOptions`]: colour budget, dither, box priority,
-//! Lloyd refinement), `loop_count`, `embed_metadata`.
+//! Lloyd refinement), `loop_count` (or `with_iterations`),
+//! `embed_metadata`, and the stream fields `version`,
+//! `background_index`, `pixel_aspect_ratio`, `comments`, `color_table`
+//! ([`ColorTableMode`]).
 //!
 //! # Metadata and colour
 //!
@@ -123,7 +126,10 @@
 //! * [`compose()`] / [`Playback`] — the §23 disposal-method state machine
 //!   as eager canvases or a lazy, NETSCAPE2.0-loop-aware iterator;
 //!   [`compose_frame_at_global`] seeks by wall-clock offset.
-//! * [`AnimationBuilder`], [`GifFile::from_rgba_frame`],
+//! * [`AnimationBuilder`] + [`FrameSpec`] (every per-image field:
+//!   offset, interlace, Local Color Table, Graphic Control or none),
+//!   [`GifFile::set_iterations`] / [`GifFile::add_comment`],
+//!   [`GifFile::from_rgba_frame`],
 //!   [`GifFile::from_rgba_frames`],
 //!   [`GifFile::from_rgba_frames_shared_palette`] — authoring from
 //!   truecolour frames; [`GifFile::optimize_color_tables`] /
@@ -164,6 +170,7 @@ pub mod conformance;
 #[doc(hidden)]
 pub mod container;
 pub mod decoder;
+mod edit;
 pub mod encoder;
 pub mod error;
 #[doc(hidden)]
@@ -196,7 +203,7 @@ pub use types::{
 
 // ---- GIF-specific depth (the contract is a floor, not a ceiling) ----------
 pub use app_ext::ApplicationKind;
-pub use builder::AnimationBuilder;
+pub use builder::{AnimationBuilder, FrameSpec};
 pub use compose::{ComposedFrame, RgbaCanvas, SeekResult, compose, compose_frame_at_global};
 pub use conformance::{ConformanceIssue, ConformanceReport, ConformanceRule, ConformanceSeverity};
 #[allow(deprecated)]
@@ -204,7 +211,7 @@ pub use decoder::{decode_first_frame, decode_lenient};
 pub use decoder::{parse, parse_first_frame, parse_first_frame_with, parse_lenient, parse_with};
 #[allow(deprecated)]
 pub use encoder::encode_with_options;
-pub use encoder::{EncodeOptions, LzwStrategy, encode_file, encode_file_with};
+pub use encoder::{ColorTableMode, EncodeOptions, LzwStrategy, encode_file, encode_file_with};
 pub use image::{
     Application, Block, BlockClass, DisposalMethod, FramePresentation, GifFile, GifFrameData,
     GraphicControl, PlainText, Rgb, Version,

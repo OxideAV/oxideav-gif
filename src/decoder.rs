@@ -414,8 +414,7 @@ fn parse_mode(bytes: &[u8], mode: RecoveryMode, opts: &DecodeOptions) -> Result<
 // ---------------------------------------------------------------------
 
 /// What [`scan`] learns from a structural walk of the stream.
-// The span / comment / prefix fields are read by the framework
-// container only.
+// The span / prefix fields are read by the framework container only.
 #[cfg_attr(not(feature = "registry"), allow(dead_code))]
 pub(crate) struct Scan {
     /// A *partial* [`GifFile`]: header / Logical Screen fields, every
