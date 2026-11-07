@@ -72,6 +72,7 @@ impl<'a> Playback<'a> {
 /// [`Duration`] for ergonomic `thread::sleep` calls. The 0.01 s base
 /// unit is exact in `Duration` (10 ms = 10_000_000 ns).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PlaybackFrame {
     pub canvas: RgbaCanvas,
     /// Delay before the next frame should be presented. Zero when the

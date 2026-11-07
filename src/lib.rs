@@ -161,13 +161,17 @@ pub mod builder;
 pub mod compose;
 pub mod conformance;
 #[cfg(feature = "registry")]
+#[doc(hidden)]
 pub mod container;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
+#[doc(hidden)]
 pub mod font;
 pub mod image;
+#[doc(hidden)]
 pub mod interlace;
+#[doc(hidden)]
 pub mod lzw;
 pub mod options;
 pub mod playback;

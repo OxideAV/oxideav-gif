@@ -16,6 +16,7 @@ use crate::lzw;
 /// for any frame whose raster never fills the table; the choice only
 /// affects frames large and varied enough to reach 4096 entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum LzwStrategy {
     /// Freeze the full dictionary and keep emitting 12-bit codes against
     /// it until end-of-image (the §F cover-sheet *deferred clear* rule).

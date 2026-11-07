@@ -46,6 +46,7 @@ pub const MAX_PALETTE: usize = 256;
 /// Palette *selection* (median cut) is identical for every variant — the
 /// dither only changes how each pixel is mapped onto the chosen palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Dither {
     /// Map each pixel to its single nearest palette entry. Deterministic,
     /// no spatial coupling — the index-plane argmin over the palette.
@@ -252,6 +253,7 @@ static BAYER_8X8: [[i32; 8]; 8] = [
 /// exact-colour input (≤ budget distinct colours), where every box is
 /// driven down to a single colour regardless of the order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum BoxPriority {
     /// Split the box with the largest single-channel colour *range*
     /// (extent), ignoring how many pixels fall in it. The historical
@@ -279,6 +281,7 @@ pub enum BoxPriority {
 /// extent-priority box selection) and adjusted field-by-field, or via
 /// the small builder helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct QuantizeOptions {
     /// Maximum palette size, clamped to `1..=256` at use. When the frame
     /// carries transparent pixels one slot is reserved, so the opaque
@@ -328,6 +331,12 @@ impl QuantizeOptions {
         }
     }
 
+    /// Set the colour budget, returning the updated options.
+    pub fn max_colors(mut self, max_colors: usize) -> Self {
+        self.max_colors = max_colors;
+        self
+    }
+
     /// Set the dither strategy, returning the updated options.
     pub fn dither(mut self, dither: Dither) -> Self {
         self.dither = dither;
@@ -360,6 +369,7 @@ impl QuantizeOptions {
 /// reserved §23.c.viii Transparency Index when the input carried any
 /// transparent pixel.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Quantized {
     /// The selected colour table — at most [`MAX_PALETTE`] entries, and
     /// always at least one (a degenerate all-transparent or empty input
@@ -815,6 +825,7 @@ pub fn remap_rgba_to_palette(
 ///
 /// [`palette`]: SharedQuantized::palette
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SharedQuantized {
     /// The one colour table shared by every frame — at most
     /// [`MAX_PALETTE`] entries.

@@ -451,6 +451,7 @@ impl ExifMetadata {
 ///   and pad the remaining two arbitrarily, so the auth code is not part
 ///   of the EXIF match key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ApplicationKind {
     /// NETSCAPE2.0 (`b"NETSCAPE"` + `b"2.0"`) — animation looping /
     /// buffering. See [`LoopControl`].

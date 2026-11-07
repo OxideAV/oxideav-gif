@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `#[non_exhaustive]` on the `ApplicationKind`, `ConformanceSeverity`, `ConformanceRule`, `LzwStrategy`, `Dither` and `BoxPriority` enums and on the `QuantizeOptions`, `ConformanceIssue`, `Quantized`, `SharedQuantized`, `ComposedFrame`, `SeekResult` and `PlaybackFrame` records. Build `QuantizeOptions` with `Default` / `QuantizeOptions::with_max_colors` and its builders; the result records come from the crate's entry points. `Version`, `DisposalMethod`, `Block`, `BlockClass` and the GIF89a syntax records (`GifFile`, `GifFrameData`, `GraphicControl`, `PlainText`, `Application`, the `app_ext` payloads) stay exhaustive: the spec fixes their fields and values.
+- `#[doc(hidden)]` on the internal `font`, `interlace`, `lzw` and `container` modules.
+
+### Added
+
+- `QuantizeOptions::max_colors(self, n)` setter, alongside the existing `dither` / `box_priority` / `palette_refine_iterations` / `serpentine` builders.
+
 ## [0.0.15](https://github.com/OxideAV/oxideav-gif/compare/v0.0.14...v0.0.15) - 2026-11-07
 
 ### Other

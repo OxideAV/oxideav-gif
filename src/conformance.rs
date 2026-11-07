@@ -68,6 +68,7 @@ use core::fmt;
 /// [`ConformanceReport::has_errors`]; a caller building a lint surfaces
 /// both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConformanceSeverity {
     /// A hard departure from a spec *requirement*. A renderer following
     /// the spec literally cannot process the affected field as written
@@ -86,6 +87,7 @@ pub enum ConformanceSeverity {
 /// machine-comparable tag (the human string lives in
 /// [`ConformanceIssue::detail`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConformanceRule {
     /// §7 — declared version does not cover a block's Required Version.
     VersionTooLow,
@@ -116,6 +118,7 @@ pub enum ConformanceRule {
 
 /// One conformance departure found while walking a [`GifFile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConformanceIssue {
     /// Which spec rule was departed from.
     pub rule: ConformanceRule,

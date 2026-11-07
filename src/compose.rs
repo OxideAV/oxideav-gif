@@ -82,6 +82,7 @@ impl RgbaCanvas {
 
 /// One composited frame in playback order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ComposedFrame {
     /// Snapshot of the logical screen *after* this frame has been
     /// rendered onto the canvas (and before its disposal method is
@@ -278,6 +279,7 @@ impl Compositor {
 /// loop pass and frame ordinal that produced it. Returned by
 /// [`compose_frame_at_global`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SeekResult {
     /// The fully-rendered logical-screen canvas on display at the queried
     /// instant (the post-render, pre-disposal snapshot of the resolved
