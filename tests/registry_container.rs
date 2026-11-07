@@ -909,3 +909,43 @@ fn hostile_inputs_fail_cleanly() {
         assert_eq!(v.planes[0].data, w.image.as_bytes().unwrap());
     }
 }
+
+/// A demuxed stream's parameters handed to the encoder (decode →
+/// re-encode keeps the source's `CodecParameters`): the container
+/// `extradata` record they carry does not describe the encoder's
+/// whole-stream packets, so `output_params` drop it and a decoder
+/// opened on them reads each packet on its own.
+#[test]
+fn encoder_output_params_drop_the_container_extradata_record() {
+    let ctx = ctx();
+    for animation in [false, true] {
+        let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        params.width = Some(2);
+        params.height = Some(1);
+        params.pixel_format = Some(PixelFormat::Rgb24);
+        params.extradata = if animation {
+            vec![container::EXTRADATA_VERSION, container::EXTRADATA_ANIMATION]
+        } else {
+            vec![
+                container::EXTRADATA_VERSION,
+                container::EXTRADATA_STILL,
+                1,
+                2,
+                3,
+            ]
+        };
+        let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+        assert!(enc.output_params().extradata.is_empty());
+        assert!(!is_animation_stream(enc.output_params()));
+        assert!(extradata_palette(enc.output_params()).is_none());
+        let vf = VideoFrame::from(GifImage::from_rgb8(2, 1, vec![9, 9, 9, 200, 1, 1]).unwrap());
+        enc.send_frame(&CoreFrame::Video(vf)).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        let mut dec = ctx.codecs.first_decoder(enc.output_params()).unwrap();
+        dec.send_packet(&pkt).unwrap();
+        let CoreFrame::Video(v) = dec.receive_frame().unwrap() else {
+            panic!("video");
+        };
+        assert!(v.palette().is_some(), "whole-stream still: Pal8 + palette");
+    }
+}

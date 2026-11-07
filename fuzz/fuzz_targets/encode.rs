@@ -28,9 +28,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
-    compose, encode_file, image::Rgb, parse, parse_first_frame, parse_lenient, playback::Playback,
-    quantize_frames_shared, quantize_rgba_with_options, AnimationBuilder, BoxPriority,
-    DisposalMethod, Dither, GifFile, QuantizeOptions,
+    AnimationBuilder, BoxPriority, DisposalMethod, Dither, GifFile, QuantizeOptions, compose,
+    encode_file, image::Rgb, parse, parse_first_frame, parse_lenient, playback::Playback,
+    quantize_frames_shared, quantize_rgba_with_options,
 };
 
 // Cap downstream work on suspiciously large screens so the harness

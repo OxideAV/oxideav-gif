@@ -118,7 +118,8 @@ packet's `duration` (rescaled to centiseconds) becomes its frame's Delay
 Time, an image that drew from its own packet's Global Color Table gets
 it as a Local Color Table when the tables differ, and a NETSCAPE2.0 loop
 block comes from the stream's `loop_count` option when no packet carries
-one — so `demux(mux(frames)) == frames` for opaque frames of ≤ 256
+one (for the demuxer's own animation packets only when that option is
+set, so a file without a Looping block remuxes without one) — so `demux(mux(frames)) == frames` for opaque frames of ≤ 256
 colours each (`encode_all` semantics), and demux → mux → demux of any
 file reproduces its composited frames, delays, disposal and loop count.
 `From<GifImage> for VideoFrame` (palette, palette-alpha and
@@ -268,7 +269,9 @@ on the frame's own blob record replaces the stream blobs of that kind
 `embed_metadata=false` writes none. Every encoder packet is a complete
 file and carries the extensions; the muxer keeps **one copy** when it
 merges (a later packet's ICC / Exif / XMP extension or Comment that is
-byte-identical to one already written is dropped) and **inserts** a
+byte-identical to one an earlier packet wrote is dropped; the
+demuxer's own animation packets split the file, so a comment the file
+repeats is kept) and **inserts** a
 stream blob whose extension no packet carries ahead of the packets'
 blocks — a single foreign packet is then re-serialised instead of
 written verbatim. `metadata_blobs(&GifFile)`, `blobs_to_gif`,

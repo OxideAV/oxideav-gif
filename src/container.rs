@@ -56,7 +56,9 @@
 //! carry no blob record. The muxer writes them back: a packet from the
 //! `gif` encoder already holds its extensions (one copy survives the
 //! merge — a later packet's ICC / Exif / XMP extension or Comment block
-//! that is byte-identical to one already written is dropped), and a
+//! that is byte-identical to one an earlier packet wrote is dropped;
+//! not for this demuxer's animation packets, which split the file so a
+//! repeated block is the file's own), and a
 //! stream blob whose extension no packet carries is inserted ahead of
 //! the packets' blocks (a single foreign packet is then re-serialised
 //! rather than written verbatim).
@@ -90,7 +92,9 @@
 //! without a duration keeps the delay its own GCE carries), and a
 //! NETSCAPE2.0 *Looping* block is added when none of the packets has
 //! one, from the stream's `loop_count` option (the `gif` encoder's
-//! schema; `Some(0)` = loop forever by default, `-1` writes none). The
+//! schema; `Some(0)` = loop forever by default, `-1` writes none — but
+//! for this demuxer's animation packets only when the option is set, so
+//! a file without a Looping block remuxes without one). The
 //! disposal method of each frame is whatever its packet's GCE says —
 //! the `gif` encoder writes none, so full-canvas opaque frames compose
 //! back exactly ([`crate::encode_all`] semantics).
@@ -355,9 +359,17 @@ pub fn open_muxer(
     }
     // The `gif` encoder's option schema travels on its output params;
     // its `loop_count` decides the NETSCAPE2.0 block of a merged file.
-    let loop_count = parse_options::<EncodeOptions>(&s.params.options)
-        .map(|o| o.loop_count)
-        .unwrap_or(EncodeOptions::default().loop_count);
+    // The demuxer's own animation packets are the file split up: a
+    // file without a Looping block stays without one unless the
+    // option asks for it.
+    let split_packets = is_animation_stream(&s.params);
+    let loop_count = if split_packets && s.params.options.get("loop_count").is_none() {
+        None
+    } else {
+        parse_options::<EncodeOptions>(&s.params.options)
+            .map(|o| o.loop_count)
+            .unwrap_or(EncodeOptions::default().loop_count)
+    };
     // The stream's metadata blobs become the file's extensions when
     // no packet carries them.
     let (meta, blob_comments) = blobs_to_gif(&s.params.blobs);
@@ -367,6 +379,7 @@ pub fn open_muxer(
         blob_app_blocks: crate::api::metadata_blocks(&meta),
         blob_comments,
         text: TextMetadata::default(),
+        split_packets,
         packets: Vec::new(),
         header_written: false,
         trailer_written: false,
@@ -414,6 +427,10 @@ struct GifMuxer {
     blob_comments: Vec<Block>,
     /// What [`Muxer::set_metadata`] stored.
     text: TextMetadata,
+    /// The stream is the demuxer's animation packetisation (every
+    /// block of the file in exactly one packet): blocks the packets
+    /// repeat are the file's own, not per-packet copies to merge.
+    split_packets: bool,
     packets: Vec<Packet>,
     header_written: bool,
     trailer_written: bool,
@@ -518,6 +535,7 @@ impl Muxer for GifMuxer {
                     self.loop_count,
                     self.text.loop_count,
                     &stream_blocks,
+                    !self.split_packets,
                 )?;
                 self.output.write_all(&merged)?;
             }
@@ -570,29 +588,41 @@ impl Muxer for GifMuxer {
     }
 }
 
-/// Make `blocks` carry exactly the *Looping* block `want` asks for (a
-/// NETSCAPE2.0 block with that count ahead of everything, or none):
-/// every NETSCAPE2.0 / ANIMEXTS1.0 loop block is removed first. Returns
-/// `true` when `blocks` changed.
-fn set_loop_block(blocks: &mut Vec<Block>, want: Option<u16>) -> bool {
-    let wanted: Vec<Block> = want
-        .map(|n| {
-            Block::Application(
-                LoopControl {
-                    loop_count: Some(n),
-                    buffer_size: None,
-                }
-                .to_application(),
-            )
+/// The loop count `blocks` declare, read the way
+/// [`GifFile::loop_count`] reads a file: the first NETSCAPE2.0
+/// *Looping* sub-block, else the first ANIMEXTS1.0 one.
+fn blocks_loop_count(blocks: &[Block]) -> Option<u16> {
+    let apps = || {
+        blocks.iter().filter_map(|b| match b {
+            Block::Application(a) => Some(a),
+            _ => None,
         })
-        .into_iter()
-        .collect();
-    let present: Vec<&Block> = blocks.iter().filter(|b| is_loop_block(b)).collect();
-    if present.len() == wanted.len() && present.iter().zip(&wanted).all(|(a, b)| *a == b) {
+    };
+    apps()
+        .find_map(|a| LoopControl::from_application(a).and_then(|l| l.loop_count))
+        .or_else(|| {
+            apps().find_map(|a| AnimextsLoopControl::from_application(a).and_then(|l| l.loop_count))
+        })
+}
+
+/// Make `blocks` declare the loop count `want` (a NETSCAPE2.0
+/// *Looping* block with that count ahead of everything, or none).
+/// Blocks that already declare it are left alone (a *Buffering* hint
+/// or an ANIMEXTS1.0 identifier survives); otherwise every NETSCAPE2.0
+/// / ANIMEXTS1.0 block is replaced. Returns `true` when `blocks`
+/// changed.
+fn set_loop_block(blocks: &mut Vec<Block>, want: Option<u16>) -> bool {
+    if blocks_loop_count(blocks) == want {
         return false;
     }
     blocks.retain(|b| !is_loop_block(b));
-    blocks.splice(0..0, wanted);
+    if let Some(n) = want {
+        let ctl = LoopControl {
+            loop_count: Some(n),
+            buffer_size: None,
+        };
+        blocks.insert(0, Block::Application(ctl.to_application()));
+    }
     true
 }
 
@@ -680,6 +710,7 @@ fn merge_packets(
     loop_count: Option<u16>,
     loop_override: Option<Option<u16>>,
     stream_blocks: &[Block],
+    dedupe_metadata: bool,
 ) -> CoreResult<Vec<u8>> {
     let opts = DecodeOptions::default().unlimited();
     let mut files = Vec::with_capacity(packets.len());
@@ -731,8 +762,16 @@ fn merge_packets(
                     )));
                 }
                 // Every encoder packet is a complete file carrying the
-                // stream's metadata; one copy per merged file.
-                other if is_metadata_block(other) && blocks.iter().any(|b| b == other) => {
+                // stream's metadata; one copy per merged file. Only
+                // earlier packets' blocks count, so a packet's own
+                // repeated Comment survives; the demuxer's packets
+                // split the file (every block in exactly one packet),
+                // so a block they repeat is the file's own and stays.
+                other
+                    if dedupe_metadata
+                        && is_metadata_block(other)
+                        && blocks[..from].iter().any(|b| b == other) =>
+                {
                     continue;
                 }
                 other => blocks.push(other.clone()),

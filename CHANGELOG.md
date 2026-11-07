@@ -13,6 +13,17 @@
   than written (`registry_encode` fuzz finding). The demuxer and the
   encoder / muxer now strip every leading prefix, so a written payload
   reads back unchanged.
+- demux → mux of an animation now keeps the file as it was: the
+  demuxer's own animation packets split the file, so the muxer no
+  longer drops a Comment / metadata extension the file repeats in a
+  later frame, and no longer adds a "loop forever" NETSCAPE2.0 block to
+  a file that had none unless the stream's `loop_count` option is set
+  (`demux` fuzz finding against the new identity check).
+- The registry encoder's `output_params` drop the container `extradata`
+  record their input parameters carried (decode → re-encode keeps the
+  source's parameters): its packets are whole streams, and a decoder /
+  muxer opened on the stale animation marker treated them as the
+  demuxer's split animation.
 
 ### Added
 

@@ -52,11 +52,10 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
-    compose, encode_file,
+    DisposalMethod, Version, compose, encode_file,
     image::{Block, GifFile, GraphicControl, PlainText, Rgb},
     parse, parse_first_frame, parse_lenient,
     playback::Playback,
-    DisposalMethod, Version,
 };
 
 // Cap downstream work on suspiciously large screens so the harness

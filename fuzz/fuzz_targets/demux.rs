@@ -16,6 +16,10 @@
 //! (which lack the file's leading extensions) are muxed under the
 //! stream's blobs so the muxer's insertion path runs.
 //!
+//! Round 483: the packets are muxed back under
+//! `set_metadata(demux.metadata())` and must read back with the same
+//! pairs (and one more comment when one is added).
+//!
 //! Contract: every call returns to its caller. A `panic!`, slice OOB,
 //! integer overflow in debug, or OOM abort is a finding. `Err` on any
 //! input is fine. The demuxer must never allocate the canvas eagerly,
@@ -23,13 +27,39 @@
 //! a small pixel budget through `DecoderLimits` so a legal-but-huge
 //! screen is refused instead of allocated.
 
-use std::io::Cursor;
+use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_core::{DecoderLimits, Error, Frame as CoreFrame, PixelFormat, RuntimeContext};
 use oxideav_gif::container;
 
 const MAX_PIXELS: u64 = 1 << 20; // 1 Mpx canvas budget per frame
+
+/// A muxer sink the harness can read back after the muxer is done.
+#[derive(Clone, Default)]
+struct SharedBuf(Arc<Mutex<Cursor<Vec<u8>>>>);
+
+impl SharedBuf {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().get_ref().clone()
+    }
+}
+
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for SharedBuf {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0.lock().unwrap().seek(pos)
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     let mut ctx = RuntimeContext::new();
@@ -151,6 +181,54 @@ fuzz_target!(|data: &[u8]| {
         }
         let _ = mux.write_trailer();
     }
+    // Round 483: container string metadata both ways. The demuxed
+    // packets muxed back under `set_metadata(demux.metadata())` read
+    // back with the same pairs; one fresh comment adds exactly one.
+    let text = demux.metadata().to_vec();
+    let fresh = "fuzz-added comment".to_string();
+    for extra in [false, true] {
+        let mut pairs = text.clone();
+        if extra {
+            pairs.push(("comment".into(), fresh.clone()));
+        }
+        let buf = SharedBuf::default();
+        let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(buf.clone());
+        let Ok(mut mux) = container::open_muxer(sink, std::slice::from_ref(&stream)) else {
+            break;
+        };
+        mux.set_metadata(&pairs)
+            .expect("the demuxer's own pairs are accepted");
+        let _ = mux.write_header();
+        let mut ok = true;
+        for p in &packets {
+            ok &= mux.write_packet(p).is_ok();
+        }
+        if !ok || mux.write_trailer().is_err() {
+            break;
+        }
+        let out = buf.bytes();
+        let reader: Box<dyn oxideav_core::ReadSeek> = Box::new(Cursor::new(out));
+        let back =
+            container::open_demuxer(reader, &ctx.codecs).expect("a file the muxer wrote demuxes");
+        let got = back.metadata();
+        let count = |m: &[(String, String)], v: Option<&str>| {
+            m.iter()
+                .filter(|(k, x)| k == "comment" && v.is_none_or(|v| x == v))
+                .count()
+        };
+        let lc = |m: &[(String, String)]| {
+            m.iter()
+                .find(|(k, _)| k == "loop_count")
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(lc(got), lc(&text), "loop_count survives");
+        let added = usize::from(extra && count(&text, Some(&fresh)) == 0);
+        assert_eq!(count(got, None), count(&text, None) + added, "comments");
+        if !extra {
+            assert_eq!(got, text.as_slice(), "identity remux");
+        }
+    }
+
     if packets.len() > 1 {
         let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(Cursor::new(Vec::new()));
         if let Ok(mut mux) = container::open_muxer(sink, std::slice::from_ref(&stream)) {

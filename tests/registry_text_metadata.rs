@@ -349,3 +349,109 @@ fn demux_remux_with_both_channels_is_identity() {
         }
     }
 }
+
+/// A two-frame file built by hand: an ANIMEXTS1.0 Looping block and the
+/// same comment twice (once per frame).
+fn hand_animation() -> Vec<u8> {
+    use oxideav_gif::app_ext::AnimextsLoopControl;
+    use oxideav_gif::{Block, GifFile, GifFrameData, Rgb, Version};
+    let image = |i: u8| {
+        Block::Image(GifFrameData {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 1,
+            local_palette: None,
+            palette_sorted: false,
+            interlaced: false,
+            indices: vec![i, 1 - i],
+            graphic_control: None,
+        })
+    };
+    let file = GifFile {
+        version: Version::Gif89a,
+        screen_width: 2,
+        screen_height: 1,
+        color_resolution: 1,
+        global_palette_sorted: false,
+        background_index: 0,
+        pixel_aspect_ratio: 0,
+        global_palette: Some(vec![Rgb { r: 0, g: 0, b: 0 }, Rgb { r: 255, g: 9, b: 9 }]),
+        blocks: vec![
+            Block::Application(
+                AnimextsLoopControl {
+                    loop_count: Some(9),
+                }
+                .to_application(),
+            ),
+            Block::Comment(b"again".to_vec()),
+            image(0),
+            Block::Comment(b"again".to_vec()),
+            image(1),
+        ],
+    };
+    oxideav_gif::encode_file(&file).unwrap()
+}
+
+/// Demuxed packets muxed back under `demux.metadata()`: a comment the
+/// file repeats keeps both copies, and an ANIMEXTS1.0 block that
+/// already says the requested loop count is not replaced.
+#[test]
+fn remux_keeps_repeated_comments_and_a_matching_loop_block() {
+    let ctx = ctx();
+    let source = hand_animation();
+    let mut demux = open(&ctx, &source);
+    let meta = demux.metadata().to_vec();
+    assert_eq!(
+        meta,
+        pairs(&[
+            ("loop_count", "9"),
+            ("comment", "again"),
+            ("comment", "again")
+        ])
+    );
+    let stream = demux.streams()[0].clone();
+    let mut pkts = Vec::new();
+    while let Ok(p) = demux.next_packet() {
+        pkts.push(p);
+    }
+    assert_eq!(pkts.len(), 2);
+    let out = mux_with(&stream, &pkts, &meta);
+    assert_eq!(open(&ctx, &out).metadata(), meta.as_slice());
+    let file = parse(&out).unwrap();
+    assert!(
+        file.application_extensions()
+            .any(|a| oxideav_gif::app_ext::AnimextsLoopControl::from_application(a).is_some()),
+        "producer's identifier kept"
+    );
+    assert_eq!(file.comments().count(), 2);
+}
+
+/// Fuzz finding (`demux`, r483): an animation without a Looping block
+/// came back from demux → mux as "loop forever" — the encoder-schema
+/// default applied to the demuxer's own packets. It now stays without.
+#[test]
+fn remux_of_an_animation_without_a_looping_block_adds_none() {
+    let ctx = ctx();
+    let mut file = parse(&hand_animation()).unwrap();
+    file.blocks.remove(0); // the ANIMEXTS1.0 block
+    let source = oxideav_gif::encode_file(&file).unwrap();
+    let mut demux = open(&ctx, &source);
+    let meta = demux.metadata().to_vec();
+    assert!(values(&meta, "loop_count").is_empty());
+    let stream = demux.streams()[0].clone();
+    let mut pkts = Vec::new();
+    while let Ok(p) = demux.next_packet() {
+        pkts.push(p);
+    }
+    for m in [Vec::new(), meta.clone()] {
+        let out = mux_with(&stream, &pkts, &m);
+        assert_eq!(parse(&out).unwrap().loop_count(), None);
+        assert_eq!(open(&ctx, &out).metadata(), meta.as_slice());
+    }
+    // The option still decides when it is set.
+    let mut stream = stream;
+    stream.params.options.insert("loop_count", "0");
+    let out = mux_with(&stream, &pkts, &[]);
+    assert_eq!(parse(&out).unwrap().loop_count(), Some(0));
+}

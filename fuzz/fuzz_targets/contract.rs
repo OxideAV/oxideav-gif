@@ -20,8 +20,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
-    decode_all_with, decode_rgb8, decode_rgba8, decode_with, encode, info, probe, DecodeOptions,
-    EncodeOptions, PixelFormat,
+    DecodeOptions, EncodeOptions, PixelFormat, decode_all_with, decode_rgb8, decode_rgba8,
+    decode_with, encode, info, probe,
 };
 
 // 1 MiB of decoded data per call: enough for every realistic fixture,

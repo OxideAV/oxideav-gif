@@ -25,7 +25,7 @@ use oxideav_core::{
 };
 use oxideav_gif::container;
 use oxideav_gif::{
-    blobs_to_gif, comment_blob, effective_blobs, ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR,
+    ACCEPTED_PIXEL_FORMATS, CODEC_ID_STR, blobs_to_gif, comment_blob, effective_blobs,
 };
 
 /// Layouts the encoder must refuse by type (never a panic).

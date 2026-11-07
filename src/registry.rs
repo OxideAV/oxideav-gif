@@ -906,10 +906,16 @@ pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
 /// packets decode to: `Pal8` (every packet the encoder writes is a
 /// single full-canvas image with a ≤ 256-entry table, which
 /// [`crate::decode`] returns indexed — with the palette-alpha record
-/// when it has a Transparency Index).
+/// when it has a Transparency Index). Every packet is a whole
+/// `<GIF Data Stream>`, so a [`crate::container`] `extradata` record
+/// the input parameters carried (a demuxed stream's still palette or
+/// animation-packet marker) does not describe them and is cleared —
+/// otherwise a decoder or muxer opened on these parameters would treat
+/// the packets as the demuxer's split animation.
 fn coded_params(params: &CodecParameters) -> CodecParameters {
     let mut out = params.clone();
     out.pixel_format = Some(PixelFormat::Pal8);
+    out.extradata.clear();
     out
 }
 
