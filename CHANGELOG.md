@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Licence metadata corrected to MIT (the crate's licence): `Cargo.toml` `license` field and README now agree with `LICENSE`.
 - edition 2024, MSRV 1.95
 
 ### Fixed

@@ -1015,4 +1015,4 @@ For the LZW algorithm itself, the canonical reference is T. Welch,
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+MIT. See `LICENSE`.
