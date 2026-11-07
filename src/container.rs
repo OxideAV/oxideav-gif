@@ -36,6 +36,14 @@
 //! [`Demuxer::metadata`] carries `("loop_count", n)` from the
 //! NETSCAPE2.0 / ANIMEXTS1.0 *Looping* sub-block and one
 //! `("comment", text)` per §24 Comment Extension (lossy UTF-8).
+//! [`Muxer::set_metadata`] takes the same two keys back
+//! ([`METADATA_KEYS`]): each `comment` pair becomes one Comment
+//! Extension ahead of the first image (§24.e.ii; a comment some packet
+//! or `gif-comment` blob already carries with the same text is written
+//! once, the blob lending its raw bytes), and `loop_count` replaces the
+//! Looping block (`-1` = none). GIF has no field for any other key —
+//! `title`, `artist`, `copyright`, … are dropped, never folded into a
+//! comment, and [`Muxer::carries_metadata_key`] answers `false`.
 //!
 //! # Metadata blobs (core 0.1.40)
 //!
@@ -352,29 +360,102 @@ pub fn open_muxer(
         .unwrap_or(EncodeOptions::default().loop_count);
     // The stream's metadata blobs become the file's extensions when
     // no packet carries them.
-    let (meta, comments) = blobs_to_gif(&s.params.blobs);
-    let mut stream_blocks = crate::api::metadata_blocks(&meta);
-    stream_blocks.extend(comments);
+    let (meta, blob_comments) = blobs_to_gif(&s.params.blobs);
     Ok(Box::new(GifMuxer {
         output,
         loop_count,
-        stream_blocks,
+        blob_app_blocks: crate::api::metadata_blocks(&meta),
+        blob_comments,
+        text: TextMetadata::default(),
         packets: Vec::new(),
         header_written: false,
         trailer_written: false,
     }))
 }
 
+/// The container string metadata [`Muxer::set_metadata`] stored: the
+/// keys GIF has a field for.
+#[derive(Default)]
+struct TextMetadata {
+    /// One §24 Comment Extension per `comment` pair, in order.
+    comments: Vec<String>,
+    /// The `loop_count` pair: `Some(Some(n))` writes a NETSCAPE2.0
+    /// *Looping* block with `n`, `Some(None)` (`-1`) writes none,
+    /// `None` leaves the packets' block / the `loop_count` option alone.
+    loop_count: Option<Option<u16>>,
+}
+
+/// The container string-metadata keys the GIF muxer stores
+/// ([`Muxer::carries_metadata_key`]).
+pub const METADATA_KEYS: &[&str] = &["comment", "loop_count"];
+
+/// Parse a `loop_count` metadata value: the NETSCAPE2.0 *Looping*
+/// field as [`Demuxer::metadata`] reports it (`0` = loop forever,
+/// `1..=65535`), or `-1` for "write no Looping block".
+fn parse_loop_count_value(v: &str) -> CoreResult<Option<u16>> {
+    let v = v.trim();
+    if v == "-1" {
+        return Ok(None);
+    }
+    v.parse::<u16>().map(Some).map_err(|_| {
+        CoreError::invalid(format!(
+            "GIF muxer: loop_count metadata must be -1 or 0..=65535 (got {v:?})"
+        ))
+    })
+}
+
 struct GifMuxer {
     output: Box<dyn WriteSeek>,
+    /// The `loop_count` option of the stream's encoder schema.
     loop_count: Option<u16>,
-    /// The stream-level metadata blobs as GIF blocks (metadata
-    /// Application Extensions, then Comments), inserted when no packet
-    /// carries the extension.
-    stream_blocks: Vec<Block>,
+    /// The stream's ICC / Exif / XMP blobs as Application Extensions.
+    blob_app_blocks: Vec<Block>,
+    /// The stream's `gif-comment` blobs as §24 Comment blocks.
+    blob_comments: Vec<Block>,
+    /// What [`Muxer::set_metadata`] stored.
+    text: TextMetadata,
     packets: Vec<Packet>,
     header_written: bool,
     trailer_written: bool,
+}
+
+impl GifMuxer {
+    /// The stream-level blocks to insert when no packet carries them:
+    /// the metadata Application Extensions, then one Comment per
+    /// `comment` pair (a `gif-comment` blob whose lossy-UTF-8 text is
+    /// that pair's value lends its raw bytes, so a non-UTF-8 comment
+    /// survives a remux that hands both channels over), then the
+    /// `gif-comment` blobs no pair claimed.
+    fn stream_blocks(&self) -> Vec<Block> {
+        let mut out = self.blob_app_blocks.clone();
+        let mut used = vec![false; self.blob_comments.len()];
+        for text in &self.text.comments {
+            let claimed = self.blob_comments.iter().enumerate().find(|(i, b)| {
+                !used[*i] && matches!(b, Block::Comment(c) if comment_text_eq(c, text))
+            });
+            match claimed {
+                Some((i, b)) => {
+                    used[i] = true;
+                    out.push(b.clone());
+                }
+                None => out.push(Block::Comment(text.as_bytes().to_vec())),
+            }
+        }
+        out.extend(
+            self.blob_comments
+                .iter()
+                .zip(&used)
+                .filter(|(_, u)| !**u)
+                .map(|(b, _)| b.clone()),
+        );
+        out
+    }
+}
+
+/// `true` when the raw comment bytes `raw` read back as `text` — the
+/// lossy-UTF-8 string [`Demuxer::metadata`] reports for them.
+fn comment_text_eq(raw: &[u8], text: &str) -> bool {
+    String::from_utf8_lossy(raw) == text
 }
 
 impl Muxer for GifMuxer {
@@ -404,28 +485,40 @@ impl Muxer for GifMuxer {
         if self.trailer_written {
             return Ok(());
         }
+        let stream_blocks = self.stream_blocks();
         match self.packets.len() {
             0 => return Err(CoreError::invalid("GIF muxer: no packets written")),
             // One packet is already a complete file — written verbatim
-            // unless a stream blob has to be added to it.
+            // unless a stream blob / metadata pair has to change it.
             1 => {
                 let opts = DecodeOptions::default().unlimited();
-                let file = crate::parse_with(&self.packets[0].data, &opts).map_err(|e| {
+                let mut file = crate::parse_with(&self.packets[0].data, &opts).map_err(|e| {
                     CoreError::invalid(format!("GIF muxer: packet 0 does not parse: {e}"))
                 })?;
-                let missing = missing_stream_blocks(&self.stream_blocks, &file.blocks);
-                if missing.is_empty() {
-                    self.output.write_all(&self.packets[0].data)?;
-                } else {
-                    let mut file = file;
+                let mut changed = false;
+                if let Some(want) = self.text.loop_count {
+                    changed |= set_loop_block(&mut file.blocks, want);
+                }
+                let missing = missing_stream_blocks(&stream_blocks, &file.blocks);
+                if !missing.is_empty() {
                     file.blocks.splice(0..0, missing);
+                    changed = true;
+                }
+                if changed {
                     file.upgrade_version_if_needed();
                     let bytes = encode_file_with(&file, &EncodeOptions::default())?;
                     self.output.write_all(&bytes)?;
+                } else {
+                    self.output.write_all(&self.packets[0].data)?;
                 }
             }
             _ => {
-                let merged = merge_packets(&self.packets, self.loop_count, &self.stream_blocks)?;
+                let merged = merge_packets(
+                    &self.packets,
+                    self.loop_count,
+                    self.text.loop_count,
+                    &stream_blocks,
+                )?;
                 self.output.write_all(&merged)?;
             }
         }
@@ -433,6 +526,74 @@ impl Muxer for GifMuxer {
         self.trailer_written = true;
         Ok(())
     }
+
+    /// Stores the two keys GIF has a field for ([`METADATA_KEYS`]):
+    ///
+    /// * `comment` — one §24 Comment Extension per pair, in order, ahead
+    ///   of the first image (§24.e.ii). The value's UTF-8 bytes are the
+    ///   Comment Data (§24.e.i recommends 7-bit ASCII; other text is
+    ///   written as UTF-8, never transcoded). An empty value writes
+    ///   nothing. A comment a packet or a `gif-comment` blob already
+    ///   carries (same text) is written once.
+    /// * `loop_count` — the NETSCAPE2.0 *Looping* field as the demuxer
+    ///   reports it (`0` = loop forever, `n` = `n` repeats); `-1`
+    ///   writes no Looping block. It replaces the packets' own block
+    ///   and the stream's `loop_count` option. Any other value is
+    ///   [`CoreError::InvalidData`].
+    ///
+    /// GIF has no field for any other key (`title`, `artist`,
+    /// `copyright`, …): those pairs are dropped without an error and
+    /// [`carries_metadata_key`](Muxer::carries_metadata_key) answers
+    /// `false` for them — they are not folded into a comment, so a
+    /// read-back never invents a `comment` the caller did not set.
+    /// Refused with [`CoreError::InvalidData`] after the trailer.
+    fn set_metadata(&mut self, metadata: &[(String, String)]) -> CoreResult<()> {
+        if self.trailer_written {
+            return Err(CoreError::invalid(
+                "GIF muxer: set_metadata after write_trailer",
+            ));
+        }
+        let mut text = TextMetadata::default();
+        for (k, v) in metadata {
+            match k.as_str() {
+                "comment" if !v.is_empty() => text.comments.push(v.clone()),
+                "loop_count" => text.loop_count = Some(parse_loop_count_value(v)?),
+                _ => {}
+            }
+        }
+        self.text = text;
+        Ok(())
+    }
+
+    fn carries_metadata_key(&self, key: &str) -> bool {
+        METADATA_KEYS.contains(&key)
+    }
+}
+
+/// Make `blocks` carry exactly the *Looping* block `want` asks for (a
+/// NETSCAPE2.0 block with that count ahead of everything, or none):
+/// every NETSCAPE2.0 / ANIMEXTS1.0 loop block is removed first. Returns
+/// `true` when `blocks` changed.
+fn set_loop_block(blocks: &mut Vec<Block>, want: Option<u16>) -> bool {
+    let wanted: Vec<Block> = want
+        .map(|n| {
+            Block::Application(
+                LoopControl {
+                    loop_count: Some(n),
+                    buffer_size: None,
+                }
+                .to_application(),
+            )
+        })
+        .into_iter()
+        .collect();
+    let present: Vec<&Block> = blocks.iter().filter(|b| is_loop_block(b)).collect();
+    if present.len() == wanted.len() && present.iter().zip(&wanted).all(|(a, b)| *a == b) {
+        return false;
+    }
+    blocks.retain(|b| !is_loop_block(b));
+    blocks.splice(0..0, wanted);
+    true
 }
 
 /// `duration` in `tb` as a §23.c.vii Delay Time (centiseconds, rounded
@@ -495,7 +656,9 @@ fn carries(present: &[Block], block: &Block) -> bool {
         (Block::Application(a), Block::Application(b)) => {
             a.identifier == b.identifier && a.auth_code == b.auth_code
         }
-        (Block::Comment(a), Block::Comment(b)) => a == b,
+        (Block::Comment(a), Block::Comment(b)) => {
+            a == b || String::from_utf8_lossy(a) == String::from_utf8_lossy(b)
+        }
         _ => false,
     })
 }
@@ -515,6 +678,7 @@ fn missing_stream_blocks(stream_blocks: &[Block], present: &[Block]) -> Vec<Bloc
 fn merge_packets(
     packets: &[Packet],
     loop_count: Option<u16>,
+    loop_override: Option<Option<u16>>,
     stream_blocks: &[Block],
 ) -> CoreResult<Vec<u8>> {
     let opts = DecodeOptions::default().unlimited();
@@ -585,7 +749,9 @@ fn merge_packets(
             }
         }
     }
-    if !has_loop && let Some(n) = loop_count {
+    if let Some(want) = loop_override {
+        set_loop_block(&mut blocks, want);
+    } else if !has_loop && let Some(n) = loop_count {
         let ctl = LoopControl {
             loop_count: Some(n),
             buffer_size: None,

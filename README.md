@@ -128,6 +128,21 @@ colour-signal side-channels), `GifImage::from_video_frame(&VideoFrame,
 bridge the two worlds. One implementation: the registry path calls the
 standalone functions.
 
+**Container string metadata, both ways.** `Muxer::set_metadata` (core
+0.1.41) stores exactly the keys `Demuxer::metadata()` reports
+(`container::METADATA_KEYS`; `carries_metadata_key` answers the same):
+
+| Key | Written as | Read back as |
+|---|---|---|
+| `comment` (repeatable) | one §24 Comment Extension per pair, in order, ahead of the first image (§24.e.ii); the value's UTF-8 bytes (§24.e.i recommends 7-bit ASCII; nothing is transcoded); an empty value writes nothing; a comment a packet or `gif-comment` blob already carries with the same text is written once (the blob lends its raw bytes, so a non-UTF-8 comment survives a remux that hands over both channels) | one `("comment", text)` per extension, lossy UTF-8 |
+| `loop_count` | the NETSCAPE2.0 *Looping* block (`0` = forever, `n` = `n` repeats), replacing the packets' own block and the stream's `loop_count` option; `-1` writes none; anything else is `InvalidData` | `("loop_count", n)` |
+| anything else (`title`, `artist`, `copyright`, …) | dropped without an error — not folded into a comment, so a read-back never invents a `comment` | — |
+
+A later call replaces the earlier set, `&[]` clears it, a call after
+the trailer is `InvalidData`. With no carried key set a single packet
+is still written verbatim. `demux.metadata()` + the stream blobs muxed
+back reproduce the same pairs and blobs (`tests/registry_text_metadata.rs`).
+
 ## Supported layouts
 
 Decode:

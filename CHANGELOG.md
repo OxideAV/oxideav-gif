@@ -8,6 +8,18 @@
 
 ### Added
 
+- **`Muxer::set_metadata` / `carries_metadata_key` on the GIF muxer**
+  (container string metadata, round 481 follow-up): `comment` pairs
+  become §24 Comment Extensions ahead of the first image (one per pair,
+  in order; a comment a packet or `gif-comment` blob already carries
+  with the same text is written once, the blob's raw bytes kept), and
+  `loop_count` replaces the NETSCAPE2.0 *Looping* block (`-1` = none,
+  out-of-range = `InvalidData`). Every other key is dropped and
+  reported as not carried — GIF has no field for it. The keys are
+  `container::METADATA_KEYS`, the same pairs `Demuxer::metadata`
+  reports, so `mux.set_metadata(demux.metadata())` round-trips (still
+  and animation; demuxed, re-encoded and metadata-free packets).
+
 - **Palette-alpha record on the registry path** (core 0.1.40,
   image-crate contract r473/r476 rulings): a still GIF with a
   §23.c.viii Transparency Index — or a sub-rectangle image that gets
