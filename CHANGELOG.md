@@ -6,6 +6,14 @@
 
 - edition 2024, MSRV 1.95
 
+### Fixed
+
+- An `exif` blob framed with the `Exif\0\0` prefix more than once lost
+  one prefix on write and a second on read, so it read back shorter
+  than written (`registry_encode` fuzz finding). The demuxer and the
+  encoder / muxer now strip every leading prefix, so a written payload
+  reads back unchanged.
+
 ### Added
 
 - **`Muxer::set_metadata` / `carries_metadata_key` on the GIF muxer**

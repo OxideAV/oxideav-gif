@@ -305,6 +305,43 @@ fn encoder_strips_an_app1_prefixed_exif_blob() {
     assert_eq!(parse(&packets[0].data).unwrap().exif(), Some(EXIF_TIFF));
 }
 
+/// Fuzz finding (`registry_encode`, r483): an Exif blob framed twice
+/// (`Exif\0\0Exif\0\0…`) lost one prefix on write and another on read,
+/// so the payload read back shorter than the one written. Both sides
+/// now strip to a fixed point.
+#[test]
+fn doubly_prefixed_exif_blob_reads_back_as_written() {
+    let ctx = ctx();
+    let mut twice = b"Exif\0\0Exif\0\0".to_vec();
+    twice.extend_from_slice(b"J\xFBExi");
+    let params = params_with_blobs(2, 1, vec![MetadataBlob::new(BlobKind::EXIF, twice)]);
+    let (_, packets) = encoder_packets(&ctx, &params, vec![rgb_frame(2, 1, 1)]);
+    let written = parse(&packets[0].data).unwrap().exif().unwrap().to_vec();
+    assert_eq!(written, b"J\xFBExi", "no prefix reaches the wire");
+    let demux = open(&ctx, &packets[0].data);
+    assert_eq!(
+        demux.streams()[0]
+            .params
+            .blob(&BlobKind::EXIF)
+            .unwrap()
+            .data,
+        written
+    );
+    // A foreign file whose extension carries the prefix twice reads
+    // back from the byte-order mark too.
+    let mut prefixed = b"Exif\0\0".to_vec();
+    prefixed.extend_from_slice(&exif_bytes_with_prefix());
+    let demux = open(&ctx, &still_with_metadata(prefixed));
+    assert_eq!(
+        demux.streams()[0]
+            .params
+            .blob(&BlobKind::EXIF)
+            .unwrap()
+            .data,
+        EXIF_TIFF
+    );
+}
+
 #[test]
 fn frame_blobs_override_stream_blobs_of_the_same_kind() {
     let ctx = ctx();

@@ -573,6 +573,18 @@ pub fn comment_blob(comment: impl Into<Vec<u8>>) -> MetadataBlob {
 /// prefix is removed on the way in and never written on the way out.
 const EXIF_APP1_PREFIX: &[u8] = b"Exif\0\0";
 
+/// `data` without every leading [`EXIF_APP1_PREFIX`]: a payload framed
+/// twice (or more) would otherwise keep a prefix after one strip, get
+/// written with it, and lose another layer on the next read — so read
+/// and write both strip to a fixed point and a written payload reads
+/// back unchanged.
+fn strip_exif_prefixes(mut data: &[u8]) -> &[u8] {
+    while let Some(rest) = data.strip_prefix(EXIF_APP1_PREFIX) {
+        data = rest;
+    }
+    data
+}
+
 /// The metadata blobs a parsed GIF carries, in source order of its
 /// §26 Application Extensions: [`BlobKind::ICC`] from `ICCRGBG1012`
 /// (the profile bytes verbatim), [`BlobKind::EXIF`] from `Exif` (the
@@ -609,8 +621,10 @@ fn application_blob(app: &Application) -> Option<MetadataBlob> {
     } else if &app.identifier == XMP_IDENTIFIER && &app.auth_code == XMP_AUTH_CODE {
         Some(MetadataBlob::new(BlobKind::XMP, app.data.clone()))
     } else if &app.identifier == EXIF_IDENTIFIER {
-        let payload = app.data.strip_prefix(EXIF_APP1_PREFIX).unwrap_or(&app.data);
-        Some(MetadataBlob::new(BlobKind::EXIF, payload.to_vec()))
+        Some(MetadataBlob::new(
+            BlobKind::EXIF,
+            strip_exif_prefixes(&app.data).to_vec(),
+        ))
     } else {
         None
     }
@@ -634,12 +648,8 @@ pub fn blobs_to_gif(blobs: &[MetadataBlob]) -> (Metadata, Vec<Block>) {
         if b.kind == BlobKind::ICC {
             meta.icc.get_or_insert_with(|| b.data.clone());
         } else if b.kind == BlobKind::EXIF {
-            meta.exif.get_or_insert_with(|| {
-                b.data
-                    .strip_prefix(EXIF_APP1_PREFIX)
-                    .unwrap_or(&b.data)
-                    .to_vec()
-            });
+            meta.exif
+                .get_or_insert_with(|| strip_exif_prefixes(&b.data).to_vec());
         } else if b.kind == BlobKind::XMP {
             meta.xmp.get_or_insert_with(|| b.data.clone());
         } else if b.kind == COMMENT_BLOB_KIND {
