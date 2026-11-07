@@ -5,7 +5,7 @@
 //! short loops but burns `screen_width * screen_height * 4 * N` bytes
 //! up front for an N-frame animation. The iterators here lazily walk
 //! the same §23 disposal-method state machine, yielding one
-//! [`ComposedFrame`] per call and freeing the previous canvas as the
+//! [`ComposedFrame`](crate::ComposedFrame) per call and freeing the previous canvas as the
 //! consumer drops it.
 //!
 //! Two playback shapes are exposed:
@@ -51,7 +51,7 @@ impl<'a> Playback<'a> {
 
     /// Yield each image-bearing block in source order, exactly once,
     /// composited per the §23 disposal-method state machine. Plain
-    /// Text Extensions are skipped (see [`crate::compose`] for the
+    /// Text Extensions are skipped (see [`crate::compose()`] for the
     /// rationale).
     ///
     /// The iterator yields `Some(Err(_))` on the first malformed
@@ -68,7 +68,7 @@ impl<'a> Playback<'a> {
 }
 
 /// One frame yielded by [`FrameIter`] / [`LoopingFrameIter`]. Same
-/// shape as [`ComposedFrame`] but with the delay surfaced as a
+/// shape as [`ComposedFrame`](crate::ComposedFrame) but with the delay surfaced as a
 /// [`Duration`] for ergonomic `thread::sleep` calls. The 0.01 s base
 /// unit is exact in `Duration` (10 ms = 10_000_000 ns).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,7 +491,7 @@ fn palette_index_to_rgba(palette: &[Rgb], idx: u8) -> [u8; 4] {
 }
 
 /// Build a fresh transparent-black canvas of the given size. Mirrors
-/// the private `RgbaCanvas::new` in [`crate::compose`] without
+/// the private `RgbaCanvas::new` in [`crate::compose()`] without
 /// widening the public API surface.
 fn blank_canvas(width: u16, height: u16) -> RgbaCanvas {
     let n = (width as usize)

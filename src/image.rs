@@ -1408,7 +1408,7 @@ impl GifFile {
     ///
     /// # What is preserved
     ///
-    /// The composed output — [`crate::compose`] and
+    /// The composed output — [`crate::compose()`] and
     /// [`crate::playback::Playback`] yield byte-identical RGBA
     /// canvases before and after
     /// the call. Equivalence is judged at the composed-RGBA level (the
@@ -1473,7 +1473,7 @@ impl GifFile {
     /// [`crate::quantize::ALPHA_OPAQUE_THRESHOLD`]) a §23 Graphic Control
     /// Extension is attached carrying the §23.c.viii Transparency Index
     /// the quantiser reserved, so the resulting stream renders the
-    /// transparency through [`crate::compose`] / [`crate::encode_file`]
+    /// transparency through [`crate::compose()`] / [`crate::encode_file`]
     /// unchanged. A fully-opaque frame attaches no GCE and stays a valid
     /// GIF87a-compatible payload (the returned version is 87a unless a
     /// GCE was needed for transparency).
@@ -1850,7 +1850,7 @@ impl GifFile {
     ///
     /// [`Self::background_color_rgba`] is the alpha-extended form
     /// used by the §23 disposal-method canvas clear in
-    /// [`crate::compose`] / [`crate::playback`].
+    /// [`crate::compose()`] / [`crate::playback`].
     pub fn background_color(&self) -> Option<Rgb> {
         let palette = self.global_palette.as_ref()?;
         palette.get(self.background_index as usize).copied()
@@ -1950,7 +1950,7 @@ impl GifFile {
     /// §25 Plain Text blocks, which §12 also classifies as
     /// graphic-rendering ("the Image Descriptor and the Plain Text
     /// Extension"). It is the number of blocks that actually paint onto
-    /// the §18 Logical Screen during [`crate::compose`].
+    /// the §18 Logical Screen during [`crate::compose()`].
     pub fn graphic_rendering_block_count(&self) -> usize {
         self.blocks
             .iter()
