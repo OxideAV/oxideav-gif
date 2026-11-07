@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/OxideAV/oxideav-gif/compare/v0.0.14...v0.0.15) - 2026-11-07
+
+### Other
+
+- Licence metadata: MIT
+- rustdoc intra-doc links resolve (ComposedFrame, compose fn/module ambiguity)
+- demux → mux keeps the file as it was; encoder output params drop the container extradata
+- exif blob prefix stripped to a fixed point on read and write (fuzz finding)
+- Muxer::set_metadata carries comment + loop_count; other keys reported as not carried
+- edition 2024, MSRV 1.95
+- README names the palette-alpha side-channel on the bridge and the XMP framing limit
+- fuzz the r477 registry paths (registry_encode harness, demux blob/alpha checks)
+- quality option on the registry encoder = colour-table budget
+- registry encoder declares 21 input layouts, coded output label
+- metadata blobs through the registry (core 0.1.40)
+- palette-alpha record on the registry path (core 0.1.40)
+- untrack fuzz/target build artifacts and ignore them
+
 ### Changed
 
 - Licence metadata corrected to MIT (the crate's licence): `Cargo.toml` `license` field and README now agree with `LICENSE`.
