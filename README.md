@@ -219,7 +219,7 @@ Image Descriptor **before** any raster is allocated.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `lzw_strategy: LzwStrategy` | `DeferredClear` | Appendix F table-full strategy (`ClearOnFull` re-adapts after 4096 entries). |
+| `lzw_strategy: LzwStrategy` | `Adaptive` | Appendix F table-full strategy: `Adaptive` sends a Clear code when the full table stops paying, `ClearOnFull` the moment it fills, `DeferredClear` never, `Smallest` tries all three. |
 | `interlace: bool` | `false` | §20.c.vii Interlace Flag for encoder-built images. |
 | `quantize: QuantizeOptions` | 256 colours, variance-split palette refined by k-means in CIE L\*a\*b\*, blue-noise ordered dither | Reduction of `Rgb24` / `Rgba` input (`with_max_colors`, `with_dither` shortcuts). `QuantizeOptions::median_cut()` is the plain median-cut configuration. |
 | `loop_count: Option<u16>` | `Some(0)` (forever) | NETSCAPE2.0 loop count for `encode_all`; `None` plays once. |
@@ -482,22 +482,16 @@ Implements every block type defined by the CompuServe specifications:
   (≤ 4094 entries) rather than memsetting the whole table. Output
   is byte-identical to the free function; reuse cuts the
   100×(64×64) animation-encoder microbench by ~44 %
-  (see `BENCHMARKS.md`). Two table-full strategies are offered, both
-  permitted by Appendix F's cover sheet: `lzw::encode` follows the
-  *deferred clear* rule (freeze the 4096-entry dictionary and keep
-  emitting 12-bit codes until end-of-image), while
-  `lzw::encode_with_clear_on_full` emits a Clear code and rebuilds the
-  dictionary the instant it fills, so the table re-adapts to later
-  content instead of coding it against a frozen prefix set. Both decode
-  to identical pixels (`lzw::decode` honours the §F.1 mid-stream Clear) and
-  emit byte-identical output for rasters that never fill the table; on a
-  large regime-changing raster the re-adapting path is ~3.7 % smaller
-  in the in-tree property test (166 077 → 159 854 B). The top-level
-  encoder exposes the choice: `encode_file_with(&file,
-  &EncodeOptions::default().with_lzw_strategy(..))` drives every §20
-  Image frame's LZW through the selected `LzwStrategy` (`DeferredClear`
-  default / `ClearOnFull`), while the bare `encode_file(&file)` keeps the
-  byte-stable deferred-clear default.
+  (see `BENCHMARKS.md`). Appendix F lets an encoder keep a full
+  4096-entry dictionary for as long as it likes (the cover sheet's
+  *deferred clear*) and send a Clear code at any time (§F.1), so when to
+  rebuild is the encoder's choice — `LzwStrategy`, set with
+  `EncodeOptions::with_lzw_strategy`: `Adaptive` (the default) keeps the
+  full table while it still pays and sends a Clear once the bits per
+  pixel of recent codes exceed what building the table cost on average;
+  `ClearOnFull` rebuilds the instant the table fills; `DeferredClear`
+  never rebuilds (byte-stable, and several times larger on a big
+  picture); `Smallest` compresses under all three and keeps the shortest.
   Both decode to identical pixels and emit byte-identical streams for any
   frame whose dictionary never reaches the 4096-entry ceiling.
 - Four-pass interlace transform (Appendix E)

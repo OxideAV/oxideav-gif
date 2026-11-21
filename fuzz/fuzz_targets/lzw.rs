@@ -168,6 +168,16 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // 6. The clear-on-full encoder variant: same panic-free contract.
-    let _ = lzw::encode_with_clear_on_full(min_code_size, indices);
+    // 6. Every clear policy must round-trip through the decoder.
+    for policy in [
+        lzw::ClearPolicy::Never,
+        lzw::ClearPolicy::OnFull,
+        lzw::ClearPolicy::Monitored,
+    ] {
+        if let Ok(packed) = lzw::encode_with(min_code_size, indices, policy) {
+            let back =
+                lzw::decode(min_code_size, &packed, indices.len()).expect("decode of own encode");
+            assert_eq!(back, indices, "{policy:?} round trip");
+        }
+    }
 });

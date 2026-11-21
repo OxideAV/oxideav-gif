@@ -25,9 +25,66 @@ pub(crate) fn interlace_row_order(height: u16) -> Vec<u16> {
     out
 }
 
+/// Reorder the rows of `raster` (`height` rows of `width` pixels) from
+/// interlaced storage order to top-to-bottom order, in place.
+///
+/// Storage row `s` belongs at row `order[s]`; the move is a permutation
+/// of the rows, carried out cycle by cycle with one row of scratch
+/// space, so de-interlacing needs no second raster.
+pub(crate) fn deinterlace_in_place(raster: &mut [u8], width: usize, height: u16) {
+    let order = interlace_row_order(height);
+    if width == 0 || raster.len() < width * order.len() {
+        return;
+    }
+    let mut placed = vec![false; order.len()];
+    let mut carried = vec![0u8; width];
+    let mut displaced = vec![0u8; width];
+    for start in 0..order.len() {
+        if placed[start] || order[start] as usize == start {
+            placed[start] = true;
+            continue;
+        }
+        // Carry the row stored at `start` to where it belongs, pick up
+        // the row it displaces, and follow the cycle back to `start`.
+        carried.copy_from_slice(&raster[start * width..(start + 1) * width]);
+        let mut from = start;
+        loop {
+            let to = order[from] as usize;
+            let slot = &mut raster[to * width..(to + 1) * width];
+            displaced.copy_from_slice(slot);
+            slot.copy_from_slice(&carried);
+            std::mem::swap(&mut carried, &mut displaced);
+            placed[from] = true;
+            from = to;
+            if from == start {
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_place_matches_the_row_by_row_copy() {
+        for height in [1u16, 2, 3, 4, 5, 7, 8, 9, 16, 17, 33, 100] {
+            for width in [1usize, 3, 8] {
+                let stored: Vec<u8> = (0..width * height as usize)
+                    .map(|i| (i * 31) as u8)
+                    .collect();
+                let mut want = vec![0u8; stored.len()];
+                for (s, &t) in interlace_row_order(height).iter().enumerate() {
+                    want[t as usize * width..(t as usize + 1) * width]
+                        .copy_from_slice(&stored[s * width..(s + 1) * width]);
+                }
+                let mut got = stored.clone();
+                deinterlace_in_place(&mut got, width, height);
+                assert_eq!(got, want, "{width}x{height}");
+            }
+        }
+    }
 
     #[test]
     fn appendix_e_example_20_rows() {

@@ -10,19 +10,20 @@ use crate::lzw;
 /// The Appendix-F table-full strategy the encoder uses when an image's
 /// LZW dictionary fills its 4096-entry ceiling.
 ///
-/// Both strategies are permitted by Appendix F's cover sheet and decode
-/// to identical pixels — [`crate::lzw::decode`] honours a mid-stream
-/// Clear (§F.1) regardless. They emit *byte-identical* compressed output
-/// for any frame whose raster never fills the table; the choice only
-/// affects frames large and varied enough to reach 4096 entries.
+/// Every strategy is permitted by Appendix F (the cover sheet lets an
+/// encoder keep a full table; §F.1 lets it send a Clear at any time) and
+/// decodes to identical pixels — [`crate::lzw::decode`] honours a
+/// mid-stream Clear regardless. They emit *byte-identical* compressed
+/// output for any frame whose raster never fills the table; the choice
+/// only affects frames large and varied enough to reach 4096 entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum LzwStrategy {
     /// Freeze the full dictionary and keep emitting 12-bit codes against
-    /// it until end-of-image (the §F cover-sheet *deferred clear* rule).
-    /// This is the historical default and keeps [`crate::encode_file`]'s output
-    /// byte-stable.
-    #[default]
+    /// it until end-of-image (the §F cover-sheet *deferred clear* rule,
+    /// never followed by a Clear). Output under this strategy is
+    /// byte-stable across releases; on a large picture it can be several
+    /// times larger than the others.
     DeferredClear,
     /// Emit a Clear code and rebuild the dictionary the instant the table
     /// fills, so it re-adapts to later content instead of coding it
@@ -30,6 +31,17 @@ pub enum LzwStrategy {
     /// on a large raster whose later content differs from its early
     /// content.
     ClearOnFull,
+    /// Keep the full dictionary for as long as it still pays and send a
+    /// Clear when it stops: the encoder compares the bits per pixel the
+    /// full table achieves on recent codes with what building it cost
+    /// on average, and rebuilds once the full table is the more
+    /// expensive of the two. One pass, the same speed as the others; the
+    /// default.
+    #[default]
+    Adaptive,
+    /// Compress each image under all three strategies above and keep the
+    /// shortest stream. Three passes.
+    Smallest,
 }
 
 /// Which colour tables the pixel-building encoders
@@ -65,7 +77,7 @@ pub enum ColorTableMode {
 #[non_exhaustive]
 pub struct EncodeOptions {
     /// Which Appendix-F table-full strategy to apply to every image
-    /// frame's LZW stream. Defaults to [`LzwStrategy::DeferredClear`].
+    /// frame's LZW stream. Defaults to [`LzwStrategy::Adaptive`].
     pub lzw_strategy: LzwStrategy,
     /// Store the image rows in the four-pass Appendix E interlace
     /// order (§20.c.vii Interlace Flag). Applies to images the encoder
@@ -231,7 +243,7 @@ impl EncodeOptions {
 impl Default for EncodeOptions {
     fn default() -> Self {
         Self {
-            lzw_strategy: LzwStrategy::DeferredClear,
+            lzw_strategy: LzwStrategy::Adaptive,
             interlace: false,
             quantize: crate::quantize::QuantizeOptions::default(),
             loop_count: Some(0),
@@ -248,7 +260,7 @@ impl Default for EncodeOptions {
 /// Serialise a [`GifFile`] into a byte stream conforming to the
 /// `<GIF Data Stream>` grammar in Appendix B.
 ///
-/// Uses the default [`EncodeOptions`] (deferred-clear LZW). Call
+/// Uses the default [`EncodeOptions`] (adaptive-clear LZW). Call
 /// [`encode_file_with`] to select a different Appendix-F table-full
 /// strategy. This is the depth entry point; the image-crate contract's
 /// [`crate::encode_file`] builds a single-image [`GifFile`] from a
@@ -270,6 +282,7 @@ pub fn encode_file_with(image: &GifFile, options: &EncodeOptions) -> Result<Vec<
     validate(image)?;
 
     let mut out = Vec::new();
+    let mut lzw = lzw::LzwEncoder::new();
     write_header(&mut out, image.version);
     write_logical_screen_descriptor(&mut out, image)?;
     if let Some(palette) = &image.global_palette {
@@ -287,6 +300,7 @@ pub fn encode_file_with(image: &GifFile, options: &EncodeOptions) -> Result<Vec<
                     frame,
                     image.global_palette.as_deref(),
                     options.lzw_strategy,
+                    &mut lzw,
                 )?;
             }
             Block::PlainText {
@@ -453,6 +467,7 @@ fn write_image_block(
     frame: &GifFrameData,
     global_palette: Option<&[Rgb]>,
     lzw_strategy: LzwStrategy,
+    lzw: &mut lzw::LzwEncoder,
 ) -> Result<()> {
     out.push(0x2C); // Image Separator (§20.c.i)
     write_u16_le(out, frame.left);
@@ -504,7 +519,8 @@ fn write_image_block(
     }
 
     // Re-shuffle into interlaced storage order if requested (Appendix E).
-    let pixels_for_lzw: Vec<u8> = if frame.interlaced {
+    let interlaced_rows: Vec<u8>;
+    let pixels_for_lzw: &[u8] = if frame.interlaced {
         let row_order = interlace_row_order(frame.height);
         let row_bytes = frame.width as usize;
         let mut buf = Vec::with_capacity(frame.indices.len());
@@ -512,14 +528,28 @@ fn write_image_block(
             let dst_off = (target_row as usize) * row_bytes;
             buf.extend_from_slice(&frame.indices[dst_off..dst_off + row_bytes]);
         }
-        buf
+        interlaced_rows = buf;
+        &interlaced_rows
     } else {
-        frame.indices.clone()
+        &frame.indices
     };
 
+    let mut pack =
+        |policy: lzw::ClearPolicy| lzw.encode_frame_with(min_code_size, pixels_for_lzw, policy);
     let compressed = match lzw_strategy {
-        LzwStrategy::DeferredClear => lzw::encode(min_code_size, &pixels_for_lzw)?,
-        LzwStrategy::ClearOnFull => lzw::encode_with_clear_on_full(min_code_size, &pixels_for_lzw)?,
+        LzwStrategy::DeferredClear => pack(lzw::ClearPolicy::Never)?,
+        LzwStrategy::ClearOnFull => pack(lzw::ClearPolicy::OnFull)?,
+        LzwStrategy::Adaptive => pack(lzw::ClearPolicy::Monitored)?,
+        LzwStrategy::Smallest => {
+            let mut best = pack(lzw::ClearPolicy::Monitored)?;
+            for policy in [lzw::ClearPolicy::OnFull, lzw::ClearPolicy::Never] {
+                let other = pack(policy)?;
+                if other.len() < best.len() {
+                    best = other;
+                }
+            }
+            best
+        }
     };
     out.push(min_code_size);
     write_data_sub_blocks(out, &compressed);

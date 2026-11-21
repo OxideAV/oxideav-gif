@@ -96,49 +96,57 @@ const MAX_TABLE_SIZE: usize = 1 << MAX_CODE_WIDTH;
 /// to its destination as they fill.
 struct BitWriter {
     out: Vec<u8>,
-    acc: u32,
-    nbits: u8,
+    acc: u64,
+    nbits: u32,
 }
 
 impl BitWriter {
-    fn new() -> Self {
+    fn with_capacity(bytes: usize) -> Self {
         Self {
-            out: Vec::new(),
+            out: Vec::with_capacity(bytes),
             acc: 0,
             nbits: 0,
         }
     }
 
-    fn write(&mut self, code: u16, width: u8) {
-        debug_assert!(width <= MAX_CODE_WIDTH);
+    #[inline]
+    fn write(&mut self, code: u32, width: u32) {
+        debug_assert!(width <= u32::from(MAX_CODE_WIDTH));
         // Place the new code's bits ABOVE any partial bits already in
         // the accumulator: the in-byte ordering specified in
         // "BUILD 8-BIT BYTES" puts the previous code's tail in the LSBs.
-        self.acc |= (code as u32) << self.nbits;
+        self.acc |= u64::from(code) << self.nbits;
         self.nbits += width;
-        while self.nbits >= 8 {
-            self.out.push((self.acc & 0xFF) as u8);
-            self.acc >>= 8;
-            self.nbits -= 8;
+        if self.nbits >= 32 {
+            self.out.extend_from_slice(&(self.acc as u32).to_le_bytes());
+            self.acc >>= 32;
+            self.nbits -= 32;
         }
     }
 
-    /// Flush the trailing partial byte (if any) and return the encoded
+    /// Bits written so far.
+    fn bits(&self) -> u64 {
+        self.out.len() as u64 * 8 + u64::from(self.nbits)
+    }
+
+    /// Flush the trailing partial bytes (if any) and return the encoded
     /// bytes.
     fn finish(mut self) -> Vec<u8> {
-        if self.nbits > 0 {
-            self.out.push((self.acc & 0xFF) as u8);
+        while self.nbits > 0 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.nbits = self.nbits.saturating_sub(8);
         }
         self.out
     }
 }
 
-/// Right-to-left bit reader. Pulls bytes lazily on demand.
+/// Right-to-left bit reader over a 64-bit window.
 struct BitReader<'a> {
     src: &'a [u8],
     pos: usize,
-    acc: u32,
-    nbits: u8,
+    acc: u64,
+    nbits: u32,
 }
 
 impl<'a> BitReader<'a> {
@@ -151,21 +159,42 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Top the window up to more than 56 bits, or to the end of the
+    /// input.
+    #[inline]
+    fn refill(&mut self) {
+        if let Some(chunk) = self.src.get(self.pos..self.pos + 8) {
+            // Eight bytes are at hand: OR them all in above the bits
+            // already held and account for as many whole bytes as fit.
+            // Bits of a byte that did not fit whole are OR-ed in again,
+            // identically, by the next refill.
+            let word = u64::from_le_bytes(chunk.try_into().expect("8-byte slice"));
+            self.acc |= word << self.nbits;
+            let taken = (63 - self.nbits) / 8;
+            self.pos += taken as usize;
+            self.nbits += taken * 8;
+        } else {
+            while self.nbits <= 56 && self.pos < self.src.len() {
+                self.acc |= u64::from(self.src[self.pos]) << self.nbits;
+                self.pos += 1;
+                self.nbits += 8;
+            }
+        }
+    }
+
     /// Read the next `width` bits as a code. Returns `None` when the
     /// underlying byte stream is exhausted before `width` bits could be
     /// assembled — the caller treats that as truncation.
-    fn read(&mut self, width: u8) -> Option<u16> {
-        debug_assert!(width <= MAX_CODE_WIDTH);
-        while self.nbits < width {
-            if self.pos >= self.src.len() {
+    #[inline]
+    fn read(&mut self, width: u32) -> Option<u16> {
+        debug_assert!(width <= u32::from(MAX_CODE_WIDTH));
+        if self.nbits < width {
+            self.refill();
+            if self.nbits < width {
                 return None;
             }
-            self.acc |= (self.src[self.pos] as u32) << self.nbits;
-            self.pos += 1;
-            self.nbits += 8;
         }
-        let mask = (1u32 << width) - 1;
-        let code = (self.acc & mask) as u16;
+        let code = (self.acc & ((1u64 << width) - 1)) as u16;
         self.acc >>= width;
         self.nbits -= width;
         Some(code)
@@ -174,449 +203,232 @@ impl<'a> BitReader<'a> {
 
 // ---------------------------------------------------------------------
 // Encoder.
-//
-// Two surfaces:
-//
-//   * [`crate::encode_file`] — stateless free function. Allocates a fresh
-//     dictionary (~2 MiB), encodes one raster, drops everything. The
-//     historical entry point; behaviour byte-stable.
-//   * [`LzwEncoder`] — reusable state. Holds the dictionary across
-//     many [`LzwEncoder::encode_frame`] calls so the per-call zero-init
-//     cost lands once at construction instead of once per frame. The
-//     same dictionary bytes that `encode` rebuilds every call. A
-//     post-frame reset walks an explicit list of touched slots
-//     (`O(dictionary_entries)`) rather than memsetting the whole 2 MiB
-//     table (`O(2 MiB)`), so re-encoding *N* frames pays the
-//     full-table cost once and the touched-slots cost `N` times.
-//
-// Both produce byte-identical output. `LzwEncoder` is the right pick
-// for an animated GIF encoder making `N` frame calls; the free
-// function is the right pick for a one-shot encode where the
-// dictionary will be thrown away anyway.
 // ---------------------------------------------------------------------
 
-/// Encode `pixels` (palette indices) under the variable-length-code
-/// LZW scheme of Appendix F. Returns the raw compressed byte stream
-/// excluding the leading LZW Minimum Code Size byte and excluding the
-/// surrounding sub-block framing (§22.c.i and §15 are applied by the
-/// caller).
-///
-/// One-shot path: allocates a fresh dictionary, encodes one raster,
-/// drops everything. Callers encoding many frames in sequence (e.g.
-/// an animated GIF) should reuse a single [`LzwEncoder`] so the
-/// dictionary's 2 MiB zero-init lands once instead of per-frame.
-pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
-    if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
-        return Err(Error::InvalidInput(format!(
-            "LZW minimum code size {min_code_size} outside [2, 8]"
-        )));
-    }
-
-    let clear_code: u16 = 1 << min_code_size;
-    let eoi_code: u16 = clear_code + 1;
-    let first_entry: u16 = clear_code + 2;
-    let initial_width: u8 = min_code_size + 1;
-
-    let mut writer = BitWriter::new();
-
-    // §F.1 recommendation — output Clear as the first code.
-    writer.write(clear_code, initial_width);
-
-    // The dictionary is keyed (prefix_code, next_byte) → entry_code.
-    // Single-byte strings 0..clear_code are implicit identity entries
-    // and never stored explicitly.
-    //
-    // A flat Vec indexed by `(prefix as usize) * 256 + (byte as usize)`
-    // keeps the inner loop branch-free and cache-friendly. 0 means
-    // "absent"; entry codes are stored as `code + 1` so we can
-    // distinguish absent from entry-zero. The one-shot path doesn't
-    // log touched keys — the table is about to be dropped, so the
-    // reset cost the [`LzwEncoder`] path pays would be pure waste here.
-    let mut table: Vec<u16> = vec![0u16; MAX_TABLE_SIZE * 256];
-    let mut next_code: u16 = first_entry;
-    let mut width: u8 = initial_width;
-
-    let mut iter = pixels.iter().copied();
-    let mut prev: u16 = match iter.next() {
-        Some(b) => {
-            if (b as u16) >= clear_code {
-                return Err(Error::InvalidInput(format!(
-                    "pixel index {b} >= 2^min_code_size ({clear_code})"
-                )));
-            }
-            b as u16
-        }
-        None => {
-            // Empty raster: emit only EOI after the Clear we already wrote.
-            writer.write(eoi_code, width);
-            return Ok(writer.finish());
-        }
-    };
-
-    for byte in iter {
-        if (byte as u16) >= clear_code {
-            return Err(Error::InvalidInput(format!(
-                "pixel index {byte} >= 2^min_code_size ({clear_code})"
-            )));
-        }
-        let key = (prev as usize) * 256 + (byte as usize);
-        let slot = table[key];
-        if slot != 0 {
-            // The string `prev + byte` already has a code — extend.
-            prev = slot - 1;
-        } else {
-            // Emit the code for `prev` and learn the new pattern.
-            writer.write(prev, width);
-
-            if next_code < MAX_TABLE_SIZE as u16 {
-                table[key] = next_code + 1;
-                // Width-bump rule (Appendix F.4) — see the module-level
-                // doc-comment for the derivation. Compare against
-                // `1 << width` after the increment so that the next
-                // emitted code is read by the decoder at the new width.
-                let assigned = next_code;
-                next_code += 1;
-                if assigned == (1u16 << width) && width < MAX_CODE_WIDTH {
-                    width += 1;
-                }
-                // Cover-sheet "deferred clear": at next_code ==
-                // MAX_TABLE_SIZE we stop assigning new codes but keep
-                // emitting at MAX_CODE_WIDTH against the existing
-                // table. The encoder is free to send a Clear at any
-                // time; this implementation simply keeps using the
-                // table.
-            }
-
-            prev = byte as u16;
-        }
-    }
-
-    // Final pending prefix. The decoder, on receiving this code, will
-    // add a dictionary entry (prev_code + first_byte_of_this) at index
-    // `next_code` and may bump its width when that lands on `2^W − 1`. Mirror
-    // that here so the encoder's `width` advances in lock-step;
-    // otherwise the EOI emission below would go out at the old width
-    // while the decoder reads at the new one. We do not actually need
-    // the dictionary entry's contents (no further compression
-    // happens), only the bump-trigger side-effect.
-    writer.write(prev, width);
-    if next_code < MAX_TABLE_SIZE as u16 && next_code == (1u16 << width) && width < MAX_CODE_WIDTH {
-        width += 1;
-    }
-
-    // §F.2 — EOI must be the last code output for an image.
-    writer.write(eoi_code, width);
-
-    Ok(writer.finish())
+/// When the encoder sends a Clear code once the dictionary has reached
+/// its 4096-entry ceiling. Every policy is within Appendix F: the cover
+/// sheet lets an encoder keep a full table for as long as it likes and
+/// §F.1 lets it send a Clear at any time. All of them decode to the same
+/// pixels, and they emit identical bytes for a raster that never fills
+/// the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ClearPolicy {
+    /// Never: keep coding against the full table until end of image.
+    Never,
+    /// At once, the moment the table fills.
+    OnFull,
+    /// When the full table stops paying for itself. While the table is
+    /// being built the encoder notes what the build achieved, in bits
+    /// per pixel, from its Clear to the moment it filled. Once full, it
+    /// measures the bits per pixel over runs of up to `MONITOR_CODES`
+    /// codes, looking every `MONITOR_STEP` codes; a run that costs more
+    /// than the build did on average (by a margin that narrows as the
+    /// run grows) means the table no longer describes what is being
+    /// coded, and a fresh one — short codes, strings that fit — will do
+    /// better, so a Clear is sent. A table that still fits (its long
+    /// strings beat the build average) is kept.
+    #[default]
+    Monitored,
 }
 
-/// Encode `pixels` like [`crate::encode_file`], but emit a Clear code and rebuild
-/// the dictionary from scratch whenever the table fills (rather than
-/// freezing it under the cover-sheet "deferred clear" rule that
-/// [`crate::encode_file`] follows).
-///
-/// # Why both strategies exist
-///
-/// Appendix F's cover sheet describes two legal behaviours once the
-/// dictionary reaches its maximum size (`2^12 = 4096` entries):
-///
-/// * **Deferred clear** ([`crate::encode_file`]): "keep emitting 12-bit codes
-///   against the existing table until you choose to send a Clear." The
-///   frozen table stops learning new patterns, so on a large image with
-///   varied content past the 4096-entry point compression efficiency
-///   degrades — every subsequent pattern is coded against a dictionary
-///   that can no longer grow.
-/// * **Clear on full** (this function): the moment the table fills, emit
-///   a Clear code (value `2^min_code_size`, written at the current
-///   12-bit width) and reset the dictionary to its `min_code_size + 1`
-///   initial width. The dictionary then re-adapts to the local content,
-///   which on large varied rasters typically produces a *smaller*
-///   stream than the frozen-table path.
-///
-/// Both outputs decode to the same pixels — the [`crate::parse`] reader
-/// already honours a mid-stream Clear (§F.1 "reset table state"). The
-/// strategy is purely an encoder size/speed trade-off, so this is an
-/// opt-in companion rather than a change to [`crate::encode_file`]'s byte-stable
-/// output. For rasters that never fill the table the two functions emit
-/// identical bytes.
-///
-/// Returns the raw compressed byte stream excluding the leading LZW
-/// Minimum Code Size byte and the §15 sub-block framing, exactly like
-/// [`crate::encode_file`].
-pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
-    if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
-        return Err(Error::InvalidInput(format!(
-            "LZW minimum code size {min_code_size} outside [2, 8]"
-        )));
-    }
-
-    let clear_code: u16 = 1 << min_code_size;
-    let eoi_code: u16 = clear_code + 1;
-    let first_entry: u16 = clear_code + 2;
-    let initial_width: u8 = min_code_size + 1;
-
-    let mut writer = BitWriter::new();
-
-    // §F.1 recommendation — output Clear as the first code.
-    writer.write(clear_code, initial_width);
-
-    let mut table: Vec<u16> = vec![0u16; MAX_TABLE_SIZE * 256];
-    let mut next_code: u16 = first_entry;
-    let mut width: u8 = initial_width;
-
-    let mut iter = pixels.iter().copied();
-    let mut prev: u16 = match iter.next() {
-        Some(b) => {
-            if (b as u16) >= clear_code {
-                return Err(Error::InvalidInput(format!(
-                    "pixel index {b} >= 2^min_code_size ({clear_code})"
-                )));
-            }
-            b as u16
-        }
-        None => {
-            // Empty raster: emit only EOI after the Clear we already wrote.
-            writer.write(eoi_code, width);
-            return Ok(writer.finish());
-        }
-    };
-
-    for byte in iter {
-        if (byte as u16) >= clear_code {
-            return Err(Error::InvalidInput(format!(
-                "pixel index {byte} >= 2^min_code_size ({clear_code})"
-            )));
-        }
-        let key = (prev as usize) * 256 + (byte as usize);
-        let slot = table[key];
-        if slot != 0 {
-            // The string `prev + byte` already has a code — extend.
-            prev = slot - 1;
-        } else {
-            // Emit the code for `prev` and learn the new pattern.
-            writer.write(prev, width);
-
-            // The table is never frozen here: it is guaranteed to have a
-            // free slot because a Clear+reset below fires the instant it
-            // would otherwise fill.
-            table[key] = next_code + 1;
-            let assigned = next_code;
-            next_code += 1;
-            if assigned == (1u16 << width) && width < MAX_CODE_WIDTH {
-                width += 1;
-            }
-
-            // Clear-on-full: the assignment that lands on entry
-            // MAX_TABLE_SIZE − 1 fills the dictionary. Rather than
-            // freezing it (the deferred-clear path), emit a Clear at the
-            // current 12-bit width and rebuild from the §F.3 initial
-            // state. The decoder mirrors this on receipt of the Clear
-            // (§F.1 "reset table state").
-            if next_code == MAX_TABLE_SIZE as u16 {
-                writer.write(clear_code, width);
-                // Wipe only the slots this generation touched. The flat
-                // table cannot be iterated cheaply for live entries, but
-                // a fresh `next_code` makes every old slot unreachable:
-                // a future lookup only trusts `table[key] - 1 < next_code`
-                // through the emit path, and we re-zero on demand below.
-                // Simplest correct reset: zero the whole table.
-                for s in table.iter_mut() {
-                    *s = 0;
-                }
-                next_code = first_entry;
-                width = initial_width;
-            }
-
-            prev = byte as u16;
-        }
-    }
-
-    // Final pending prefix + phantom width bump (see [`crate::encode_file`]).
-    writer.write(prev, width);
-    if next_code < MAX_TABLE_SIZE as u16 && next_code == (1u16 << width) && width < MAX_CODE_WIDTH {
-        width += 1;
-    }
-
-    // §F.2 — EOI must be the last code output for an image.
-    writer.write(eoi_code, width);
-
-    Ok(writer.finish())
-}
+/// Codes per measurement run of [`ClearPolicy::Monitored`].
+const MONITOR_CODES: u32 = 96;
+/// Codes between two looks at the run in progress.
+const MONITOR_STEP: u32 = 16;
 
 /// Reusable LZW encoder state.
 ///
-/// Holds the `(prefix_code, next_byte) → code` lookup table — a flat
-/// `Vec<u16>` of `MAX_TABLE_SIZE * 256 = 4096 × 256 = 1 048 576` slots
-/// (~2 MiB) — across multiple [`Self::encode_frame`] calls. The table
-/// is keyed by `(prefix as usize) * 256 + (byte as usize)` so the
-/// inner loop is one branch-free indexed load. A `0` slot means
-/// "absent"; entry codes are stored as `code + 1` so the slot can
-/// distinguish absent from entry-zero.
+/// The dictionary maps `(prefix code, next pixel)` to the code of the
+/// extended string. It is a directly indexed table — slot
+/// `prefix × 256 + pixel` of `4096 × 256` 16-bit slots (2 MiB) holds the
+/// code plus one, zero meaning "no such string" — so a lookup is a
+/// single load. The slots written since the last Clear are logged, and a
+/// Clear zeroes exactly those (at most 4094) instead of the whole table.
 ///
-/// After a frame finishes, `reset_dictionary` walks an
-/// explicit `touched_keys` log and clears just those slots — cost
-/// proportional to actual dictionary entries used (≤ 4094 per frame),
-/// not to the full 2 MiB table. This is the cost the per-frame `encode`
-/// free-function pays every call; reusing an `LzwEncoder` amortises
-/// the table allocation across the whole animation.
+/// (An open-addressing hash table of 8192 packed 32-bit slots, 32 KiB,
+/// was measured against this layout: the multiply and the probe on every
+/// pixel cost more than the cache misses of the direct table — 145 to
+/// 250 megapixels per second against 300 to 500 on the same index
+/// planes — so the direct table stays.)
 ///
-/// Construction zero-initialises the table once. Cheap to keep around
-/// for the lifetime of an encoder pipeline.
+/// Keeping one `LzwEncoder` across the frames of an animation saves the
+/// allocation per frame; output is identical to the free functions.
 pub struct LzwEncoder {
-    /// Flat `(prefix, byte) → code+1` dictionary; see the struct doc
-    /// for the layout. `0` is "absent"; live codes are stored biased
-    /// by 1.
+    /// `code + 1` per `(prefix, pixel)`; `0` when the string is unknown.
     table: Vec<u16>,
-    /// Packed `(prefix * 256 + byte)` keys of every slot written
-    /// during the in-progress (or just-finished) frame. Used by
-    /// `reset_dictionary` to clear only those slots on
-    /// reset — cost proportional to actual entries used rather than
-    /// the full 2 MiB table.
-    touched_keys: Vec<u32>,
+    /// Slots written since the last Clear.
+    written: Vec<u32>,
 }
 
 impl LzwEncoder {
-    /// Allocate a fresh encoder with a zero-initialised dictionary.
-    /// One ~2 MiB zero-init at construction time; subsequent
-    /// [`Self::encode_frame`] calls reuse the same buffer.
+    /// Allocate an encoder with an empty dictionary.
     pub fn new() -> Self {
         Self {
             table: vec![0u16; MAX_TABLE_SIZE * 256],
-            // `MAX_TABLE_SIZE - 2` is the upper bound on entries the
-            // encoder ever inserts (entries 0..clear_code are the
-            // identity strings and never stored).
-            touched_keys: Vec::with_capacity(MAX_TABLE_SIZE),
+            written: Vec::with_capacity(MAX_TABLE_SIZE),
         }
     }
 
-    /// Encode one raster against the reusable dictionary.
-    ///
-    /// Output is byte-identical to the free-function [`crate::encode_file`]: same
-    /// Clear emission, same width-bump rule, same EOI emission.
-    /// On return the dictionary is reset, ready for the next frame —
-    /// callers do not need to invoke `reset_dictionary`
-    /// themselves.
-    pub fn encode_frame(&mut self, min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
-        let payload = self.encode_frame_inner(min_code_size, pixels);
-        // Reset the dictionary regardless of success / failure so the
-        // next call starts from a clean state. The reset cost is
-        // proportional to the entries the touched_keys log records.
-        self.reset_dictionary();
-        payload
+    /// Forget every string learnt since the last Clear.
+    fn forget(table: &mut [u16], written: &mut Vec<u32>) {
+        for slot in written.drain(..) {
+            table[slot as usize] = 0;
+        }
     }
 
-    /// Inner state-machine for [`Self::encode_frame`]. Records every
-    /// dictionary slot it writes in `self.touched_keys` so the caller's
-    /// post-call `reset_dictionary` can clear just those slots
-    /// rather than memsetting the whole 2 MiB table. Pulled into its
-    /// own function so the encoder's `?` error early-return doesn't
-    /// skip the reset bookkeeping the outer [`Self::encode_frame`]
-    /// handles.
-    fn encode_frame_inner(&mut self, min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
+    /// Encode one raster, keeping a full table until end of image
+    /// ([`ClearPolicy::Never`]). Byte-identical to [`encode`].
+    pub fn encode_frame(&mut self, min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
+        self.encode_frame_with(min_code_size, pixels, ClearPolicy::Never)
+    }
+
+    /// Encode `pixels` (palette indices) under the variable-length-code
+    /// LZW scheme of Appendix F with the given [`ClearPolicy`]. Returns
+    /// the raw compressed byte stream excluding the leading LZW Minimum
+    /// Code Size byte and the surrounding sub-block framing (§22.c.i and
+    /// §15 are applied by the caller).
+    pub fn encode_frame_with(
+        &mut self,
+        min_code_size: u8,
+        pixels: &[u8],
+        policy: ClearPolicy,
+    ) -> Result<Vec<u8>> {
         if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
             return Err(Error::InvalidInput(format!(
                 "LZW minimum code size {min_code_size} outside [2, 8]"
             )));
         }
+        let clear_code: u32 = 1 << min_code_size;
+        if let Some(&bad) = pixels.iter().find(|&&b| u32::from(b) >= clear_code) {
+            return Err(Error::InvalidInput(format!(
+                "pixel index {bad} >= 2^min_code_size ({clear_code})"
+            )));
+        }
+        let eoi_code = clear_code + 1;
+        let first_entry = clear_code + 2;
+        let initial_width = u32::from(min_code_size) + 1;
+        let ceiling = MAX_TABLE_SIZE as u32;
+        let max_width = u32::from(MAX_CODE_WIDTH);
 
-        let clear_code: u16 = 1 << min_code_size;
-        let eoi_code: u16 = clear_code + 1;
-        let first_entry: u16 = clear_code + 2;
-        let initial_width: u8 = min_code_size + 1;
-
-        let mut writer = BitWriter::new();
-
+        let mut writer = BitWriter::with_capacity(pixels.len() / 4 + 16);
         // §F.1 recommendation — output Clear as the first code.
         writer.write(clear_code, initial_width);
 
-        let mut next_code: u16 = first_entry;
-        let mut width: u8 = initial_width;
-
-        let mut iter = pixels.iter().copied();
-        let mut prev: u16 = match iter.next() {
-            Some(b) => {
-                if (b as u16) >= clear_code {
-                    return Err(Error::InvalidInput(format!(
-                        "pixel index {b} >= 2^min_code_size ({clear_code})"
-                    )));
-                }
-                b as u16
-            }
-            None => {
-                // Empty raster: emit only EOI after the Clear we already wrote.
-                writer.write(eoi_code, width);
-                return Ok(writer.finish());
-            }
+        let Some((&first, rest)) = pixels.split_first() else {
+            // Empty raster: emit only EOI after the Clear we already wrote.
+            writer.write(eoi_code, initial_width);
+            return Ok(writer.finish());
         };
 
-        for byte in iter {
-            if (byte as u16) >= clear_code {
-                return Err(Error::InvalidInput(format!(
-                    "pixel index {byte} >= 2^min_code_size ({clear_code})"
-                )));
-            }
-            let key = (prev as usize) * 256 + (byte as usize);
-            let slot = self.table[key];
-            if slot != 0 {
-                // The string `prev + byte` already has a code — extend.
-                prev = slot - 1;
-            } else {
-                // Emit the code for `prev` and learn the new pattern.
-                writer.write(prev, width);
+        let table = &mut self.table[..MAX_TABLE_SIZE * 256];
+        let written = &mut self.written;
+        let mut next_code = first_entry;
+        let mut width = initial_width;
+        let mut prev = u32::from(first);
 
-                if next_code < MAX_TABLE_SIZE as u16 {
-                    self.table[key] = next_code + 1;
-                    self.touched_keys.push(key as u32);
-                    // Width-bump rule (Appendix F.4) — see the
-                    // module-level doc-comment for the derivation.
-                    let assigned = next_code;
-                    next_code += 1;
-                    if assigned == (1u16 << width) && width < MAX_CODE_WIDTH {
-                        width += 1;
-                    }
-                    // Cover-sheet "deferred clear": at next_code ==
-                    // MAX_TABLE_SIZE we stop assigning new codes but
-                    // keep emitting at MAX_CODE_WIDTH against the
-                    // existing table. The encoder is free to send a
-                    // Clear at any time; this implementation simply
-                    // keeps using the table.
+        // [`ClearPolicy::Monitored`] bookkeeping: where (in pixels and in
+        // output bits) the current table's build began, what the build
+        // cost once it filled, and the run being measured.
+        let mut build_from = (0usize, writer.bits());
+        let mut build_cost = (0u64, 1u64); // (bits, pixels)
+        let mut run_from = 0usize;
+        let mut run_codes = 0u32;
+
+        for (at, &pixel) in rest.iter().enumerate() {
+            let slot = (prev << 8 | u32::from(pixel)) as usize;
+            let held = table[slot];
+            if held != 0 {
+                // The string `prev + pixel` already has a code — extend.
+                prev = u32::from(held) - 1;
+                continue;
+            }
+
+            // Emit the code for `prev` and learn the new string.
+            writer.write(prev, width);
+            prev = u32::from(pixel);
+
+            if next_code < ceiling {
+                table[slot] = next_code as u16 + 1;
+                written.push(slot as u32);
+                // Width-bump rule (Appendix F.4) — see the module-level
+                // doc-comment for the derivation.
+                if next_code == 1 << width && width < max_width {
+                    width += 1;
                 }
-
-                prev = byte as u16;
+                next_code += 1;
+                if next_code < ceiling {
+                    continue;
+                }
+                // The table just filled.
+                match policy {
+                    ClearPolicy::Never => continue,
+                    ClearPolicy::OnFull => {}
+                    ClearPolicy::Monitored => {
+                        build_cost = (
+                            writer.bits() - build_from.1,
+                            (at + 1 - build_from.0).max(1) as u64,
+                        );
+                        run_from = at + 1;
+                        run_codes = 0;
+                        continue;
+                    }
+                }
+            } else {
+                // Full table (cover sheet: keep emitting 12-bit codes
+                // against it until a Clear is chosen).
+                if policy != ClearPolicy::Monitored {
+                    continue;
+                }
+                run_codes += 1;
+                if !run_codes.is_multiple_of(MONITOR_STEP) {
+                    continue;
+                }
+                // bits/pixel of the run so far against the build's, with
+                // a margin that narrows as the run (and so the evidence)
+                // grows:
+                //   run_bits / run_pixels
+                //       >  (1 + MONITOR_STEP / 2 / run_codes) × build_bits / build_pixels
+                let run_bits = u64::from(run_codes * max_width);
+                let run_pixels = (at + 1 - run_from).max(1) as u64;
+                let lhs = run_bits * build_cost.1 * u64::from(2 * run_codes);
+                let rhs = build_cost.0 * run_pixels * u64::from(2 * run_codes + MONITOR_STEP);
+                if lhs <= rhs {
+                    if run_codes >= MONITOR_CODES {
+                        run_from = at + 1;
+                        run_codes = 0;
+                    }
+                    continue;
+                }
             }
+
+            // §F.1 Clear: written at the current width, after which both
+            // sides restart from the initial table.
+            writer.write(clear_code, width);
+            Self::forget(table, written);
+            next_code = first_entry;
+            width = initial_width;
+            build_from = (at + 1, writer.bits());
         }
 
-        // Final pending prefix. The decoder, on receiving this code,
-        // will add a dictionary entry (prev_code + first_byte_of_this)
-        // at index `next_code` and may bump its width when that lands
-        // on `2^W − 1`.
-        // Mirror that here so the encoder's `width` advances in
-        // lock-step; otherwise the EOI emission below would go out at
-        // the old width while the decoder reads at the new one. We do
-        // not actually need the dictionary entry's contents (no further
-        // compression happens), only the bump-trigger side-effect.
+        // Final pending prefix. The decoder, on receiving this code, will
+        // add a dictionary entry (prev_code + first_byte_of_this) at index
+        // `next_code` and may bump its width when that lands on `2^W − 1`.
+        // Mirror that here so the encoder's `width` advances in lock-step;
+        // otherwise the EOI emission below would go out at the old width
+        // while the decoder reads at the new one. We do not actually need
+        // the dictionary entry's contents (no further compression
+        // happens), only the bump-trigger side-effect.
         writer.write(prev, width);
-        if next_code < MAX_TABLE_SIZE as u16
-            && next_code == (1u16 << width)
-            && width < MAX_CODE_WIDTH
-        {
+        if next_code < ceiling && next_code == 1 << width && width < max_width {
             width += 1;
         }
 
         // §F.2 — EOI must be the last code output for an image.
         writer.write(eoi_code, width);
+        // Leave the dictionary empty for the next raster.
+        Self::forget(table, written);
         Ok(writer.finish())
-    }
-
-    /// Clear every slot the in-progress (or just-finished) frame
-    /// touched. Cost is `O(touched_keys.len())`, bounded by
-    /// `MAX_TABLE_SIZE`; the full 2 MiB table is never memset.
-    fn reset_dictionary(&mut self) {
-        // Drain instead of iter+clear so the keys go through one pass
-        // and we leave `touched_keys` empty in the same step.
-        for k in self.touched_keys.drain(..) {
-            self.table[k as usize] = 0;
-        }
     }
 }
 
@@ -624,6 +436,36 @@ impl Default for LzwEncoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Encode `pixels` (palette indices) under the variable-length-code
+/// LZW scheme of Appendix F, keeping a full dictionary until end of
+/// image (the cover-sheet *deferred clear* rule). Returns the raw
+/// compressed byte stream excluding the leading LZW Minimum Code Size
+/// byte and excluding the surrounding sub-block framing (§22.c.i and
+/// §15 are applied by the caller).
+///
+/// Callers encoding many frames in sequence should reuse a single
+/// [`LzwEncoder`].
+pub fn encode(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
+    encode_with(min_code_size, pixels, ClearPolicy::Never)
+}
+
+/// Encode `pixels` like [`encode`], but emit a Clear code and rebuild
+/// the dictionary from scratch whenever the table fills
+/// ([`ClearPolicy::OnFull`]) rather than freezing it.
+///
+/// Both outputs decode to the same pixels — the reader honours a
+/// mid-stream Clear (§F.1 "reset table state"). For rasters that never
+/// fill the table the two functions emit identical bytes.
+pub fn encode_with_clear_on_full(min_code_size: u8, pixels: &[u8]) -> Result<Vec<u8>> {
+    encode_with(min_code_size, pixels, ClearPolicy::OnFull)
+}
+
+/// Encode `pixels` with the given [`ClearPolicy`] (one-shot form of
+/// [`LzwEncoder::encode_frame_with`]).
+pub fn encode_with(min_code_size: u8, pixels: &[u8], policy: ClearPolicy) -> Result<Vec<u8>> {
+    LzwEncoder::new().encode_frame_with(min_code_size, pixels, policy)
 }
 
 // ---------------------------------------------------------------------
@@ -638,13 +480,24 @@ impl Default for LzwEncoder {
 /// first EOI even if fewer pixels were produced (the spec leaves
 /// truncation handling to the application).
 ///
-/// The capacity hint passed to the output `Vec` is clamped against a
-/// conservative upper bound derived from the compressed input length
-/// (every input byte can plausibly yield at most `MAX_TABLE_SIZE`
-/// output bytes in pathological cases). Without the clamp a hostile
-/// `width × height` field can trick the decoder into pre-reserving
-/// gigabytes of memory before any code is read — a trivial DoS
-/// regardless of how much actual LZW payload is present.
+/// # How strings are stored
+///
+/// A dictionary entry is the string of the code received before it plus
+/// the first pixel of the code that created it. Those pixels were
+/// written to the output one after the other, so the entry's string
+/// already sits in the output: it starts where the earlier code's string
+/// starts and is one pixel longer. Each entry is therefore just an
+/// `(output offset, length)` pair, and expanding a code is one copy from
+/// earlier output — a long run costs one block move, with no
+/// pixel-by-pixel chain walk. The table is 4096 such pairs; nothing else
+/// is allocated besides the output.
+///
+/// # Memory bound
+///
+/// The capacity reserved for the output is clamped against the
+/// compressed input length (a code is at least three bits and expands
+/// to at most 4096 pixels), so a hostile `width × height` cannot make
+/// the decoder reserve memory the payload could never fill.
 pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<Vec<u8>> {
     if !(MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL).contains(&min_code_size) {
         return Err(Error::InvalidData(format!(
@@ -655,51 +508,39 @@ pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<V
     let clear_code: u16 = 1 << min_code_size;
     let eoi_code: u16 = clear_code + 1;
     let first_entry: u16 = clear_code + 2;
-    let initial_width: u8 = min_code_size + 1;
+    let initial_width = u32::from(min_code_size) + 1;
+    let max_width = u32::from(MAX_CODE_WIDTH);
+    let ceiling = MAX_TABLE_SIZE as u16;
+    // Output offsets are kept in 32 bits; a GIF raster (at most
+    // 65535 × 65535 pixels) always fits.
+    let expected_pixels = expected_pixels.min(u32::MAX as usize);
 
-    // Each table entry stores its decoded byte sequence as
-    // (parent_code, last_byte). Single-byte entries 0..clear_code use
-    // parent == NONE.
-    const NONE: u16 = u16::MAX;
-    let mut parent: Vec<u16> = vec![NONE; MAX_TABLE_SIZE];
-    let mut suffix: Vec<u8> = vec![0u8; MAX_TABLE_SIZE];
-    for i in 0..clear_code {
-        suffix[i as usize] = i as u8;
-    }
-    let reset_next_code = first_entry;
+    // Where each entry's string starts in the output, and its length.
+    let mut starts = [0u32; MAX_TABLE_SIZE];
+    let mut lengths = [0u16; MAX_TABLE_SIZE];
 
-    let mut next_code: u16 = reset_next_code;
-    let mut width: u8 = initial_width;
+    let mut next_code = first_entry;
+    let mut width = initial_width;
     let mut reader = BitReader::new(src);
 
-    // Cap the up-front reservation: see the function-level doc for the
-    // DoS rationale. `MAX_TABLE_SIZE` (4096) is the largest substring an
-    // LZW dictionary entry can hold, so `src.len() * MAX_TABLE_SIZE` is
-    // a generous-but-bounded ceiling on legitimate output.
     let cap_ceiling = src.len().saturating_mul(MAX_TABLE_SIZE);
-    let initial_cap = expected_pixels.min(cap_ceiling);
-    let mut output: Vec<u8> = Vec::with_capacity(initial_cap);
-    // Scratch buffer used to materialise an entry into bytes (entries
-    // are stored as a parent-pointer chain that we walk in reverse).
-    let mut scratch: Vec<u8> = Vec::with_capacity(MAX_TABLE_SIZE);
+    let mut output: Vec<u8> = Vec::with_capacity(expected_pixels.min(cap_ceiling));
 
-    let mut prev_code: Option<u16> = None;
+    // The previous code's string: (output offset, length). `None` right
+    // after a Clear.
+    let mut prev: Option<(usize, usize)> = None;
+
+    let missing_eoi =
+        || Error::InvalidData("LZW stream ended before End-of-Information code".into());
 
     loop {
-        let Some(code) = reader.read(width) else {
-            // End of compressed bytes without an explicit EOI: spec
-            // §F.2 says EOI "must be the last code output by the
-            // encoder", so the absence is a defect. Treat it as such.
-            return Err(Error::InvalidData(
-                "LZW stream ended before End-of-Information code".into(),
-            ));
-        };
+        let code = reader.read(width).ok_or_else(missing_eoi)?;
 
         if code == clear_code {
             // §F.1 — reset table state.
-            next_code = reset_next_code;
+            next_code = first_entry;
             width = initial_width;
-            prev_code = None;
+            prev = None;
             continue;
         }
         if code == eoi_code {
@@ -707,103 +548,137 @@ pub fn decode(min_code_size: u8, src: &[u8], expected_pixels: usize) -> Result<V
             return Ok(output);
         }
 
-        // Materialise the entry's byte string into `scratch`. Walk the
-        // parent chain in reverse, then push it in forward order.
-        let entry_first_byte: u8;
-        scratch.clear();
-        if code < next_code {
-            // Known entry.
-            let mut walk = code;
-            loop {
-                scratch.push(suffix[walk as usize]);
-                if parent[walk as usize] == NONE {
-                    break;
-                }
-                walk = parent[walk as usize];
+        let at = output.len();
+        let room = expected_pixels - at;
+        let length = if code < clear_code {
+            // A single pixel.
+            if room > 0 {
+                output.push(code as u8);
             }
-            entry_first_byte = *scratch.last().unwrap();
+            1
+        } else if code < next_code {
+            // A known string: one copy from earlier output.
+            let (from, length) = (
+                starts[code as usize] as usize,
+                lengths[code as usize] as usize,
+            );
+            let take = length.min(room);
+            output.extend_from_within(from..from + take);
+            length
         } else if code == next_code {
-            // KwKwK case (§F implicit, reasoned below):
-            //
-            // The encoder may emit a code that has not yet been added
-            // to the decoder's dictionary in exactly one situation:
-            // the next entry it's about to define is `prev + first(prev)`.
-            // The decoder reconstructs that by extending `prev`'s
-            // string with its own first byte.
-            //
-            // This is required because the encoder added the entry at
-            // the moment it emitted `prev`, while the decoder only
-            // knows the entry's existence one code later — yet the
-            // encoder may emit that fresh entry as the very next code.
-            let Some(prev) = prev_code else {
+            // The entry being defined by this very code: the previous
+            // string followed by its own first pixel (the encoder added
+            // `prev + first(prev)` when it emitted `prev`, and may use
+            // it at once).
+            let Some((from, length)) = prev else {
                 return Err(Error::InvalidData(
                     "first non-Clear LZW code references uninitialised prefix".into(),
                 ));
             };
-            // Walk prev's chain to find prev's FIRST byte.
-            let mut walk = prev;
-            while parent[walk as usize] != NONE {
-                walk = parent[walk as usize];
+            let take = length.min(room);
+            output.extend_from_within(from..from + take);
+            if room > length {
+                let first = output[from];
+                output.push(first);
             }
-            let prev_first = suffix[walk as usize];
-            // Materialise prev's string, then append its first byte.
-            let mut walk = prev;
-            loop {
-                scratch.push(suffix[walk as usize]);
-                if parent[walk as usize] == NONE {
-                    break;
-                }
-                walk = parent[walk as usize];
-            }
-            scratch.reverse();
-            scratch.push(prev_first);
-            entry_first_byte = scratch[0];
-            // Restore reverse order so the unified emit path below works.
-            scratch.reverse();
+            length + 1
         } else {
             return Err(Error::InvalidData(format!(
                 "LZW code {code} exceeds dictionary size {next_code}"
             )));
-        }
+        };
 
-        // Emit in forward order (`scratch` holds the entry's bytes in
-        // reverse). The common case — the whole entry fits before the
-        // `expected_pixels` ceiling — bulk-extends with no per-byte
-        // bound check; only the final entry that would cross the ceiling
-        // takes the truncating tail path. The decoder may legitimately
-        // produce "trailing" output beyond the image area (the spec
-        // allows the encoder to over-produce in deferred-clear mode), so
-        // crossing the ceiling stops emission without erroring.
-        let remaining = expected_pixels - output.len();
-        if scratch.len() <= remaining {
-            output.extend(scratch.iter().rev());
-        } else {
-            output.extend(scratch.iter().rev().take(remaining));
-        }
-
-        // Add `prev + entry_first_byte` as the next entry, mirroring
-        // the encoder's table growth (lagged by one — see module docs).
-        if let Some(p) = prev_code
-            && next_code < MAX_TABLE_SIZE as u16
+        // Add `prev + first pixel of this string` as the next entry,
+        // mirroring the encoder's table growth (lagged by one — see
+        // module docs). It starts where `prev` starts.
+        if let Some((from, prev_length)) = prev
+            && next_code < ceiling
         {
-            parent[next_code as usize] = p;
-            suffix[next_code as usize] = entry_first_byte;
-            let assigned = next_code;
-            next_code += 1;
-            // Decoder bump rule: assigned == 2^W − 1 (one entry
-            // earlier than the encoder's own bump trigger at 2^W).
-            // See the module-level `When the bit-width grows`
-            // derivation — the decoder lags the encoder by one
-            // assignment in normal flow because the decoder's first
-            // non-Clear code adds no entry.
-            let threshold = (1u16 << width) - 1;
-            if assigned == threshold && width < MAX_CODE_WIDTH {
+            starts[next_code as usize] = from as u32;
+            lengths[next_code as usize] = (prev_length + 1) as u16;
+            // Decoder bump rule: assigned == 2^W − 1 (one entry earlier
+            // than the encoder's own bump trigger at 2^W).
+            if u32::from(next_code) == (1 << width) - 1 && width < max_width {
                 width += 1;
             }
+            next_code += 1;
         }
-        // else: deferred-clear regime — keep decoding without
-        // growing the table until a Clear arrives.
-        prev_code = Some(code);
+        // else: deferred-clear regime — keep decoding without growing
+        // the table until a Clear arrives.
+        prev = Some((at, length));
+
+        if output.len() == expected_pixels {
+            // The raster is complete. Whatever follows produces no
+            // pixels; it is still walked so that a missing terminator or
+            // an out-of-range code is reported.
+            return drain(
+                reader,
+                DrainState {
+                    clear_code,
+                    next_code,
+                    width,
+                    after_clear: false,
+                },
+            )
+            .map(|()| output);
+        }
+    }
+}
+
+/// Decoder state carried into [`drain`].
+struct DrainState {
+    clear_code: u16,
+    next_code: u16,
+    width: u32,
+    /// No string code has been read since the last Clear.
+    after_clear: bool,
+}
+
+/// Walk the codes that follow a complete raster up to the
+/// End-of-Information code, tracking only the table size and code width.
+fn drain(mut reader: BitReader<'_>, state: DrainState) -> Result<()> {
+    let DrainState {
+        clear_code,
+        mut next_code,
+        mut width,
+        mut after_clear,
+    } = state;
+    let eoi_code = clear_code + 1;
+    let first_entry = clear_code + 2;
+    let initial_width = clear_code.trailing_zeros() + 1;
+    let max_width = u32::from(MAX_CODE_WIDTH);
+    loop {
+        let Some(code) = reader.read(width) else {
+            return Err(Error::InvalidData(
+                "LZW stream ended before End-of-Information code".into(),
+            ));
+        };
+        if code == clear_code {
+            next_code = first_entry;
+            width = initial_width;
+            after_clear = true;
+            continue;
+        }
+        if code == eoi_code {
+            return Ok(());
+        }
+        if code > next_code {
+            return Err(Error::InvalidData(format!(
+                "LZW code {code} exceeds dictionary size {next_code}"
+            )));
+        }
+        if code == next_code && after_clear {
+            return Err(Error::InvalidData(
+                "first non-Clear LZW code references uninitialised prefix".into(),
+            ));
+        }
+        if !after_clear && next_code < MAX_TABLE_SIZE as u16 {
+            if u32::from(next_code) == (1 << width) - 1 && width < max_width {
+                width += 1;
+            }
+            next_code += 1;
+        }
+        after_clear = false;
     }
 }
 
@@ -1249,5 +1124,149 @@ mod tests {
             encoder.encode_frame(2, &small).expect("reused small"),
             small_expected
         );
+    }
+
+    // ----- clear policies -----
+
+    fn xorshift_plane(len: usize, mask: u8, mut state: u32) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state as u8) & mask
+            })
+            .collect()
+    }
+
+    const POLICIES: [ClearPolicy; 3] = [
+        ClearPolicy::Never,
+        ClearPolicy::OnFull,
+        ClearPolicy::Monitored,
+    ];
+
+    #[test]
+    fn every_policy_roundtrips_at_every_code_size() {
+        for mcs in MIN_CODE_SIZE_FLOOR..=MIN_CODE_SIZE_CEIL {
+            let mask = ((1u16 << mcs) - 1) as u8;
+            // Noise, then long runs, then a repeating texture: three
+            // different statistics, each long enough to fill the table.
+            let mut plane = xorshift_plane(30_000, mask, 0x1234_5678 + u32::from(mcs));
+            plane.extend(std::iter::repeat_n(mask, 20_000));
+            plane.extend((0..30_000u32).map(|i| ((i / 3 + i % 7) as u8) & mask));
+            for policy in POLICIES {
+                let packed = encode_with(mcs, &plane, policy).unwrap();
+                assert_eq!(
+                    decode(mcs, &packed, plane.len()).unwrap(),
+                    plane,
+                    "{policy:?} at code size {mcs}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policies_agree_until_the_table_fills() {
+        let plane = xorshift_plane(600, 0x0F, 99);
+        let never = encode_with(4, &plane, ClearPolicy::Never).unwrap();
+        for policy in POLICIES {
+            assert_eq!(encode_with(4, &plane, policy).unwrap(), never, "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn monitored_clear_tracks_a_change_of_statistics() {
+        // Noise that fills the table with short strings, followed by a
+        // regular texture: the frozen table of `Never` cannot follow, the
+        // monitored policy notices and rebuilds.
+        let mut plane = xorshift_plane(40_000, 0x3F, 0xC0FF_EE11);
+        plane.extend((0..200_000u32).map(|i| (64 + (i * 5) % 59 + (i / 211) % 3) as u8));
+        let never = encode_with(8, &plane, ClearPolicy::Never).unwrap();
+        let monitored = encode_with(8, &plane, ClearPolicy::Monitored).unwrap();
+        assert!(
+            monitored.len() * 2 < never.len(),
+            "monitored {} vs never {}",
+            monitored.len(),
+            never.len()
+        );
+    }
+
+    #[test]
+    fn monitored_clear_keeps_a_table_that_still_fits() {
+        // One texture throughout: once learnt, the table keeps paying, so
+        // the monitored stream stays close to the never-cleared one.
+        let plane: Vec<u8> = (0..300_000u32).map(|i| ((i * 7) % 61) as u8).collect();
+        let never = encode_with(8, &plane, ClearPolicy::Never).unwrap();
+        let monitored = encode_with(8, &plane, ClearPolicy::Monitored).unwrap();
+        let on_full = encode_with(8, &plane, ClearPolicy::OnFull).unwrap();
+        assert!(monitored.len() <= never.len() + never.len() / 20);
+        assert!(monitored.len() < on_full.len());
+    }
+
+    // ----- decoder -----
+
+    #[test]
+    fn long_runs_expand_exactly() {
+        for len in [1usize, 2, 3, 255, 4096, 4097, 100_000] {
+            let plane = vec![3u8; len];
+            let packed = encode(2, &plane).unwrap();
+            assert_eq!(decode(2, &packed, len).unwrap(), plane, "run of {len}");
+        }
+    }
+
+    #[test]
+    fn output_is_cut_at_the_expected_size_and_the_rest_is_still_checked() {
+        let plane = xorshift_plane(5_000, 0x3F, 7);
+        let packed = encode(6, &plane).unwrap();
+        for keep in [0usize, 1, 2, 17, 4_999] {
+            assert_eq!(decode(6, &packed, keep).unwrap(), plane[..keep], "{keep}");
+        }
+        // A stream cut short after the raster is complete still lacks its
+        // End-of-Information code.
+        let cut = &packed[..packed.len() - 2];
+        assert!(decode(6, cut, 100).is_err());
+        // More room than pixels: the decoder returns what the stream held.
+        assert_eq!(decode(6, &packed, 9_000).unwrap(), plane);
+    }
+
+    #[test]
+    fn codes_past_the_table_are_rejected_before_and_after_the_cut() {
+        // Clear (4), pixel 0, then code 7 while the table ends at 6.
+        let mut w = BitWriter::with_capacity(8);
+        for code in [4u32, 0, 7, 5] {
+            w.write(code, 3);
+        }
+        let bytes = w.finish();
+        assert!(decode(2, &bytes, 100).is_err());
+        assert!(decode(2, &bytes, 1).is_err());
+        // The not-yet-defined code straight after a Clear has no prefix.
+        let mut w = BitWriter::with_capacity(8);
+        for code in [4u32, 6, 5] {
+            w.write(code, 3);
+        }
+        let bytes = w.finish();
+        assert!(decode(2, &bytes, 100).is_err());
+        assert!(decode(2, &bytes, 0).is_err());
+    }
+
+    #[test]
+    fn bit_reader_matches_bit_writer_at_every_width() {
+        let mut w = BitWriter::with_capacity(64);
+        let mut codes = Vec::new();
+        let mut state = 1u32;
+        for i in 0..2_000u32 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let width = 3 + i % 10;
+            let code = (state >> 8) & ((1 << width) - 1);
+            w.write(code, width);
+            codes.push((code, width));
+        }
+        assert_eq!(w.bits(), codes.iter().map(|c| u64::from(c.1)).sum::<u64>());
+        let bytes = w.finish();
+        let mut r = BitReader::new(&bytes);
+        for (code, width) in codes {
+            assert_eq!(r.read(width), Some(code as u16));
+        }
+        assert_eq!(r.read(12), None);
     }
 }

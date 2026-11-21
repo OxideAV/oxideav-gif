@@ -9,7 +9,6 @@ use crate::image::{
     Application, Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, PlainText, Rgb,
     Version,
 };
-use crate::interlace::interlace_row_order;
 use crate::lzw;
 use crate::options::DecodeOptions;
 
@@ -611,6 +610,8 @@ struct Parser<'a> {
     opts: &'a DecodeOptions,
     /// Running total of expanded §22 raster bytes, for `max_bytes`.
     decoded_total: u64,
+    /// §20 images expanded so far, for `max_frames`.
+    images_read: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -620,6 +621,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             opts,
             decoded_total: 0,
+            images_read: 0,
         }
     }
 
@@ -814,6 +816,8 @@ impl<'a> Parser<'a> {
         // Consume the image separator.
         let sep = self.read_byte()?;
         debug_assert_eq!(sep, label::IMAGE_SEPARATOR);
+        self.images_read = self.images_read.saturating_add(1);
+        self.opts.check_frames(self.images_read)?;
 
         // §20.c: left, top, width, height, packed.
         let left = self.read_u16_le()?;
@@ -868,22 +872,12 @@ impl<'a> Parser<'a> {
             )));
         }
 
-        let indices = if interlaced {
-            // Appendix E — re-shuffle decoded rows into top-to-bottom
-            // order before exposing them.
-            let mut out = vec![0u8; pixels_expected];
-            let row_order = interlace_row_order(height);
-            let row_bytes = width as usize;
-            for (storage_row, &target_row) in row_order.iter().enumerate() {
-                let src_off = storage_row * row_bytes;
-                let dst_off = (target_row as usize) * row_bytes;
-                out[dst_off..dst_off + row_bytes]
-                    .copy_from_slice(&raw_indices[src_off..src_off + row_bytes]);
-            }
-            out
-        } else {
-            raw_indices
-        };
+        let mut indices = raw_indices;
+        if interlaced {
+            // Appendix E — move the decoded rows into top-to-bottom
+            // order, within the raster the LZW stream was expanded into.
+            crate::interlace::deinterlace_in_place(&mut indices, width as usize, height);
+        }
 
         Ok(GifFrameData {
             left,

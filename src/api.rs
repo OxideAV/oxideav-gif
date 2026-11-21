@@ -1011,6 +1011,17 @@ mod tests {
             Err(Error::LimitExceeded(_))
         ));
         assert!(decode_with(&bytes, &DecodeOptions::default().with_max_pixels(8u64)).is_ok());
+        // Image-count limit: two images against a limit of one.
+        let mut two = single((4, 2), (0, 0, 4, 2), None);
+        let again = two.blocks[0].clone();
+        two.blocks.push(again);
+        let two = encode_file(&two).unwrap();
+        assert!(matches!(
+            decode_all_with(&two, &DecodeOptions::default().with_max_frames(1u32)),
+            Err(Error::LimitExceeded(_))
+        ));
+        assert!(decode_all_with(&two, &DecodeOptions::default().with_max_frames(2u32)).is_ok());
+        assert!(decode_all_with(&bytes, &DecodeOptions::default().with_max_frames(1u32)).is_ok());
     }
 
     #[test]

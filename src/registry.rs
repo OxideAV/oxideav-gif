@@ -679,11 +679,13 @@ impl CodecOptionsStruct for EncodeOptions {
     const SCHEMA: &'static [OptionField] = &[
         OptionField {
             name: "lzw_strategy",
-            kind: OptionKind::Enum(&["deferred_clear", "clear_on_full"]),
+            kind: OptionKind::Enum(&["adaptive", "smallest", "deferred_clear", "clear_on_full"]),
             default: OptionValue::String(String::new()),
-            help: "Appendix-F table-full strategy: `deferred_clear` (default; \
-                   keep coding against the frozen 4096-entry table) or \
-                   `clear_on_full` (emit a Clear code and rebuild).",
+            help: "Appendix-F table-full strategy: `adaptive` (default; send \
+                   a Clear code when the full table stops paying), \
+                   `smallest` (try every strategy, keep the shortest), \
+                   `clear_on_full` (Clear the moment the table fills) or \
+                   `deferred_clear` (keep the full 4096-entry table).",
         },
         OptionField {
             name: "interlace",
@@ -816,7 +818,9 @@ impl CodecOptionsStruct for EncodeOptions {
         match key {
             "lzw_strategy" => {
                 self.lzw_strategy = match v.as_str()? {
-                    "" | "deferred_clear" => LzwStrategy::DeferredClear,
+                    "" | "adaptive" => LzwStrategy::Adaptive,
+                    "smallest" => LzwStrategy::Smallest,
+                    "deferred_clear" => LzwStrategy::DeferredClear,
                     "clear_on_full" => LzwStrategy::ClearOnFull,
                     _ => unreachable!("guarded by SCHEMA"),
                 }

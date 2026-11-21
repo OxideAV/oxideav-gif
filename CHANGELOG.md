@@ -8,8 +8,14 @@
 - A picture with no more distinct colours than the budget gets exactly those colours, one table entry each, in ascending R, G, B order (the same colour set always yields the same table).
 - Error diffusion scans in serpentine order by default and measures the error it passes on from the clamped target colour. Ordered dithering renders each pixel as a mix of its nearest entry and the neighbouring entry that brings the mix closest, thresholded per position; a pixel within one just-noticeable difference of a table entry is not dithered.
 
+- LZW: the encoder's default table-full strategy is `LzwStrategy::Adaptive` — it keeps a full dictionary while it still pays and sends a Clear code when the bits per pixel of recent codes exceed what building the table cost on average. `DeferredClear` (never Clear), the previous default, coded everything after the first 4096 strings against a table that no longer fitted: a 1024×768 dithered photograph plane is 1 051 697 bytes under it and 342 747 under `Adaptive`; a gradient plane 1 026 875 against 57 124; flat artwork 414 298 against 8 946. `encode_file` output for a frame that fills the table therefore changes; `DeferredClear` remains selectable and byte-stable.
+- LZW decoder: a dictionary entry is an (output offset, length) pair, and a code is expanded with one copy from earlier output instead of a pixel-by-pixel chain walk and a reversal; the bit reader works on a 64-bit window. Decode of the same planes: 273 → 320 MP/s (dithered photograph), 448 → 1 100 MP/s (screen capture), 541 → 12 000 MP/s (flat artwork). Interlaced images are de-interlaced inside the decoded raster (no second raster).
+- The encoder no longer copies a non-interlaced index plane before compressing it, and reuses one LZW dictionary across the images of a stream.
+
 ### Added
 
+- `LzwStrategy::Adaptive` and `LzwStrategy::Smallest` (compress under every strategy, keep the shortest); registry values `lzw_strategy = adaptive | smallest`.
+- `DecodeOptions::max_frames` / `with_max_frames`: reject a stream with more than that many images.
 - `QuantizeOptions::method` (`PaletteMethod::{VarianceSplit, MedianCut}`), `QuantizeOptions::metric` (`ColorMetric::{Perceptual, Rgb}`), `QuantizeOptions::dither_strength` (percent) and `QuantizeOptions::median_cut()`.
 - `Dither::BlueNoise`: ordered dithering on a void-and-cluster rank map built on first use; position-stable, so an unchanged region dithers identically in every frame of an animation.
 - Registry encoder options `dither = blue_noise`, `dither_strength`, `serpentine`, `palette` (`variance_split` / `median_cut`), `color_metric` (`perceptual` / `rgb`) and `palette_refine_iterations`.

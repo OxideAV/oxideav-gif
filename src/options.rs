@@ -58,6 +58,10 @@ pub struct DecodeOptions {
     /// Reject decodes whose buffers would exceed this many bytes (see
     /// the type docs for what is measured).
     pub max_bytes: Option<u64>,
+    /// Reject streams with more than this many §20 images (`None`, the
+    /// default, leaves the count to `max_bytes`, which bounds the sum
+    /// of their rasters).
+    pub max_frames: Option<u32>,
     /// Enforce the §7–§26 field rules via the conformance walk (see
     /// the type docs).
     pub strict: bool,
@@ -99,6 +103,12 @@ impl DecodeOptions {
         self
     }
 
+    /// Set (or clear) the limit on the number of §20 images.
+    pub fn with_max_frames(mut self, max_frames: impl Into<Option<u32>>) -> Self {
+        self.max_frames = max_frames.into();
+        self
+    }
+
     /// Set strict mode.
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
@@ -117,6 +127,7 @@ impl DecodeOptions {
         self.max_height = None;
         self.max_pixels = None;
         self.max_bytes = None;
+        self.max_frames = None;
         self
     }
 
@@ -154,6 +165,18 @@ impl DecodeOptions {
         Ok(())
     }
 
+    /// Check an image count against `max_frames`.
+    pub(crate) fn check_frames(&self, frames: u32) -> Result<()> {
+        if let Some(m) = self.max_frames
+            && frames > m
+        {
+            return Err(GifError::limit(format!(
+                "GIF: more than max_frames {m} images"
+            )));
+        }
+        Ok(())
+    }
+
     /// Check a buffer size against `max_bytes`.
     pub(crate) fn check_bytes(&self, bytes: u64) -> Result<()> {
         if let Some(m) = self.max_bytes
@@ -174,6 +197,7 @@ impl Default for DecodeOptions {
             max_height: None,
             max_pixels: None,
             max_bytes: Some(Self::DEFAULT_MAX_BYTES),
+            max_frames: None,
             strict: false,
             lenient: false,
         }
