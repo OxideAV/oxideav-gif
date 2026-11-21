@@ -248,8 +248,14 @@ fn encode_all_global_table_mode_shares_one_palette() {
         .iter()
         .map(|c| Frame::new(GifImage::from_rgb8(1, 1, c.to_vec()).unwrap(), None))
         .collect();
-    let local = GifFile::parse(&encode_all(&frames, &EncodeOptions::new()).unwrap()).unwrap();
+    let local_opts = EncodeOptions::new().with_color_table(ColorTableMode::Local);
+    let local = GifFile::parse(&encode_all(&frames, &local_opts).unwrap()).unwrap();
+    assert!(local.global_palette.is_none());
     assert!(local.frames().all(|f| f.local_palette.is_some()));
+    // Left to the encoder, two colours share one global table.
+    let auto = GifFile::parse(&encode_all(&frames, &EncodeOptions::new()).unwrap()).unwrap();
+    assert!(auto.global_palette.is_some());
+    assert!(auto.frames().all(|f| f.local_palette.is_none()));
     let opts = EncodeOptions::new()
         .with_color_table(ColorTableMode::Global)
         .with_comments(["a", "b"]);

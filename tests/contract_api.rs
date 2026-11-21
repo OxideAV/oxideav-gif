@@ -154,7 +154,32 @@ fn decode_shows_the_first_composed_frame_on_random_animations() {
             encode_animation(&frames, &EncodeOptions::default()).unwrap(),
             "encode_animation is a byte-identical alias of encode_all"
         );
+        // The default re-encode shows the same pictures for the same
+        // times; how many images it takes (duplicates are merged into
+        // delays) and how each is disposed of is the encoder's choice.
         let back = decode_all(&anim).unwrap();
+        assert!(back.len() <= frames.len());
+        let total = |fs: &[oxideav_gif::Frame]| -> Duration {
+            fs.iter().map(|f| f.delay.unwrap_or_default()).sum()
+        };
+        assert_eq!(total(&back), total(&frames), "seed {seed}");
+        let mut at = Duration::ZERO;
+        let (mut shown, mut until) = (0usize, back[0].delay.unwrap_or_default());
+        for f in &frames {
+            while at >= until && shown + 1 < back.len() {
+                shown += 1;
+                until += back[shown].delay.unwrap_or_default();
+            }
+            assert_rgba_shows_same(
+                back[shown].image.as_bytes().unwrap(),
+                f.image.as_bytes().unwrap(),
+            );
+            at += f.delay.unwrap_or_default();
+        }
+
+        // Written as given, every frame comes back one for one.
+        let as_given = EncodeOptions::default().with_optimize_animation(false);
+        let back = decode_all(&encode_all(&frames, &as_given).unwrap()).unwrap();
         assert_eq!(back.len(), frames.len());
         for (a, b) in back.iter().zip(&frames) {
             // Every frame of `frames` is a full canvas painted over the

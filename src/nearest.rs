@@ -122,6 +122,8 @@ const MEMO_FILLED: u64 = 1 << 32;
 pub(crate) struct Mapper {
     metric: Metric,
     nearest: Nearest,
+    /// The table's colours as stored.
+    colors: Vec<[u8; 3]>,
     memo: Vec<u64>,
 }
 
@@ -134,6 +136,7 @@ impl Mapper {
         Mapper {
             metric,
             nearest: Nearest::new(&points),
+            colors: palette.iter().map(|c| [c.r, c.g, c.b]).collect(),
             memo: vec![0; 1 << MEMO_BITS],
         }
     }
@@ -147,7 +150,17 @@ impl Mapper {
         if held >> 8 == (MEMO_FILLED >> 8 | u64::from(key)) {
             return held as u8;
         }
-        let index = self.nearest.find(self.metric.point(rgb)).0 as u8;
+        let (mut index, distance) = self.nearest.find(self.metric.point(rgb));
+        // A colour that is itself a table entry maps to that entry, even
+        // if another entry should land on the very same point of the
+        // metric space.
+        if distance == 0.0
+            && self.colors.get(index) != Some(&rgb)
+            && let Some(same) = self.colors.iter().position(|&c| c == rgb)
+        {
+            index = same;
+        }
+        let index = index as u8;
         self.memo[slot] = MEMO_FILLED | u64::from(key) << 8 | u64::from(index);
         index
     }

@@ -161,6 +161,7 @@
 //!
 //! [`Application`]: crate::Application
 
+mod animate;
 mod api;
 pub mod app_ext;
 mod bluenoise;
@@ -196,7 +197,8 @@ pub mod types;
 // with `default-features = false`.
 pub use api::{
     decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
-    encode, encode_all, encode_animation, encode_rgb8, encode_rgba8, encode_to, info, probe,
+    encode, encode_all, encode_animation, encode_rgb8, encode_rgba8, encode_to, info, optimize,
+    probe,
 };
 pub use error::{Error, GifError, Result};
 pub use options::DecodeOptions;

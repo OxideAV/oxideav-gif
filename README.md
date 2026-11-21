@@ -48,7 +48,7 @@ if oxideav_gif::probe(&bytes) {
 | `encode(&GifImage, &EncodeOptions) -> Result<Vec<u8>>` | Single-image GIF. `Pal8` palette written as given; `Rgb24` / `Rgba` quantised (see *Supported layouts*). |
 | `encode_rgb8(w, h, &[u8], &opts)` / `encode_rgba8(..)` | The one-call raw paths: quantised to ≤ 256 colours (exact when the picture has no more); alpha < 128 → the one Transparency Index. |
 | `encode_to<W: Write>` | `encode` into a writer. |
-| `encode_all(&[Frame], &EncodeOptions)` (alias `encode_animation`) | Full-canvas frames (the `decode_all` shape) → animated GIF with per-frame Local Color Tables, delays, disposals, NETSCAPE2.0 loop count. Lossless for opaque frames of ≤ 256 colours each: `decode_all(encode_all(frames)) == frames`. |
+| `encode_all(&[Frame], &EncodeOptions)` (alias `encode_animation`) | Full-canvas frames (the `decode_all` shape) → animated GIF written as inter-frame deltas (see *Animation assembly*), with delays and the NETSCAPE2.0 loop count. Exact when the animation's colours fit one table or each image's changed pixels fit its own; the frames come back as the same screens for the same times (duplicates merged into delays). `with_optimize_animation(false)` writes one full image per frame, each with the frame's own disposal. |
 | `GifImage` | `{ width: u32, height: u32, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette> }` — `new(..) -> Result` (validates geometry), `packed`, `from_rgb8`, `from_rgba8`, `from_indexed`, `with_color` / `with_metadata` / `with_palette`, `width()`, `height()`, `format()`, `as_bytes() -> Option<&[u8]>`, `into_raw()`, `to_rgb8()`, `to_rgba8()`, `has_alpha()`. |
 | `GifPixelFormat` (`PixelFormat`) | `Pal8`, `Rgb24`, `Rgba` — names mirror `oxideav_core::PixelFormat`. |
 | `Plane`, `ColorInfo` / `ColorRange`, `Metadata`, `Palette`, `RgbImage`, `RgbaImage`, `Frame`, `ImageInfo` | The contract records (identical fields in every image crate); `Palette.entries` is `Vec<[u8; 4]>` RGBA. |
@@ -84,7 +84,8 @@ per frame in any of the 21 declared input layouts (`Pal8` / `Rgba` /
 layouts*; `encode` after normalisation), with `params.options` parsed
 into `EncodeOptions` (`lzw_strategy`, `interlace`, `max_colors`,
 `dither`, `dither_strength`, `serpentine`, `palette`, `color_metric`,
-`palette_refine_iterations`, `loop_count`, `embed_metadata`, `quality`,
+`palette_refine_iterations`, `optimize_animation`, `loop_count`,
+`embed_metadata`, `quality`,
 `version`, `background_index`, `pixel_aspect_ratio`, `color_table`); its `output_params` label the
 coded layout, `Pal8`. Drained, `receive_frame` /
 `receive_packet` return `NeedMore` until `flush`, then `Eof`.
@@ -121,9 +122,13 @@ Time, an image that drew from its own packet's Global Color Table gets
 it as a Local Color Table when the tables differ, and a NETSCAPE2.0 loop
 block comes from the stream's `loop_count` option when no packet carries
 one (for the demuxer's own animation packets only when that option is
-set, so a file without a Looping block remuxes without one) — so `demux(mux(frames)) == frames` for opaque frames of ≤ 256
-colours each (`encode_all` semantics), and demux → mux → demux of any
-file reproduces its composited frames, delays, disposal and loop count.
+set, so a file without a Looping block remuxes without one). Encoder
+pictures merged into one animation are rebuilt as inter-frame deltas
+showing the same screens (encoder option `optimize_animation`, default
+`true`; `false` keeps one full image per picture, so that
+`demux(mux(frames)) == frames` for opaque frames of ≤ 256 colours
+each), and demux → mux → demux of any file reproduces its composited
+frames, delays, disposal and loop count.
 `From<GifImage> for VideoFrame` (palette, palette-alpha and
 colour-signal side-channels), `GifImage::from_video_frame(&VideoFrame,
 &CodecParameters)` / `TryFrom<(&VideoFrame, &CodecParameters)>`,
@@ -228,7 +233,9 @@ Image Descriptor **before** any raster is allocated.
 | `background_index: u8` | `0` | §18.c.vii Background Color Index. |
 | `pixel_aspect_ratio: u8` | `0` | §18.c.viii Pixel Aspect Ratio raw byte. |
 | `comments: Vec<Vec<u8>>` | empty | §24 Comment Extensions, written before the first image. |
-| `color_table: ColorTableMode` | `Auto` | `Auto` = global table for a still, one local table per animation frame; `Global` = one shared table (animation frames quantised together); `Local` = no global table. |
+| `color_table: ColorTableMode` | `Auto` | `Auto` = global table for a still; for an animation a global table, with a local one for each image that elects it. `Global` = one shared table only; `Local` = no global table. |
+| `optimize_animation: bool` | `true` | `encode_all` writes inter-frame deltas (merged duplicates, changed rectangles, transparent unchanged pixels, elected tables). `false` = one full image per frame. |
+| `temporal_tolerance: u8` | `0` | Leave an animation pixel as drawn while its source colour stays within this many 8-bit steps per channel. |
 
 `with_iterations(n)` sets `loop_count` from a total play count: `0` =
 forever, `1` = once (no NETSCAPE2.0 block), `n` = loop count `n - 1`.
@@ -701,99 +708,91 @@ Implements every block type defined by the CompuServe specifications:
   eligibility plus a randomized compose-equivalence property, and the
   `decode` fuzz harness asserts `compose(before) == compose(after)` on
   every decodable fuzz input.
-- Truecolor RGBA → GIF encode path (`quantize` module +
-  `GifFile::from_rgba_frame` / `from_rgba_frames`). A GIF cannot carry
-  truecolor — §19/§21 cap a colour table at 256 entries and §22 stores
-  one palette index per pixel — so an encoder fed arbitrary 24-bit RGB
-  has to pick a representative palette and map every pixel to it. The
-  `quantize` module does that with **median cut** (a general,
-  format-independent technique; the spec's only stake is the
-  ≤256-entry/index-plane output shape): `quantize_rgba` reduces an RGBA
-  buffer, folding GIF's lack of per-pixel alpha down to the single
-  §23.c.viii Transparency Index (sub-threshold-alpha pixels route to one
-  reserved palette slot returned as `Quantized::transparent_index`);
-  `quantize_rgb` is the no-alpha entry point; `nearest_index` maps a
-  colour to an existing palette for shared-palette compositing. The §22
-  index plane is the per-pixel nearest-entry argmin over the selected
-  palette — after each median-cut box is averaged to one entry, every
-  pixel is remapped to its true nearest entry rather than keeping the box
-  it was partitioned into, so a colour near a box boundary never carries a
-  strictly-worse assignment (exact-colour inputs stay byte-stable).
-  `QuantizeOptions { max_colors, dither }` adds a `Dither` choice:
-  `Dither::FloydSteinberg` diffuses each pixel's quantisation error onto
-  its not-yet-visited neighbours (7/16 east, 3/16 south-west, 5/16 south,
-  1/16 south-east) so a coarse-palette gradient breaks into a stippled mix
-  that averages back to the source over a small neighbourhood — palette
-  selection is unchanged, only the index-plane assignment; transparent
-  pixels neither receive nor propagate error. Five further error-diffusion
-  kernels widen the choice — `Dither::JarvisJudiceNinke` (12-tap, two-row,
-  ÷48), `Dither::Stucki` (12-tap, two-row, ÷42), `Dither::Burkes` (8-tap,
-  one-row, ÷32), `Dither::Sierra` (10-tap, two-row, ÷32) trade smoothness
-  against edge crispness, and `Dither::Atkinson` (6-tap, ÷8) diffuses only
-  6/8 of the error for a higher-contrast bitmap-display look. All six run
-  through one generic `(dx, dy, num)/divisor` diffuser over a ring of
-  look-ahead error rows (one or two rows deep), and Floyd–Steinberg's output
-  is byte-identical to before. `Dither::OrderedBayer8x8` is the
-  no-inter-pixel-coupling alternative: a fixed per-position bias from an 8×8
-  recursive Bayer threshold matrix, scaled to the palette's mean inter-entry
-  spacing, applied before the nearest-entry search — deterministic, cheap,
-  and producing the characteristic regular cross-hatch. A `serpentine` flag
-  on `QuantizeOptions` (default off, so Floyd–Steinberg stays byte-stable)
-  scans the error-diffusion kernels in boustrophedon order — odd rows
-  right-to-left with mirrored horizontal taps — to break up the directional
-  "worm" artifacts a one-directional raster scan leaves on smooth gradients;
-  it is a no-op for `Dither::None` / `OrderedBayer8x8`, which carry no
-  inter-pixel error. Palette selection is
-  unchanged across every variant. `quantize_rgb_with_options`
-  / `quantize_rgba_with_options` are the option-taking entry points (the
-  bare functions keep the flat nearest-entry default). `QuantizeOptions`
-  also carries a `BoxPriority` knob (`Extent` default / `Population`)
-  selecting *which* colour box median cut splits next: `Extent` splits the
-  box with the widest colour range (the historical, byte-stable rule, which
-  can over-spend the palette on wide-but-sparse outliers), while
-  `Population` splits the box maximising `population × longest_extent` so
-  densely-populated regions of colour space earn more entries — a textbook
-  population-weighted refinement that lowers total quantisation error on
-  skewed distributions. The two rules coincide on uniform-density and
-  exact-colour inputs (so the lossless path stays byte-stable); the default
-  stays `Extent`, opt in with `.box_priority(BoxPriority::Population)`.
-  `QuantizeOptions` further carries a `palette_refine_iterations` count
-  (default `0`) selecting Lloyd (k-means) relaxation of the median-cut
-  palette: each round re-assigns every sample to its nearest entry and
-  recentres each entry on its cluster's centroid, the squared-error-
-  minimising move, so the total error is monotone non-increasing across
-  rounds and the loop stops early on convergence. A textbook k-means
-  refinement of the median-cut seed; it leaves exact-colour inputs
-  byte-stable (Lloyd converges immediately) and lowers total error by
-  5–12 % at a 16-colour budget on structured inputs. The default stays `0`,
-  opt in with `.palette_refine_iterations(8)`.
-  `GifFile::from_rgba_frame` wraps a single frame into a §18 Logical
-  Screen with a §19 Global Color Table (attaching a §23 GCE carrying the
-  reserved transparency index when the frame has transparent pixels,
-  staying GIF87a when fully opaque); `from_rgba_frames` builds a
-  multi-frame animation, each frame quantised to its own §21 Local Color
-  Table and carrying a §23 GCE with its §23.c.vii delay + §23.c.iv
-  disposal, with `loop_count` threading the NETSCAPE2.0 §26 looping
-  Application Extension; `from_rgba_frame_with_options` /
-  `from_rgba_frames_with_options` thread a `QuantizeOptions` (dither) into
-  those paths. `from_rgba_frames_shared_palette` is the one-palette
-  variant: `quantize::quantize_frames_shared` pools every frame's opaque
-  pixels into a single median cut and installs the result as one §18
-  Global Color Table (no per-frame §21 LCTs), reserving one shared
-  §23.c.viii Transparency Index across the animation — smaller output than
-  N independent tables, with no inter-frame palette flicker. The registry
-  `GifEncoder` routes through this: a fully-opaque ≤256-colour frame keeps
-  its exact palette (lossless), and a >256-colour or transparent frame is
-  quantised instead of rejected. `quantize::remap_rgb_to_palette` /
-  `remap_rgba_to_palette` are the fixed-palette counterparts: they take the
-  §19/§21 colour table as *input* and produce only the §22 index plane
-  (no palette is selected), honouring every `Dither` choice — for mapping a
-  frame onto an existing Global Color Table, matching another stream's
-  palette, or re-using one table across an animation without re-running
-  median cut. The RGBA form routes sub-threshold-alpha pixels to a
-  caller-designated §23.c.viii Transparency Index, which must be the table's
-  trailing entry (the universal "reserved slot appended last" convention),
-  so an opaque pixel can never land on it.
+- Truecolour → colour table (`quantize` module). A GIF cannot carry
+  truecolour — §19/§21 cap a colour table at 256 entries and §22 stores
+  one index per pixel — so 24-bit input is reduced to a table and an
+  index plane; the spec's only stake is that output shape.
+  - **Exact when it fits.** A picture with no more distinct colours
+    than the budget keeps exactly those colours, one entry each, in
+    ascending R, G, B order (equal colour sets give equal tables).
+  - **Palette selection** (`PaletteMethod::VarianceSplit`, default):
+    the picture's colour census — exact counts up to 4096 distinct
+    colours, a 64×64×64 grid of cell means past that — is partitioned
+    by repeatedly cutting the box with the largest summed squared
+    deviation across its direction of greatest variance, where the two
+    halves' deviations are smallest; the box means then seed a weighted
+    k-means (`palette_refine_iterations`, default 8, stops on
+    convergence). Distances are measured in CIE L\*a\*b\*
+    (`ColorMetric::Perceptual`, default) or over the stored R, G, B
+    values (`ColorMetric::Rgb`). `PaletteMethod::MedianCut` with
+    `BoxPriority::{Extent, Population}` is the plain median cut;
+    `QuantizeOptions::median_cut()` selects it with R, G, B distances
+    and no dither, byte-stable across releases.
+  - **Transparency.** GIF has one §23.c.viii Transparency Index, no
+    per-pixel alpha: pixels with alpha below 128 take one reserved slot
+    (the table's last entry, part of the budget) and never influence
+    the palette; opaque pixels can never land on it.
+  - **Dithering** (`Dither`, strength 0–100 % with `dither_strength`):
+    `BlueNoise` (default) and `OrderedBayer8x8` are ordered dithers —
+    each pixel is rendered as a mix of its nearest entry and the
+    neighbouring entry that brings the mix closest, thresholded by a
+    64×64 blue-noise rank map (a committed table, generated by the
+    void-and-cluster relaxation of an energy field kept in the crate's
+    tests) or the 8×8 recursive matrix at the
+    pixel's canvas position; a pixel within one just-noticeable
+    difference of an entry is left alone, so text and flat fills stay
+    clean. Six error-diffusion kernels (`FloydSteinberg`,
+    `JarvisJudiceNinke`, `Stucki`, `Burkes`, `Sierra`, `Atkinson`) scan
+    in serpentine order by default, measure the error they pass on from
+    the clamped target colour, and neither take error from nor give it
+    to transparent pixels. `None` is the flat nearest-entry plane.
+  - **Fixed tables.** `remap_rgb_to_palette` / `remap_rgba_to_palette`
+    map onto a caller's table with any dither; `quantize_frames_shared`
+    clusters several frames into one table; `nearest_index` maps one
+    colour.
+  - `GifFile::from_rgba_frame` / `from_rgba_frames` /
+    `from_rgba_frames_shared_palette` (and their `_with_options` forms)
+    wrap quantised frames into a stream one full image per frame;
+    `encode_all` builds an animation as inter-frame deltas (next item).
+- Animation assembly (`encode_all`, `EncodeOptions::optimize_animation`,
+  on by default). The frames are taken as the screens to show and
+  written with as few changed pixels as possible:
+  - a frame equal to the one before it becomes a longer §23.c.vii
+    delay (never across a User Input frame or past the 16-bit field);
+  - each image is the bounding rectangle of the pixels that change
+    (§20.c.ii–v), and inside it the pixels that do not change carry the
+    Transparency Index; a pixel that quantises to the colour already on
+    screen is skipped too when that makes the LZW stream shorter;
+  - images are "do not dispose" (§23.c.iv value 1); a screen position
+    that is opaque in one frame and transparent in the next is only
+    ever covered by "restore to previous" images (value 3), so nothing
+    has to be un-drawn. "Restore to background" is never written — what
+    a reader paints for it depends on whether it honours the Background
+    Color Index;
+  - when every colour fits one table it is the Global Color Table and
+    the animation is exact. Otherwise a global table is clustered from
+    the pixels that change, and an image elects a Local Color Table
+    when its own table renders its changed pixels visibly better
+    (summed over the image, at least about two thousand pixels each one
+    just-noticeable difference closer). An image using few entries of a
+    large table elects a small local table when the shorter LZW codes
+    save more than the table costs. `ColorTableMode::Global` / `Local`
+    force either;
+  - **temporal stability**: a pixel whose source colour has not moved
+    since it was last drawn is not drawn again, under any dither, so
+    static regions keep their indices — no shimmer.
+    `EncodeOptions::temporal_tolerance` (default 0) extends that to
+    pixels that moved by at most that many 8-bit steps per channel
+    (film grain over a static background).
+- Lossless re-optimisation of an existing stream (`optimize(bytes)`,
+  `GifFile::optimize`). The stream is composed and rebuilt as above with
+  exact tables only, keeping its Comment / Application Extension blocks,
+  logical screen fields and User Input flags, and accepted only if
+  `compose` gives the same canvas for every frame and the encoding is
+  smaller. A stream with a Plain Text block, or one that uses "restore
+  to background" while a Background Color is defined, gets only the
+  table hoist and rectangle cropping passes. The registry muxer applies
+  it to the pictures it merges (encoder option `optimize_animation`).
 - `parse_first_frame` cover-frame fast-path that short-circuits at
   the first image-bearing block and skips the per-block dispatch
   for everything that follows. Useful when you only need a static
@@ -840,10 +839,101 @@ Implements every block type defined by the CompuServe specifications:
   `validate_strict().is_ok()` implies `encode_file` accepts the image but not
   conversely.
 
+## Encoder quality, size and speed
+
+Measured with `OXIDEAV_GIF_REPORT=1 cargo test --release --test
+encode_report --test lzw_report -- --nocapture --test-threads=1` on an
+Apple M-series machine shared with other builds (medians of 3–9 runs;
+treat the speeds as ±15 %). The inputs are generated by
+`tests/support/synth.rs` — nothing is committed: a grainy landscape
+photograph, a four-corner colour gradient, 12-colour flat artwork and a
+screen capture (text, a ramp title bar, an inset photograph). "Before"
+is release 0.0.16 (median cut over R, G, B, no dither, deferred-clear
+LZW, one full image per animation frame). ΔE is the mean CIE 1976
+colour difference between source and decoded picture; "ΔE at distance"
+is the same after a 5×5 binomial low-pass of both, a stand-in for
+viewing distance that credits a dither for averaging to the right
+colour. Everything is serial.
+
+**Stills, 640×480, default options**
+
+| Picture | Bytes | ΔE | ΔE at distance | Encode MP/s | Decode MP/s |
+|---|---|---|---|---|---|
+| photograph | 367 599 → 137 201 | 3.71 → 2.63 | 2.51 → 1.15 | 3.5 → 8.1 | 222 → 293 |
+| gradient | 351 061 → 103 859 | 2.80 → 2.56 | 2.55 → 0.90 | 3.1 → 19 | 239 → 308 |
+| flat artwork | 6 193 → 5 330 | exact | exact | 31 → 143 | 390 → 1 860 |
+| screen capture | 56 412 → 37 504 | 0.26 → 0.11 | 0.20 → 0.07 | 14 → 50 | 283 → 743 |
+
+**Dither choice, same pictures** (bytes / ΔE / ΔE at distance)
+
+| Picture | `None` | `BlueNoise` (default) | `OrderedBayer8x8` | `FloydSteinberg` |
+|---|---|---|---|---|
+| photograph | 96 543 / 2.20 / 1.41 | 137 201 / 2.63 / 1.15 | 136 615 / 2.63 / 1.13 | 139 608 / 2.76 / 0.98 |
+| gradient | 32 953 / 2.10 / 1.84 | 103 859 / 2.56 / 0.90 | 86 878 / 2.56 / 0.87 | 96 274 / 2.56 / 0.99 |
+| screen capture | 35 981 / 0.10 / 0.07 | 37 504 / 0.11 / 0.07 | 37 550 / 0.11 / 0.06 | 36 990 / 0.10 / 0.06 |
+
+`Dither::None` is the smallest and the most accurate pixel for pixel;
+the dithers trade bytes and per-pixel error for smooth ramps. With
+`None` the photograph encodes at 11 MP/s and the gradient at 26 MP/s.
+
+**Animations, 320×240, 48 frames at 25 fps, default options**
+
+| Animation | Bytes | ΔE | Encode MP/s | Decode MP/s |
+|---|---|---|---|---|
+| screen recording (typing, moving pointer, every fourth frame repeated) | 670 152 → 18 930 | 0.23 → 0.13 | 11 → 254 | 255 → 6 040 |
+| cartoon (flat shapes moving over a flat scene) | 138 195 → 28 943 | exact | 30 → 179 | 226 → 2 795 |
+| video (slow pan over the photograph, fresh grain every frame) | 4 245 403 → 1 998 074 | 2.73 → 2.12 | 3.2 → 3.3 | 179 → 123 |
+
+Every pixel of the video changes in every frame, so its gain is the LZW
+strategy and the palette alone (1 741 722 bytes at ΔE 1.80 with
+`Dither::None`). Decode speed counts composited screen pixels; the video
+decodes slower than before because its dithered frames hold more LZW
+codes per pixel.
+
+**Lossless re-optimisation** (`optimize`) of the same animations
+written one full image per frame with deferred-clear LZW:
+
+| Existing stream | Bytes | Seconds |
+|---|---|---|
+| screen recording | 722 465 → 162 547 | 0.03 |
+| cartoon | 118 930 → 28 943 | 0.05 |
+| video | 4 470 606 → 1 991 968 | 0.09 |
+
+**LZW, 1024×768 index planes** (bytes; encode and decode in MP/s)
+
+| Index plane | Never clear | Clear when full | Adaptive (default) |
+|---|---|---|---|
+| photograph, dithered | 1 051 697 | 348 275 | 343 123 |
+| gradient | 1 026 875 | 56 692 | 57 124 |
+| screen capture | 173 426 | 77 917 | 77 540 |
+| flat artwork | 414 298 | 8 879 | 8 946 |
+| screen capture, then photograph | 622 214 | 242 252 | 238 645 |
+
+| Index plane | Encode, never clear | Encode, clear when full | Decode, never-cleared stream | Decode, cleared stream |
+|---|---|---|---|---|
+| photograph, dithered | 420 → 600 | 203 → 268 | 315 → 505 | 273 → 318 |
+| gradient | 508 → 640 | 401 → 435 | 337 → 590 | 547 → 1 530 |
+| screen capture | 354 → 370 | 332 → 360 | 529 → 1 450 | 448 → 1 270 |
+| flat artwork | 372 → 385 | 322 → 318 | 488 → 1 480 | 541 → 17 700 |
+| one colour | 290 → 282 | 291 → 281 | 406 → 46 000 | 406 → 46 000 |
+
+The encoder's dictionary stays a directly indexed 2 MiB table: an
+open-addressing hash table of 8192 slots (32 KiB) was measured at 145 to
+250 MP/s on these planes. The adaptive strategy encodes at the speed of
+"clear when full".
+
 ## Fuzzing
 
-`fuzz/fuzz_targets/` ships ten `cargo-fuzz` harnesses, all asserting
+`fuzz/fuzz_targets/` ships eleven `cargo-fuzz` harnesses, all asserting
 panic-freedom on arbitrary bytes:
+
+- `animate` — the inter-frame paths: `optimize` of any parseable
+  stream must compose to the same screens for the same total time and
+  never be larger than its input; `encode_all` of frames built from the
+  bytes (few or many colours, with or without alpha, every disposal,
+  interlace, temporal tolerance) must decode, keep the total duration,
+  and — when the colours fit one table — show the same screens as the
+  frames written one full image each.
 
 - `demux` — the framework path: the bytes as a file into the container
   demuxer, every packet it cuts through the registered `gif` decoder

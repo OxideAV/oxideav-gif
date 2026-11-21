@@ -183,7 +183,6 @@ impl Census {
         self.last = NO_COLOR;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_empty(&self) -> bool {
         self.colors.is_empty() && self.occupied.is_empty()
     }

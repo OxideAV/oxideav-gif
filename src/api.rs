@@ -229,7 +229,6 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
         .ok_or_else(|| Error::invalid_input("encode_all: at least one frame is required"))?;
     let (width, height) = (first.image.width, first.image.height);
     let (w16, h16) = wire_dims(width, height)?;
-    let mut rgba_frames: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
     for (i, f) in frames.iter().enumerate() {
         if f.image.width != width || f.image.height != height {
             return Err(Error::invalid_input(format!(
@@ -237,28 +236,59 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
                 f.image.width, f.image.height
             )));
         }
-        rgba_frames.push(f.image.to_rgba8());
     }
-    let spec: Vec<(&[u8], u16, DisposalMethod)> = frames
-        .iter()
-        .zip(&rgba_frames)
-        .map(|(f, rgba)| (rgba.as_slice(), delay_centis(f.delay), f.disposal))
-        .collect();
-    let mut file = match opts.color_table {
-        ColorTableMode::Global => GifFile::from_rgba_frames_shared_palette(
-            &spec,
-            w16,
-            h16,
-            opts.quantize,
-            opts.loop_count,
-        )?,
-        _ => {
-            GifFile::from_rgba_frames_with_options(&spec, w16, h16, opts.quantize, opts.loop_count)?
+    let mut file = if opts.optimize_animation {
+        let mut track = crate::animate::ScreenTrack::new(width as usize * height as usize);
+        let targets = frames
+            .iter()
+            .map(|f| track.show(&f.image.to_rgba8(), f.disposal))
+            .collect();
+        let timings = frames
+            .iter()
+            .map(|f| crate::animate::Timing {
+                delay_centis: delay_centis(f.delay),
+                user_input: f.user_input,
+            })
+            .collect();
+        let mut file = crate::animate::build(targets, timings, (w16, h16), opts, false)?
+            .ok_or_else(|| Error::invalid_input("encode_all: no stream could be built"))?;
+        if let Some(n) = opts.loop_count {
+            let loop_ctl = crate::app_ext::LoopControl {
+                loop_count: Some(n),
+                buffer_size: None,
+            };
+            file.blocks
+                .insert(0, Block::Application(loop_ctl.to_application()));
         }
+        file
+    } else {
+        let rgba_frames: Vec<Vec<u8>> = frames.iter().map(|f| f.image.to_rgba8()).collect();
+        let spec: Vec<(&[u8], u16, DisposalMethod)> = frames
+            .iter()
+            .zip(&rgba_frames)
+            .map(|(f, rgba)| (rgba.as_slice(), delay_centis(f.delay), f.disposal))
+            .collect();
+        let mut file = match opts.color_table {
+            ColorTableMode::Global => GifFile::from_rgba_frames_shared_palette(
+                &spec,
+                w16,
+                h16,
+                opts.quantize,
+                opts.loop_count,
+            )?,
+            _ => GifFile::from_rgba_frames_with_options(
+                &spec,
+                w16,
+                h16,
+                opts.quantize,
+                opts.loop_count,
+            )?,
+        };
+        if opts.interlace {
+            file.set_frames_interlaced(true);
+        }
+        file
     };
-    if opts.interlace {
-        file.set_frames_interlaced(true);
-    }
     if opts.embed_metadata {
         let extra = metadata_blocks(&first.image.metadata);
         if !extra.is_empty() {
@@ -274,6 +304,25 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
     }
     opts.apply_stream_fields(&mut file);
     encode_file_with(&file, opts)
+}
+
+/// Re-encode a GIF so that it shows exactly the same screens for the
+/// same times in fewer bytes ([`GifFile::optimize`], then the adaptive
+/// LZW strategy). The input is returned unchanged when nothing smaller
+/// was found.
+///
+/// # Errors
+///
+/// Whatever [`crate::parse`] reports for `bytes`.
+pub fn optimize(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut file = crate::decoder::parse(bytes)?;
+    file.optimize();
+    let out = encode_file_with(&file, &EncodeOptions::default())?;
+    Ok(if out.len() < bytes.len() {
+        out
+    } else {
+        bytes.to_vec()
+    })
 }
 
 /// GIF-named alias of [`encode_all`] (animated GIF from full-canvas
@@ -1074,7 +1123,17 @@ mod tests {
         let back = decode_all(&bytes).unwrap();
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].delay, Some(Duration::from_millis(100)));
-        assert_eq!(back[0].disposal, DisposalMethod::RestoreBackground);
+        // The disposal written is the encoder's choice (nothing is left
+        // to restore here); written as given, it is the frame's own.
+        assert_eq!(back[0].disposal, DisposalMethod::Keep);
+        let as_given =
+            encode_animation(&frames, &opts.clone().with_optimize_animation(false)).unwrap();
+        let as_given = decode_all(&as_given).unwrap();
+        assert_eq!(as_given[0].disposal, DisposalMethod::RestoreBackground);
+        assert_eq!(
+            as_given[1].image.as_bytes().unwrap(),
+            back[1].image.as_bytes().unwrap()
+        );
         assert_eq!(back[1].delay, Some(Duration::from_millis(250)));
         assert_eq!(back[0].image.as_bytes().unwrap()[..4], [255, 0, 0, 255]);
         assert_eq!(back[0].image.as_bytes().unwrap()[7], 0);

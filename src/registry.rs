@@ -806,6 +806,17 @@ impl CodecOptionsStruct for EncodeOptions {
                    else the ratio is (value + 15) / 64).",
         },
         OptionField {
+            name: "optimize_animation",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(true),
+            help: "When the muxer merges this encoder's pictures into one \
+                   animation, rebuild them as inter-frame deltas showing \
+                   the same screens (duplicate frames merged into delays, \
+                   changed rectangles, transparent unchanged pixels, \
+                   shared colour tables). `false` writes one full image \
+                   per picture.",
+        },
+        OptionField {
             name: "color_table",
             kind: OptionKind::Enum(&["auto", "global", "local"]),
             default: OptionValue::String(String::new()),
@@ -900,6 +911,7 @@ impl CodecOptionsStruct for EncodeOptions {
                 }
             }
             "embed_metadata" => self.embed_metadata = v.as_bool()?,
+            "optimize_animation" => self.optimize_animation = v.as_bool()?,
             "version" => {
                 self.version = match v.as_str()? {
                     "" | "auto" => None,

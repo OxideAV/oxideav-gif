@@ -97,7 +97,7 @@ pub enum Dither {
     /// proportionally finer bias.
     OrderedBayer8x8,
     /// Ordered dithering with a 64×64 blue-noise threshold map (a
-    /// void-and-cluster rank ordering built on first use). Like
+    /// void-and-cluster rank ordering). Like
     /// [`Dither::OrderedBayer8x8`] every pixel is decided on its own
     /// from its position, so a region that does not change between two
     /// frames of an animation dithers identically in both — no shimmer —

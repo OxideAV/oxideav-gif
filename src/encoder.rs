@@ -50,8 +50,14 @@ pub enum LzwStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ColorTableMode {
-    /// A single image gets a §19 Global Color Table; each animation frame
-    /// gets its own §21 Local Color Table (quantised independently).
+    /// A single image gets a §19 Global Color Table. An animation gets
+    /// one when its colours fit it or when it serves the frames as well
+    /// as tables of their own would; an image whose changed pixels are
+    /// visibly better served by their own table, or which uses so few
+    /// entries that a small table plus shorter LZW codes is smaller, gets
+    /// a §21 Local Color Table. (With
+    /// [`EncodeOptions::optimize_animation`] off: one Local Color Table
+    /// per frame, quantised independently.)
     #[default]
     Auto,
     /// One §19 Global Color Table for the whole stream; no image carries
@@ -122,6 +128,21 @@ pub struct EncodeOptions {
     /// Global vs local colour tables for the pixel-building encoders
     /// ([`ColorTableMode`]). Default [`ColorTableMode::Auto`].
     pub color_table: ColorTableMode,
+    /// Let [`crate::encode_all`] write an animation as inter-frame
+    /// deltas: duplicate frames merged into delays, each image cropped to
+    /// the pixels that change with the unchanged ones transparent, colour
+    /// tables elected per image (see [`crate::encode_all`]). Default
+    /// `true`. With `false` every frame is written as given: a
+    /// full-screen image with the frame's own disposal method.
+    pub optimize_animation: bool,
+    /// How far (per channel, in 8-bit steps) a pixel's source colour may
+    /// have moved since the pixel was last drawn for [`crate::encode_all`]
+    /// to leave it as it is. `0` (default) redraws every pixel whose
+    /// source colour changed at all; a small value keeps noisy
+    /// near-static regions (film grain, sensor noise) still, which
+    /// removes their shimmer and most of their bytes, at the price of an
+    /// error of at most that many steps in such regions.
+    pub temporal_tolerance: u8,
 }
 
 impl EncodeOptions {
@@ -221,6 +242,19 @@ impl EncodeOptions {
         self
     }
 
+    /// Enable or disable inter-frame optimisation of animations.
+    pub fn with_optimize_animation(mut self, optimize_animation: bool) -> Self {
+        self.optimize_animation = optimize_animation;
+        self
+    }
+
+    /// Set the per-channel tolerance below which a pixel of an animation
+    /// is not redrawn.
+    pub fn with_temporal_tolerance(mut self, temporal_tolerance: u8) -> Self {
+        self.temporal_tolerance = temporal_tolerance;
+        self
+    }
+
     /// Apply the stream-level fields (Background Color Index, Pixel
     /// Aspect Ratio, comments, version) to a `file` the pixel-building
     /// encoders assembled.
@@ -253,6 +287,8 @@ impl Default for EncodeOptions {
             pixel_aspect_ratio: 0,
             comments: Vec::new(),
             color_table: ColorTableMode::Auto,
+            optimize_animation: true,
+            temporal_tolerance: 0,
         }
     }
 }

@@ -373,9 +373,13 @@ pub fn open_muxer(
     // The stream's metadata blobs become the file's extensions when
     // no packet carries them.
     let (meta, blob_comments) = blobs_to_gif(&s.params.blobs);
+    let optimize = parse_options::<EncodeOptions>(&s.params.options)
+        .map(|o| o.optimize_animation)
+        .unwrap_or(true);
     Ok(Box::new(GifMuxer {
         output,
         loop_count,
+        optimize,
         blob_app_blocks: crate::api::metadata_blocks(&meta),
         blob_comments,
         text: TextMetadata::default(),
@@ -421,6 +425,9 @@ struct GifMuxer {
     output: Box<dyn WriteSeek>,
     /// The `loop_count` option of the stream's encoder schema.
     loop_count: Option<u16>,
+    /// The `optimize_animation` option of the stream's encoder schema:
+    /// rebuild merged encoder packets as inter-frame deltas.
+    optimize: bool,
     /// The stream's ICC / Exif / XMP blobs as Application Extensions.
     blob_app_blocks: Vec<Block>,
     /// The stream's `gif-comment` blobs as §24 Comment blocks.
@@ -536,6 +543,7 @@ impl Muxer for GifMuxer {
                     self.text.loop_count,
                     &stream_blocks,
                     !self.split_packets,
+                    self.optimize && !self.split_packets,
                 )?;
                 self.output.write_all(&merged)?;
             }
@@ -711,6 +719,7 @@ fn merge_packets(
     loop_override: Option<Option<u16>>,
     stream_blocks: &[Block],
     dedupe_metadata: bool,
+    optimize: bool,
 ) -> CoreResult<Vec<u8>> {
     let opts = DecodeOptions::default().unlimited();
     let mut files = Vec::with_capacity(packets.len());
@@ -812,5 +821,11 @@ fn merge_packets(
         blocks,
     };
     merged.upgrade_version_if_needed();
+    if optimize {
+        // Encoder packets are full-screen stills; written one after the
+        // other they repeat everything that does not move. Rebuild them
+        // as inter-frame deltas showing the same screens.
+        merged.optimize();
+    }
     Ok(encode_file_with(&merged, &EncodeOptions::default())?)
 }

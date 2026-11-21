@@ -84,3 +84,9 @@ name = "registry_encode"
 path = "fuzz_targets/registry_encode.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "animate"
+path = "fuzz_targets/animate.rs"
+test = false
+doc = false

@@ -1441,6 +1441,60 @@ impl GifFile {
         crate::compose::optimize_frame_rects_impl(self)
     }
 
+    /// Re-encode the stream so that it shows exactly the same screens
+    /// for the same times in fewer bytes, in place. Returns `true` when
+    /// the stream was replaced by a smaller one.
+    ///
+    /// The frames are composed (the §23 disposal walk of
+    /// [`crate::compose()`]) and written again as inter-frame deltas:
+    /// frames that show the same screen as the one before are merged
+    /// into its §23.c.vii delay, every image is cropped to the pixels
+    /// that change with the unchanged ones behind the §23.c.viii
+    /// Transparency Index, colour tables are shared where the colours
+    /// fit one table and trimmed to the entries in use, and each raster
+    /// is compressed with the adaptive Appendix F strategy. Comment and
+    /// Application Extension blocks (looping, ICC, XMP, …), the logical
+    /// screen fields and the User Input flags are kept.
+    ///
+    /// What is compared is the composed result: after the call,
+    /// [`crate::compose()`] gives the same canvas for every moment of
+    /// the animation (the method checks this before accepting the
+    /// rebuilt stream). The number of images can drop (merged
+    /// duplicates), and their rectangles, disposal methods and tables
+    /// are new.
+    ///
+    /// A stream that cannot be restructured without risk — it has a §25
+    /// Plain Text block, or uses "restore to background" while a
+    /// Background Color is defined (readers disagree on what that
+    /// paints) — only gets the table hoist of
+    /// [`Self::optimize_color_tables`] and the cropping of
+    /// [`Self::optimize_frame_rects`]. Whatever is tried, the stream is
+    /// replaced only by one whose encoding is strictly smaller.
+    pub fn optimize(&mut self) -> bool {
+        let size = |file: &GifFile| crate::encode_file(file).map_or(usize::MAX, |b| b.len());
+        let mut best: Option<(usize, GifFile)> = None;
+        let mut consider = |candidate: GifFile| {
+            let bytes = size(&candidate);
+            if best.as_ref().is_none_or(|(least, _)| bytes < *least) {
+                best = Some((bytes, candidate));
+            }
+        };
+        let mut cropped = self.clone();
+        cropped.optimize_color_tables();
+        cropped.optimize_frame_rects();
+        consider(cropped);
+        if let Some(rebuilt) = crate::animate::reoptimize(self) {
+            consider(rebuilt);
+        }
+        match best {
+            Some((bytes, candidate)) if bytes < size(self) => {
+                *self = candidate;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Minimum GIF version that this stream's block list requires.
     ///
     /// Returns the maximum of every contained [`Block::required_version`]

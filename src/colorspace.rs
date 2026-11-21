@@ -61,12 +61,35 @@ fn linear_table() -> &'static [f32; 256] {
     TABLE.get_or_init(|| std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0)))
 }
 
-fn lightness_fn(t: f32) -> f32 {
+fn lightness_fn_direct(t: f32) -> f32 {
     if t > CUBE_ROOT_TOE {
         t.cbrt()
     } else {
         TOE_SLOPE * t + 4.0 / 29.0
     }
+}
+
+/// Segments of the tabulated lightness function over `0.0..=1.0`.
+const LIGHTNESS_SEGMENTS: usize = 4096;
+
+/// The CIE lightness function `f(t)` for `t` in `0.0..=1.0`, linearly
+/// interpolated from a table (the cube root is by far the most expensive
+/// step of the conversion). The curve is smooth and the table fine
+/// enough that the interpolation stays within a few thousandths of an
+/// L\*a\*b\* unit; every point of the space goes through this one
+/// function, so distances are consistent.
+#[inline]
+fn lightness_fn(t: f32) -> f32 {
+    static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        (0..=LIGHTNESS_SEGMENTS + 1)
+            .map(|i| lightness_fn_direct(i as f32 / LIGHTNESS_SEGMENTS as f32))
+            .collect()
+    });
+    let x = t.clamp(0.0, 1.0) * LIGHTNESS_SEGMENTS as f32;
+    let i = x as usize;
+    let frac = x - i as f32;
+    table[i] + (table[i + 1] - table[i]) * frac
 }
 
 fn lightness_fn_inverse(f: f32) -> f32 {

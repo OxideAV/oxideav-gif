@@ -95,7 +95,13 @@ fn frames_of(raw: &[Vec<u8>], w: usize, h: usize) -> Vec<Frame> {
 }
 
 fn anim_configs() -> Vec<(&'static str, EncodeOptions)> {
-    vec![("default", EncodeOptions::default())]
+    let d = EncodeOptions::default;
+    vec![
+        ("frames as given", d().with_optimize_animation(false)),
+        ("default", d()),
+        ("no dither", d().with_dither(Dither::None)),
+        ("tolerance 4", d().with_temporal_tolerance(4)),
+    ]
 }
 
 #[test]
@@ -150,5 +156,45 @@ fn animations_report() {
                 mp / dec,
             );
         }
+    }
+}
+
+/// Lossless re-optimisation of existing streams: the animations written
+/// one full image per frame, then [`oxideav_gif::optimize`].
+#[test]
+fn reoptimise_report() {
+    let (w, h, n) = if full() { (320, 240, 48) } else { (64, 48, 8) };
+    let anims: Vec<(&str, Vec<Vec<u8>>)> = vec![
+        ("screen recording", synth::anim_screen(w, h, n)),
+        ("cartoon", synth::anim_cartoon(w, h, n)),
+        ("video", synth::anim_video(w, h, n)),
+    ];
+    println!("| existing stream | bytes | after `optimize` | seconds |");
+    println!("|---|---|---|---|");
+    for (name, raw) in &anims {
+        let frames = frames_of(raw, w, h);
+        let as_given = EncodeOptions::default()
+            .with_optimize_animation(false)
+            .with_lzw_strategy(oxideav_gif::LzwStrategy::DeferredClear);
+        let before = oxideav_gif::encode_all(&frames, &as_given).unwrap();
+        let after = oxideav_gif::optimize(&before).unwrap();
+        let secs = synth::median_secs(1, || oxideav_gif::optimize(&before).unwrap());
+        assert!(after.len() <= before.len());
+        let show = |b: &[u8]| -> Vec<Vec<u8>> {
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            for f in oxideav_gif::decode_all(b).unwrap() {
+                let px = f.image.to_rgba8();
+                if out.last() != Some(&px) {
+                    out.push(px);
+                }
+            }
+            out
+        };
+        assert!(show(&before) == show(&after), "{name}: the show changed");
+        println!(
+            "| {name} | {} | {} | {secs:.2} |",
+            before.len(),
+            after.len()
+        );
     }
 }

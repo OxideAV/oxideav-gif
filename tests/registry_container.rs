@@ -670,6 +670,73 @@ fn muxer_merges_encoder_packets_into_an_animation_with_delays_and_loop() {
 /// The stream-structure encoder options (#14) survive the packet merge:
 /// header version, Background Color Index, Pixel Aspect Ratio, and
 /// local-only colour tables.
+/// The muxer rebuilds merged encoder pictures as inter-frame deltas
+/// (the `optimize_animation` option, on by default): the same screens,
+/// far fewer bytes; with the option off, one full image per picture.
+#[test]
+fn muxer_writes_encoder_pictures_as_inter_frame_deltas() {
+    let ctx = ctx();
+    let (w, h) = (48u32, 32u32);
+    // A flat two-tone background with a small block that moves; the
+    // fifth picture repeats the fourth.
+    let picture = |t: u32| {
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let block = (4 + t * 6..10 + t * 6).contains(&x) && (10..16).contains(&y);
+                let c = if block {
+                    [250, 200, 0]
+                } else if (x / 8 + y / 8) % 2 == 0 {
+                    [30, 40, 60]
+                } else {
+                    [200, 210, 220]
+                };
+                px.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        GifImage::from_rgba8(w, h, px).unwrap()
+    };
+    let frames: Vec<GifImage> = [0, 1, 2, 3, 3, 4].into_iter().map(picture).collect();
+    let durations = [50i64; 6];
+    let tb = TimeBase::new(1, 1000);
+
+    let (stream, packets) = encoder_packets(&ctx, &frames, tb, &durations, &[]);
+    let deltas = mux(&stream, &packets);
+    let (stream, packets) = encoder_packets(
+        &ctx,
+        &frames,
+        tb,
+        &durations,
+        &[("optimize_animation", "false")],
+    );
+    let full = mux(&stream, &packets);
+    assert!(
+        deltas.len() * 2 < full.len(),
+        "{} vs {}",
+        deltas.len(),
+        full.len()
+    );
+
+    // One full image per picture when off; merged duplicate and cropped
+    // images when on.
+    let full_file = GifFile::parse(&full).unwrap();
+    assert_eq!(full_file.frame_count(), 6);
+    let delta_file = GifFile::parse(&deltas).unwrap();
+    assert_eq!(delta_file.frame_count(), 5);
+    assert!(delta_file.frames().skip(1).all(|f| u32::from(f.width) < w));
+
+    // Both show every picture exactly, for the same total time.
+    let shown = decode_all(&deltas).unwrap();
+    let pictures: Vec<Vec<u8>> = frames.iter().map(|f| f.to_rgba8()).collect();
+    for (k, want) in [0usize, 1, 2, 3, 5].into_iter().enumerate() {
+        assert_eq!(shown[k].image.to_rgba8(), pictures[want], "image {k}");
+    }
+    assert_eq!(shown[3].delay, Some(Duration::from_millis(100)));
+    for (got, want) in decode_all(&full).unwrap().iter().zip(&pictures) {
+        assert_eq!(&got.image.to_rgba8(), want);
+    }
+}
+
 #[test]
 fn muxer_keeps_the_stream_structure_options() {
     let ctx = ctx();

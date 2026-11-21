@@ -12,12 +12,19 @@
 - LZW decoder: a dictionary entry is an (output offset, length) pair, and a code is expanded with one copy from earlier output instead of a pixel-by-pixel chain walk and a reversal; the bit reader works on a 64-bit window. Decode of the same planes: 273 → 320 MP/s (dithered photograph), 448 → 1 100 MP/s (screen capture), 541 → 12 000 MP/s (flat artwork). Interlaced images are de-interlaced inside the decoded raster (no second raster).
 - The encoder no longer copies a non-interlaced index plane before compressing it, and reuses one LZW dictionary across the images of a stream.
 
+- `encode_all` / `encode_animation` build an animation as inter-frame deltas (`EncodeOptions::optimize_animation`, on by default): duplicate frames are merged into delays, each image is cropped to the pixels that change with the unchanged ones behind the Transparency Index, positions that turn transparent are only covered by "restore to previous" images, and each image elects between a shared Global Color Table and a table of its own. The frames given are the screens to show; the frame count, rectangles and disposal methods written are the encoder's. A 320×240, 48-frame screen recording goes from 670 152 to 18 930 bytes, a flat cartoon from 138 195 to 28 943 (exact). `with_optimize_animation(false)` writes one full image per frame as before. `ColorTableMode::Auto` no longer means "one Local Color Table per frame" for an optimised animation.
+- A pixel of an animation whose source colour has not changed since it was last drawn is never redrawn, under any dither: static regions no longer shimmer.
+- The registry muxer rebuilds the encoder pictures it merges as inter-frame deltas showing the same screens (encoder option `optimize_animation`, default `true`); packets cut by the demuxer are still written back as they were.
+
 ### Added
 
+- `optimize(bytes)` and `GifFile::optimize`: lossless re-optimisation of an existing GIF (composed, rebuilt as inter-frame deltas with exact tables, accepted only when `compose` gives the same canvases and the result is smaller).
+- `EncodeOptions::optimize_animation`, `EncodeOptions::temporal_tolerance` (leave a pixel alone while its source colour stays within that many steps of what was drawn).
+- `animate` fuzz target with a tracked seed corpus.
 - `LzwStrategy::Adaptive` and `LzwStrategy::Smallest` (compress under every strategy, keep the shortest); registry values `lzw_strategy = adaptive | smallest`.
 - `DecodeOptions::max_frames` / `with_max_frames`: reject a stream with more than that many images.
 - `QuantizeOptions::method` (`PaletteMethod::{VarianceSplit, MedianCut}`), `QuantizeOptions::metric` (`ColorMetric::{Perceptual, Rgb}`), `QuantizeOptions::dither_strength` (percent) and `QuantizeOptions::median_cut()`.
-- `Dither::BlueNoise`: ordered dithering on a void-and-cluster rank map built on first use; position-stable, so an unchanged region dithers identically in every frame of an animation.
+- `Dither::BlueNoise`: ordered dithering on a 64×64 void-and-cluster rank map (a committed table; its integer-only generator runs in the tests); position-stable, so an unchanged region dithers identically in every frame of an animation.
 - Registry encoder options `dither = blue_noise`, `dither_strength`, `serpentine`, `palette` (`variance_split` / `median_cut`), `color_metric` (`perceptual` / `rgb`) and `palette_refine_iterations`.
 
 ## [0.0.16](https://github.com/OxideAV/oxideav-gif/compare/v0.0.15...v0.0.16) - 2026-11-07
