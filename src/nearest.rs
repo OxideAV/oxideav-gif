@@ -8,6 +8,27 @@
 //! point beyond it — so the walk stops there. The result is exactly the
 //! `argmin` of the squared Euclidean distance, with ties resolved to the
 //! lowest original index (what a linear scan in index order returns).
+//!
+//! Most queries end sooner. If the query lies closer to a point `p` than
+//! half the distance from `p` to its own nearest neighbour, the triangle
+//! inequality puts every other point `f` strictly farther away:
+//! `d(q, f) ≥ d(p, f) − d(q, p) > d(q, p)`. So each point carries a
+//! quarter of its squared nearest-neighbour distance, the search returns
+//! the moment a candidate falls under its own bound, and a caller's
+//! guess (the answer for the previous pixel) is tested against that
+//! bound before anything else.
+//!
+//! For long streams of queries (every pixel of a picture) a uniform grid
+//! over the points' bounding box narrows the candidates further. A grid
+//! cell with centre `c` and half-diagonal `r` lists every point within
+//! `d_min(c) + 2r` of `c`, where `d_min(c)` is the distance from `c` to
+//! its nearest point `e`. That list contains the nearest point `p` of
+//! any query `q` inside the cell: `d(c, p) ≤ d(c, q) + d(q, p) ≤ r +
+//! d(q, e) ≤ r + d(c, e) + r`. A cell's list is built the fourth time a
+//! query lands in it (until then the sorted walk answers), so a short
+//! stream never pays for lists it would not use, and a query outside
+//! the grid falls back to the walk. Either way the answer is the same
+//! exact `argmin`.
 
 use crate::colorspace::Metric;
 use crate::image::Rgb;
@@ -21,6 +42,114 @@ pub(crate) struct Nearest {
     points: Vec<[f32; 3]>,
     /// Original index of each sorted point.
     origin: Vec<u16>,
+    /// Sorted position of each original index.
+    slot: Vec<u16>,
+    /// Per sorted point: a query whose squared distance to it is below
+    /// this has it as its only nearest point (a quarter of the squared
+    /// distance to the point's nearest neighbour, shaved for rounding).
+    certain: Vec<f32>,
+    /// Candidate lists per region of space; `None` for a handful of
+    /// points.
+    grid: Option<Grid>,
+}
+
+/// Grid cells aimed at per point.
+const CELLS_PER_POINT: f32 = 128.0;
+/// Most cells a grid may have.
+const MAX_CELLS: usize = 1 << 16;
+/// Queries a cell answers by the sorted walk before its list is built.
+const BUILD_ON_HIT: u8 = 4;
+
+#[derive(Clone, Copy, Default)]
+struct GridCell {
+    /// Start of the cell's candidates in the arena.
+    start: u32,
+    /// Number of candidates; `0` while the list is not built.
+    len: u16,
+    hits: u8,
+}
+
+struct Grid {
+    /// Corner of the grid.
+    low: [f32; 3],
+    /// Cells per unit length.
+    scale: f32,
+    dims: [usize; 3],
+    /// Twice the half-diagonal of a cell.
+    reach: f32,
+    cells: Vec<GridCell>,
+    /// The candidates of every built cell: position and original index.
+    arena: Vec<([f32; 3], u16)>,
+}
+
+impl Grid {
+    fn new(points: &[[f32; 3]]) -> Option<Self> {
+        if points.len() < 16 {
+            return None;
+        }
+        let mut low = [f32::INFINITY; 3];
+        let mut high = [f32::NEG_INFINITY; 3];
+        for p in points {
+            for a in 0..3 {
+                low[a] = low[a].min(p[a]);
+                high[a] = high[a].max(p[a]);
+            }
+        }
+        // Cell edge: the box (at least one unit thick each way) shared
+        // out at `CELLS_PER_POINT` cells per point.
+        let volume: f32 = (0..3).map(|a| (high[a] - low[a]).max(1.0)).product();
+        let mut edge = (volume / (points.len() as f32 * CELLS_PER_POINT)).cbrt();
+        if !edge.is_finite() || edge <= 0.0 {
+            return None;
+        }
+        // Two cells of margin all round catch queries just outside.
+        let dims_for = |edge: f32| -> [usize; 3] {
+            std::array::from_fn(|a| ((high[a] - low[a]) / edge).ceil() as usize + 4)
+        };
+        let mut dims = dims_for(edge);
+        let total = dims[0].saturating_mul(dims[1]).saturating_mul(dims[2]);
+        if total > MAX_CELLS {
+            edge *= (total as f32 / MAX_CELLS as f32).cbrt() * 1.1;
+            dims = dims_for(edge);
+        }
+        let total = dims[0].checked_mul(dims[1])?.checked_mul(dims[2])?;
+        if total > 2 * MAX_CELLS {
+            return None;
+        }
+        Some(Grid {
+            low: low.map(|v| v - 2.0 * edge),
+            scale: 1.0 / edge,
+            dims,
+            reach: edge * 3.0f32.sqrt(),
+            cells: vec![GridCell::default(); total],
+            arena: Vec::new(),
+        })
+    }
+
+    /// The cell holding `q`.
+    #[inline]
+    fn locate(&self, q: [f32; 3]) -> Option<usize> {
+        let mut at = [0usize; 3];
+        for a in 0..3 {
+            let f = (q[a] - self.low[a]) * self.scale;
+            // Also false for a NaN.
+            if !(f >= 0.0 && f < self.dims[a] as f32) {
+                return None;
+            }
+            at[a] = f as usize;
+        }
+        Some((at[2] * self.dims[1] + at[1]) * self.dims[0] + at[0])
+    }
+
+    /// Centre of a cell.
+    fn centre(&self, cell: usize) -> [f32; 3] {
+        let at = [
+            cell % self.dims[0],
+            cell / self.dims[0] % self.dims[1],
+            cell / (self.dims[0] * self.dims[1]),
+        ];
+        std::array::from_fn(|a| self.low[a] + (at[a] as f32 + 0.5) / self.scale)
+    }
 }
 
 fn squared_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -50,12 +179,98 @@ impl Nearest {
                 .total_cmp(&points[j as usize][axis])
                 .then(i.cmp(&j))
         });
+        let sorted: Vec<[f32; 3]> = order.iter().map(|&i| points[i as usize]).collect();
+        let certain = (0..sorted.len())
+            .map(|i| {
+                let gap = (0..sorted.len())
+                    .filter(|&j| j != i)
+                    .map(|j| squared_distance(sorted[i], sorted[j]))
+                    .fold(f32::INFINITY, f32::min);
+                gap * 0.2499
+            })
+            .collect();
+        let mut slot = vec![0u16; order.len()];
+        for (at, &origin) in order.iter().enumerate() {
+            slot[origin as usize] = at as u16;
+        }
         Nearest {
             axis,
             keys: order.iter().map(|&i| points[i as usize][axis]).collect(),
-            points: order.iter().map(|&i| points[i as usize]).collect(),
+            points: sorted,
             origin: order,
+            slot,
+            certain,
+            grid: Grid::new(points),
         }
+    }
+
+    /// [`Self::find_near`] through the grid of candidate lists (see the
+    /// module docs); the same answer, faster over many queries.
+    #[inline]
+    pub(crate) fn find_fast(&mut self, q: [f32; 3], guess: usize) -> (usize, f32) {
+        if let Some(&slot) = self.slot.get(guess) {
+            let d = squared_distance(self.points[slot as usize], q);
+            if d < self.certain[slot as usize] {
+                return (guess, d);
+            }
+        }
+        let Some(cell) = self.grid.as_ref().and_then(|g| g.locate(q)) else {
+            return self.find(q);
+        };
+        let grid = self.grid.as_mut().expect("located in a grid");
+        let state = &mut grid.cells[cell];
+        if state.len == 0 {
+            state.hits += 1;
+            if state.hits < BUILD_ON_HIT {
+                return self.find(q);
+            }
+            // Every point within `d_min + reach` of the centre.
+            let centre = grid.centre(cell);
+            let nearest = self
+                .points
+                .iter()
+                .map(|&p| squared_distance(p, centre))
+                .fold(f32::INFINITY, f32::min);
+            let bound = nearest.sqrt() + grid.reach;
+            let bound = bound * bound * 1.0001 + 1e-4;
+            let start = grid.arena.len();
+            grid.arena.extend(
+                self.points
+                    .iter()
+                    .zip(&self.origin)
+                    .filter(|(p, _)| squared_distance(**p, centre) <= bound)
+                    .map(|(&p, &o)| (p, o)),
+            );
+            let state = &mut grid.cells[cell];
+            state.start = start as u32;
+            state.len = (grid.arena.len() - start) as u16;
+        }
+        let state = grid.cells[cell];
+        let candidates =
+            &grid.arena[state.start as usize..state.start as usize + state.len as usize];
+        let mut best = f32::INFINITY;
+        let mut best_origin = u16::MAX;
+        for &(p, o) in candidates {
+            let d = squared_distance(p, q);
+            if d < best || (d == best && o < best_origin) {
+                best = d;
+                best_origin = o;
+            }
+        }
+        (best_origin as usize, best)
+    }
+
+    /// [`Self::find`], first trying `guess` (an original index, such as
+    /// the answer to a nearby query).
+    #[cfg(test)]
+    pub(crate) fn find_near(&self, q: [f32; 3], guess: usize) -> (usize, f32) {
+        if let Some(&slot) = self.slot.get(guess) {
+            let d = squared_distance(self.points[slot as usize], q);
+            if d < self.certain[slot as usize] {
+                return (guess, d);
+            }
+        }
+        self.find(q)
     }
 
     /// Index (into the slice given to [`Self::new`]) of the point nearest
@@ -67,6 +282,7 @@ impl Nearest {
         let mut lo = hi;
         let mut best = f32::INFINITY;
         let mut best_origin = u16::MAX;
+        // `true` when the candidate is certainly the answer.
         let consider = |slot: usize, best: &mut f32, best_origin: &mut u16| {
             let d = squared_distance(self.points[slot], q);
             let o = self.origin[slot];
@@ -74,13 +290,16 @@ impl Nearest {
                 *best = d;
                 *best_origin = o;
             }
+            d < self.certain[slot]
         };
         loop {
             let mut progressed = false;
             if hi < n {
                 let along = self.keys[hi] - qa;
                 if along * along <= best {
-                    consider(hi, &mut best, &mut best_origin);
+                    if consider(hi, &mut best, &mut best_origin) {
+                        break;
+                    }
                     hi += 1;
                     progressed = true;
                 } else {
@@ -90,7 +309,9 @@ impl Nearest {
             if lo > 0 {
                 let along = qa - self.keys[lo - 1];
                 if along * along <= best {
-                    consider(lo - 1, &mut best, &mut best_origin);
+                    if consider(lo - 1, &mut best, &mut best_origin) {
+                        break;
+                    }
                     lo -= 1;
                     progressed = true;
                 } else {
@@ -125,6 +346,8 @@ pub(crate) struct Mapper {
     /// The table's colours as stored.
     colors: Vec<[u8; 3]>,
     memo: Vec<u64>,
+    /// The previous answer: neighbouring pixels usually share it.
+    last: usize,
 }
 
 impl Mapper {
@@ -138,6 +361,7 @@ impl Mapper {
             nearest: Nearest::new(&points),
             colors: palette.iter().map(|c| [c.r, c.g, c.b]).collect(),
             memo: vec![0; 1 << MEMO_BITS],
+            last: 0,
         }
     }
 
@@ -150,7 +374,7 @@ impl Mapper {
         if held >> 8 == (MEMO_FILLED >> 8 | u64::from(key)) {
             return held as u8;
         }
-        let (mut index, distance) = self.nearest.find(self.metric.point(rgb));
+        let (mut index, distance) = self.nearest.find_fast(self.metric.point(rgb), self.last);
         // A colour that is itself a table entry maps to that entry, even
         // if another entry should land on the very same point of the
         // metric space.
@@ -160,6 +384,7 @@ impl Mapper {
         {
             index = same;
         }
+        self.last = index;
         let index = index as u8;
         self.memo[slot] = MEMO_FILLED | u64::from(key) << 8 | u64::from(index);
         index
@@ -225,7 +450,15 @@ impl PairMapper {
                     .filter(|&j| j != i && palette[j] != palette[i])
                     .map(|j| (squared_distance(at[i], at[j]), j))
                     .collect();
-                others.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                // Only the nearest few are wanted: partition, then order
+                // just those.
+                let by_distance =
+                    |a: &(f32, usize), b: &(f32, usize)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+                if others.len() > MIX_NEIGHBOURS {
+                    others.select_nth_unstable_by(MIX_NEIGHBOURS - 1, by_distance);
+                    others.truncate(MIX_NEIGHBOURS);
+                }
+                others.sort_by(by_distance);
                 std::array::from_fn(|k| others.get(k).map_or(i, |o| o.1) as u8)
             })
             .collect();
@@ -339,6 +572,30 @@ mod tests {
                     }
                 }
                 assert_eq!(search.find(q), want);
+                let guess = (lcg(&mut s) as usize) % (n + 2);
+                assert_eq!(search.find_near(q, guess), want, "guess {guess}");
+            }
+            // The grid path: repeated queries so that cells get built,
+            // including points outside the bounding box.
+            let mut search = Nearest::new(&pts);
+            for i in 0..3000u32 {
+                let base = lcg(&mut s);
+                let q: [f32; 3] = std::array::from_fn(|k| {
+                    let v = ((base >> (k * 5)) % 24) as f32 * 11.0 - 4.0;
+                    if i % 97 == 0 { v * 3.0 - 100.0 } else { v }
+                });
+                let mut want = (0usize, f32::INFINITY);
+                for (i, p) in pts.iter().enumerate() {
+                    let d = squared_distance(*p, q);
+                    if d < want.1 {
+                        want = (i, d);
+                    }
+                }
+                assert_eq!(
+                    search.find_fast(q, i as usize % (n + 1)),
+                    want,
+                    "grid, {n} points"
+                );
             }
         }
     }

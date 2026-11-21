@@ -214,6 +214,7 @@ Appendix E order. `decode(encode(img)) == img` for every `Pal8` image
 | `max_width` / `max_height: Option<u32>` | `None` | Reject a Logical Screen wider / taller than this. |
 | `max_pixels: Option<u64>` | `None` | Reject a Logical Screen or image rectangle with more pixels. |
 | `max_bytes: Option<u64>` | `Some(1 GiB)` | Reject decodes whose buffers would exceed this: each §22 raster as it is expanded, their running total, the `decode` canvas, `frames × canvas` for `decode_all`. |
+| `max_frames: Option<u32>` | `None` | Reject a stream with more §20 images than this. |
 | `strict: bool` | `false` | Run the §7–§26 conformance walk (`GifFile::validate_strict`) and fail on any error-level issue. |
 | `lenient: bool` | `false` | Recovery parser (`parse_lenient`): skip malformed blocks past the header / LSD / GCT, accept a missing Trailer. Exclusive with `strict`. |
 
@@ -301,8 +302,12 @@ Every function returns `GifError` on hostile input, never panics; the
 `decode_with` / `decode_all` (strict and lenient) and asserts the
 `info` ↔ `decode` agreement and the `Pal8` round trip. Beyond
 `DecodeOptions`, the LZW decoder is bounded by the raster size the
-Image Descriptor implies, and `decode_all` bounds `frames × canvas` by
-`max_bytes`. The `GIF87a` / `GIF89a` wire limits (65 535 × 65 535,
+Image Descriptor implies — its dictionary is 4096 (offset, length)
+pairs on the stack, its only allocation is the raster, reserved for no
+more than the compressed bytes could expand to, and an interlaced
+raster is reordered in place — `max_frames` caps the number of images,
+`max_bytes` the running total of their rasters (1 GiB by default), and
+`decode_all` bounds `frames × canvas` by `max_bytes`. The `GIF87a` / `GIF89a` wire limits (65 535 × 65 535,
 256 colours, one transparent index per image) are enforced by the
 encoder with `Error::Unsupported` / `Error::InvalidInput`.
 

@@ -397,10 +397,12 @@ pub(crate) fn select(samples: &[Sample], budget: usize, kmeans_rounds: usize) ->
     let mut centres: Vec<[f32; 3]> = spans.iter().map(|s| s.moments.mean()).collect();
 
     for _ in 0..kmeans_rounds {
-        let search = Nearest::new(&centres);
+        let mut search = Nearest::new(&centres);
         let mut groups = vec![Moments::default(); centres.len()];
+        let mut last = 0;
         for s in samples {
-            groups[search.find(s.at).0].add(s);
+            last = search.find_fast(s.at, last).0;
+            groups[last].add(s);
         }
         let mut moved = 0.0f32;
         for (centre, g) in centres.iter_mut().zip(&groups) {
