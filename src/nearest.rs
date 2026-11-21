@@ -24,11 +24,12 @@
 //! `d_min(c) + 2r` of `c`, where `d_min(c)` is the distance from `c` to
 //! its nearest point `e`. That list contains the nearest point `p` of
 //! any query `q` inside the cell: `d(c, p) ≤ d(c, q) + d(q, p) ≤ r +
-//! d(q, e) ≤ r + d(c, e) + r`. A cell's list is built the fourth time a
-//! query lands in it (until then the sorted walk answers), so a short
-//! stream never pays for lists it would not use, and a query outside
-//! the grid falls back to the walk. Either way the answer is the same
-//! exact `argmin`.
+//! d(q, e) ≤ r + d(c, e) + r`. The grid is set up after a couple of
+//! thousand queries and a cell's list is built the fourth time a query
+//! lands in it (until then the sorted walk answers), so a short stream
+//! never pays for lists it would not use, and a query outside the grid
+//! falls back to the walk. Either way the answer is the same exact
+//! `argmin`.
 
 use crate::colorspace::Metric;
 use crate::image::Rgb;
@@ -48,10 +49,21 @@ pub(crate) struct Nearest {
     /// this has it as its only nearest point (a quarter of the squared
     /// distance to the point's nearest neighbour, shaved for rounding).
     certain: Vec<f32>,
-    /// Candidate lists per region of space; `None` for a handful of
-    /// points.
-    grid: Option<Grid>,
+    /// Candidate lists per region of space, set up once enough queries
+    /// have come through [`Self::find_fast`] to be worth it.
+    grid: GridState,
 }
+
+enum GridState {
+    /// Queries served so far by the sorted walk.
+    Waiting(u32),
+    Ready(Grid),
+    /// Too few points, or a degenerate box.
+    Unavailable,
+}
+
+/// Queries after which the grid is set up.
+const GRID_AFTER: u32 = 2048;
 
 /// Grid cells aimed at per point.
 const CELLS_PER_POINT: f32 = 128.0;
@@ -200,7 +212,7 @@ impl Nearest {
             origin: order,
             slot,
             certain,
-            grid: Grid::new(points),
+            grid: GridState::Waiting(0),
         }
     }
 
@@ -214,10 +226,23 @@ impl Nearest {
                 return (guess, d);
             }
         }
-        let Some(cell) = self.grid.as_ref().and_then(|g| g.locate(q)) else {
+        let grid = match &mut self.grid {
+            GridState::Ready(grid) => grid,
+            GridState::Unavailable => return self.find(q),
+            GridState::Waiting(served) => {
+                *served += 1;
+                if *served >= GRID_AFTER {
+                    self.grid = match Grid::new(&self.points) {
+                        Some(grid) => GridState::Ready(grid),
+                        None => GridState::Unavailable,
+                    };
+                }
+                return self.find(q);
+            }
+        };
+        let Some(cell) = grid.locate(q) else {
             return self.find(q);
         };
-        let grid = self.grid.as_mut().expect("located in a grid");
         let state = &mut grid.cells[cell];
         if state.len == 0 {
             state.hits += 1;
@@ -578,7 +603,7 @@ mod tests {
             // The grid path: repeated queries so that cells get built,
             // including points outside the bounding box.
             let mut search = Nearest::new(&pts);
-            for i in 0..3000u32 {
+            for i in 0..(GRID_AFTER + 3000) {
                 let base = lcg(&mut s);
                 let q: [f32; 3] = std::array::from_fn(|k| {
                     let v = ((base >> (k * 5)) % 24) as f32 * 11.0 - 4.0;

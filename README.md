@@ -864,10 +864,10 @@ colour. Everything is serial.
 
 | Picture | Bytes | ΔE | ΔE at distance | Encode MP/s | Decode MP/s |
 |---|---|---|---|---|---|
-| photograph | 367 599 → 137 201 | 3.71 → 2.63 | 2.51 → 1.15 | 3.5 → 8.1 | 222 → 293 |
-| gradient | 351 061 → 103 859 | 2.80 → 2.56 | 2.55 → 0.90 | 3.1 → 19 | 239 → 308 |
-| flat artwork | 6 193 → 5 330 | exact | exact | 31 → 143 | 390 → 1 860 |
-| screen capture | 56 412 → 37 504 | 0.26 → 0.11 | 0.20 → 0.07 | 14 → 50 | 283 → 743 |
+| photograph | 367 599 → 137 201 | 3.71 → 2.63 | 2.51 → 1.15 | 3.5 → 9.4 | 222 → 296 |
+| gradient | 351 061 → 103 859 | 2.80 → 2.56 | 2.55 → 0.90 | 3.1 → 25 | 239 → 291 |
+| flat artwork | 6 193 → 5 330 | exact | exact | 31 → 131 | 390 → 1 830 |
+| screen capture | 56 412 → 37 504 | 0.26 → 0.11 | 0.20 → 0.07 | 14 → 52 | 283 → 777 |
 
 **Dither choice, same pictures** (bytes / ΔE / ΔE at distance)
 
@@ -879,21 +879,19 @@ colour. Everything is serial.
 
 `Dither::None` is the smallest and the most accurate pixel for pixel;
 the dithers trade bytes and per-pixel error for smooth ramps. With
-`None` the photograph encodes at 11 MP/s and the gradient at 26 MP/s.
+`None` the photograph encodes at 14 MP/s and the gradient at 38 MP/s.
 
 **Animations, 320×240, 48 frames at 25 fps, default options**
 
 | Animation | Bytes | ΔE | Encode MP/s | Decode MP/s |
 |---|---|---|---|---|
-| screen recording (typing, moving pointer, every fourth frame repeated) | 670 152 → 18 930 | 0.23 → 0.13 | 11 → 254 | 255 → 6 040 |
-| cartoon (flat shapes moving over a flat scene) | 138 195 → 28 943 | exact | 30 → 179 | 226 → 2 795 |
-| video (slow pan over the photograph, fresh grain every frame) | 4 245 403 → 1 998 074 | 2.73 → 2.12 | 3.2 → 3.3 | 179 → 123 |
+| screen recording (typing, moving pointer, every fourth frame repeated) | 670 152 → 18 930 | 0.23 → 0.13 | 11 → 279 | 255 → 6 440 |
+| cartoon (flat shapes moving over a flat scene) | 138 195 → 28 943 | exact | 30 → 202 | 226 → 3 060 |
+| video (slow pan over the photograph, fresh grain every frame) | 4 245 403 → 1 998 074 | 2.73 → 2.12 | 3.2 → 4.4 | 179 → 228 |
 
 Every pixel of the video changes in every frame, so its gain is the LZW
 strategy and the palette alone (1 741 722 bytes at ΔE 1.80 with
-`Dither::None`). Decode speed counts composited screen pixels; the video
-decodes slower than before because its dithered frames hold more LZW
-codes per pixel.
+`Dither::None`). Decode speed counts composited screen pixels.
 
 **Lossless re-optimisation** (`optimize`) of the same animations
 written one full image per frame with deferred-clear LZW:
