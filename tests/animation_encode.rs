@@ -396,6 +396,23 @@ fn reoptimisation_never_returns_something_larger_or_different() {
     let tiny = oxideav_gif::encode_rgb8(1, 1, &[1, 2, 3], &EncodeOptions::default()).unwrap();
     assert_eq!(oxideav_gif::optimize(&tiny).unwrap(), tiny);
 
+    // A stream the reader accepts and the writer would refuse as it
+    // stands — an 87a header over 89a blocks — comes back unchanged, or
+    // smaller and showing the same (fuzz finding).
+    let frames = frames_of(&synth::anim_cartoon(W, H, 3), 4);
+    for as_given in [true, false] {
+        let opts = EncodeOptions::default().with_optimize_animation(!as_given);
+        let mut mislabelled = encode_all(&frames, &opts).unwrap();
+        mislabelled[..6].copy_from_slice(b"GIF87a");
+        let out = oxideav_gif::optimize(&mislabelled).unwrap();
+        assert!(out.len() <= mislabelled.len());
+        assert_same_show(&mislabelled, &out);
+        if as_given {
+            assert!(out.len() < mislabelled.len());
+            assert_eq!(&out[..6], b"GIF89a");
+        }
+    }
+
     // Streams built with every disposal method, sub-rectangles and
     // transparency (the random-animation generator of the fuzz seeds is
     // not available here; build a few by hand).

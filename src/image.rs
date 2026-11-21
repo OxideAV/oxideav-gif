@@ -1482,6 +1482,9 @@ impl GifFile {
         let mut cropped = self.clone();
         cropped.optimize_color_tables();
         cropped.optimize_frame_rects();
+        // (A stream labelled 87a over 89a blocks is only writable with
+        // the label corrected.)
+        cropped.upgrade_version_if_needed();
         consider(cropped);
         if let Some(rebuilt) = crate::animate::reoptimize(self) {
             consider(rebuilt);

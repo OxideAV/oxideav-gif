@@ -317,11 +317,12 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
 pub fn optimize(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut file = crate::decoder::parse(bytes)?;
     file.optimize();
-    let out = encode_file_with(&file, &EncodeOptions::default())?;
-    Ok(if out.len() < bytes.len() {
-        out
-    } else {
-        bytes.to_vec()
+    // A stream the reader accepts but the writer would refuse as it
+    // stands (an 87a header over 89a blocks, say) is returned as it is
+    // unless the rebuilt one took its place.
+    Ok(match encode_file_with(&file, &EncodeOptions::default()) {
+        Ok(out) if out.len() < bytes.len() => out,
+        _ => bytes.to_vec(),
     })
 }
 
