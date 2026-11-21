@@ -28,8 +28,11 @@
 //! their RGB only. [`quantize_rgb`] is the no-alpha entry point for
 //! callers that have already resolved transparency.
 
+use crate::cluster::Census;
+use crate::colorspace::Metric;
 use crate::error::{Error, Result};
 use crate::image::Rgb;
+use crate::nearest::{Mapper, PairMapper};
 
 /// Alpha values strictly below this are treated as transparent by
 /// [`quantize_rgba`]. GIF's §23.c.viii transparency is a single index,
@@ -49,8 +52,8 @@ pub const MAX_PALETTE: usize = 256;
 #[non_exhaustive]
 pub enum Dither {
     /// Map each pixel to its single nearest palette entry. Deterministic,
-    /// no spatial coupling — the index-plane argmin over the palette.
-    #[default]
+    /// no spatial coupling — the index-plane argmin over the palette. The
+    /// smallest output; smooth ramps band.
     None,
     /// Floyd–Steinberg error diffusion: quantisation error at each pixel
     /// is pushed onto its not-yet-visited neighbours (7/16 right, 3/16
@@ -93,6 +96,15 @@ pub enum Dither {
     /// mean spacing between palette entries so a fine palette gets a
     /// proportionally finer bias.
     OrderedBayer8x8,
+    /// Ordered dithering with a 64×64 blue-noise threshold map (a
+    /// void-and-cluster rank ordering built on first use). Like
+    /// [`Dither::OrderedBayer8x8`] every pixel is decided on its own
+    /// from its position, so a region that does not change between two
+    /// frames of an animation dithers identically in both — no shimmer —
+    /// but the pattern is an irregular fine grain with no visible
+    /// cross-hatch or tile. The default.
+    #[default]
+    BlueNoise,
 }
 
 impl Dither {
@@ -100,7 +112,7 @@ impl Dither {
     /// and the ordered [`Dither::OrderedBayer8x8`]).
     fn error_diffusion_kernel(self) -> Option<&'static ErrorDiffusionKernel> {
         match self {
-            Dither::None | Dither::OrderedBayer8x8 => None,
+            Dither::None | Dither::OrderedBayer8x8 | Dither::BlueNoise => None,
             Dither::FloydSteinberg => Some(&FLOYD_STEINBERG),
             Dither::JarvisJudiceNinke => Some(&JARVIS_JUDICE_NINKE),
             Dither::Stucki => Some(&STUCKI),
@@ -275,11 +287,64 @@ pub enum BoxPriority {
     Population,
 }
 
+/// How the colour table is chosen when the picture has more colours
+/// than the budget. A picture that fits the budget is reproduced exactly
+/// under either method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PaletteMethod {
+    /// Median cut over the pixels' R, G, B values: split the box
+    /// [`QuantizeOptions::box_priority`] selects at its median along its
+    /// longest channel; each box's average is one entry. Any
+    /// [`QuantizeOptions::palette_refine_iterations`] run on the pixels
+    /// in R, G, B. The historical method ([`QuantizeOptions::median_cut`]
+    /// reproduces its output byte for byte).
+    MedianCut,
+    /// Variance-minimising box splitting over the picture's colour
+    /// census in the [`QuantizeOptions::metric`] space: the box with the
+    /// largest summed squared deviation is cut across its direction of
+    /// greatest variance where the two halves' deviations are smallest;
+    /// [`QuantizeOptions::palette_refine_iterations`] rounds of weighted
+    /// k-means then move the entries to a local optimum. Lower error
+    /// than median cut at the same budget, and its cost follows the
+    /// number of distinct colours rather than the picture size.
+    #[default]
+    VarianceSplit,
+}
+
+/// The space colour differences are measured in — for
+/// [`PaletteMethod::VarianceSplit`] clustering and for every
+/// nearest-entry search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ColorMetric {
+    /// Squared Euclidean distance over the stored 8-bit R, G, B values.
+    Rgb,
+    /// Squared Euclidean distance in CIE 1976 L\*a\*b\* (computed from
+    /// the sRGB transfer curve and primaries with a D65 white), in which
+    /// equal distances are roughly equal perceived differences: dark
+    /// tones and neutral ramps get the entries the eye needs instead of
+    /// the ones the 8-bit encoding spreads widest.
+    #[default]
+    Perceptual,
+}
+
+impl ColorMetric {
+    fn metric(self) -> Metric {
+        match self {
+            ColorMetric::Rgb => Metric::Rgb,
+            ColorMetric::Perceptual => Metric::Lab,
+        }
+    }
+}
+
 /// Tuning knobs for the quantiser entry points that take options.
 ///
-/// Constructed with [`Default`] (`max_colors = 256`, no dither,
-/// extent-priority box selection) and adjusted field-by-field, or via
-/// the small builder helpers.
+/// Constructed with [`Default`] (`max_colors = 256`, blue-noise ordered
+/// dither, variance-split palette refined by k-means in a perceptual
+/// space) and
+/// adjusted field-by-field, or via the small builder helpers.
+/// [`QuantizeOptions::median_cut`] is the historical configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct QuantizeOptions {
@@ -287,42 +352,89 @@ pub struct QuantizeOptions {
     /// carries transparent pixels one slot is reserved, so the opaque
     /// colours receive `max_colors - 1` entries.
     pub max_colors: usize,
-    /// Index-plane assignment strategy ([`Dither::None`] by default).
+    /// Index-plane assignment strategy ([`Dither::BlueNoise`] by default).
     pub dither: Dither,
-    /// Median-cut box-selection rule ([`BoxPriority::Extent`] by default,
-    /// preserving the byte-stable historical palette for the bare
-    /// `quantize_*` entry points).
+    /// Median-cut box-selection rule ([`BoxPriority::Extent`] by
+    /// default); only [`PaletteMethod::MedianCut`] reads it.
     pub box_priority: BoxPriority,
-    /// Number of Lloyd (k-means) relaxation rounds applied to sharpen the
-    /// median-cut palette toward a local optimum (`0` by default — no
-    /// refinement, so the bare `quantize_*` entry points stay byte-stable).
-    /// Each round can only lower the total squared error and the loop stops
-    /// early on convergence, so a small budget (4–8) captures most of the
-    /// gain; very large values cost time without further benefit.
+    /// Upper bound on the k-means (Lloyd) rounds that move the chosen
+    /// entries toward a local optimum (`8` by default; `0` disables the
+    /// refinement). Each round can only lower the total squared error
+    /// and the loop stops early on convergence, so a small budget
+    /// captures most of the gain.
     pub palette_refine_iterations: usize,
     /// Scan the error-diffusion kernels in serpentine (boustrophedon) order
     /// — left-to-right on even rows, right-to-left on odd rows — instead of
-    /// always left-to-right (`false` by default, so Floyd–Steinberg output
-    /// stays byte-stable). Alternating the scan direction breaks up the
-    /// directional "worm" artifacts a one-directional raster diffuser leaves
-    /// on smooth gradients, at no extra cost. Ignored for [`Dither::None`]
-    /// and [`Dither::OrderedBayer8x8`] (neither carries error between pixels).
+    /// always left-to-right (`true` by default). Alternating the scan
+    /// direction breaks up the directional "worm" artifacts a
+    /// one-directional raster diffuser leaves on smooth gradients, at no
+    /// extra cost. Ignored for [`Dither::None`] and the ordered dithers
+    /// (none of which carries error between pixels).
     pub serpentine: bool,
+    /// How the colour table is chosen ([`PaletteMethod::VarianceSplit`]
+    /// by default).
+    pub method: PaletteMethod,
+    /// The space colour differences are measured in
+    /// ([`ColorMetric::Perceptual`] by default).
+    pub metric: ColorMetric,
+    /// Dither strength in percent, clamped to `0..=100` (`100` by
+    /// default). Error diffusion passes on this share of each pixel's
+    /// quantisation error; an ordered dither scales its offsets by it.
+    /// Lower values trade a little banding for less grain and a smaller
+    /// compressed stream; `0` is the flat nearest-entry plane.
+    pub dither_strength: u8,
 }
 
 impl Default for QuantizeOptions {
     fn default() -> Self {
         Self {
             max_colors: MAX_PALETTE,
-            dither: Dither::None,
+            dither: Dither::BlueNoise,
             box_priority: BoxPriority::Extent,
-            palette_refine_iterations: 0,
-            serpentine: false,
+            palette_refine_iterations: 8,
+            serpentine: true,
+            method: PaletteMethod::VarianceSplit,
+            metric: ColorMetric::Perceptual,
+            dither_strength: 100,
         }
     }
 }
 
 impl QuantizeOptions {
+    /// The historical configuration: median cut over R, G, B with
+    /// extent priority, no refinement, R, G, B nearest-entry search, no
+    /// dither (and a one-directional scan once an error-diffusion dither
+    /// is selected). Output under these options is byte-stable across
+    /// releases.
+    pub fn median_cut() -> Self {
+        Self {
+            dither: Dither::None,
+            palette_refine_iterations: 0,
+            serpentine: false,
+            method: PaletteMethod::MedianCut,
+            metric: ColorMetric::Rgb,
+            ..Self::default()
+        }
+    }
+
+    /// Set how the colour table is chosen, returning the updated options.
+    pub fn method(mut self, method: PaletteMethod) -> Self {
+        self.method = method;
+        self
+    }
+
+    /// Set the colour-difference space, returning the updated options.
+    pub fn metric(mut self, metric: ColorMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    /// Set the dither strength in percent, returning the updated options.
+    pub fn dither_strength(mut self, percent: u8) -> Self {
+        self.dither_strength = percent;
+        self
+    }
+
     /// Options with the given colour budget and no dithering.
     pub fn with_max_colors(max_colors: usize) -> Self {
         Self {
@@ -474,16 +586,11 @@ pub fn quantize_rgba_with_options(
         budget
     };
 
-    let (mut palette, opaque_lookup) = median_cut_refined(
-        &opaque_samples,
-        opaque_budget,
-        opts.box_priority,
-        opts.palette_refine_iterations,
-    );
+    let mut palette = choose_palette(&opaque_samples, opaque_budget, &opts);
 
     // Append the reserved transparent slot last so the opaque indices
-    // computed above stay valid. Its RGB is arbitrary (a transparent
-    // pixel is never displayed); use black.
+    // stay valid. Its RGB is arbitrary (a transparent pixel is never
+    // displayed); use black.
     let transparent_index = if any_transparent {
         let idx = palette.len() as u8;
         palette.push(Rgb::new(0, 0, 0));
@@ -492,50 +599,28 @@ pub fn quantize_rgba_with_options(
         None
     };
 
-    let indices = if opts.dither == Dither::None {
-        // Stitch the per-pixel index plane: transparent pixels take
-        // the reserved slot, opaque pixels take their nearest-entry
-        // assignment from median cut.
-        let mut indices = Vec::with_capacity(pixel_count);
-        let mut opaque_iter = opaque_lookup.into_iter();
-        for &transparent in &is_transparent {
-            if transparent {
-                indices.push(transparent_index.expect("any_transparent implies Some"));
-            } else {
-                indices.push(
-                    opaque_iter
-                        .next()
-                        .expect("one lookup entry per opaque pixel"),
-                );
-            }
-        }
-        indices
-    } else {
-        // Dithering runs over the full spatial grid (error diffusion needs
-        // each pixel's neighbours; ordered needs the per-position bias). The
-        // opaque-pixel search palette excludes the reserved transparent slot
-        // (a transparent entry must never be chosen for an opaque pixel), so
-        // dither against the leading `opaque_len` entries.
-        let opaque_len = palette.len() - usize::from(any_transparent);
-        let samples: Vec<[u8; 3]> = rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|p| [p[0], p[1], p[2]])
-            .collect();
-        assign_indices_with_dither(
-            opts.dither,
-            DitherInput {
-                samples: &samples,
-                width,
-                height,
-                palette: &palette[..opaque_len],
-                is_transparent: &is_transparent,
-                transparent_index,
-            },
-            opts.serpentine,
-        )
-    };
+    // The opaque-pixel search palette excludes the reserved transparent
+    // slot (a transparent entry must never be chosen for an opaque
+    // pixel), so map against the leading `opaque_len` entries.
+    let opaque_len = palette.len() - usize::from(any_transparent);
+    let samples: Vec<[u8; 3]> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let indices = assign_indices(
+        &opts,
+        DitherInput {
+            samples: &samples,
+            width,
+            height,
+            palette: &palette[..opaque_len],
+            is_transparent: &is_transparent,
+            transparent_index,
+            origin: (0, 0),
+        },
+    );
 
     Ok(Quantized {
         palette,
@@ -601,31 +686,22 @@ pub fn quantize_rgb_with_options(
         .iter()
         .map(|p| [p[0], p[1], p[2]])
         .collect();
-    let (palette, lookup) = median_cut_refined(
-        &samples,
-        budget,
-        opts.box_priority,
-        opts.palette_refine_iterations,
+    let palette = choose_palette(&samples, budget, &opts);
+    // No transparency: every pixel is opaque, the full palette is the
+    // search palette, and the mask is all-false.
+    let opaque = vec![false; pixel_count];
+    let indices = assign_indices(
+        &opts,
+        DitherInput {
+            samples: &samples,
+            width,
+            height,
+            palette: &palette,
+            is_transparent: &opaque,
+            transparent_index: None,
+            origin: (0, 0),
+        },
     );
-    let indices = if opts.dither == Dither::None {
-        lookup
-    } else {
-        // No transparency: every pixel is opaque, the full palette is the
-        // opaque-search palette, and the mask is all-false.
-        let opaque = vec![false; pixel_count];
-        assign_indices_with_dither(
-            opts.dither,
-            DitherInput {
-                samples: &samples,
-                width,
-                height,
-                palette: &palette,
-                is_transparent: &opaque,
-                transparent_index: None,
-            },
-            opts.serpentine,
-        )
-    };
     Ok(Quantized {
         palette,
         indices,
@@ -684,8 +760,8 @@ pub fn remap_rgb_to_palette(
         .map(|p| [p[0], p[1], p[2]])
         .collect();
     let opaque = vec![false; pixel_count];
-    let indices = assign_indices_with_dither(
-        opts.dither,
+    let indices = assign_indices(
+        &opts,
         DitherInput {
             samples: &samples,
             width,
@@ -693,8 +769,8 @@ pub fn remap_rgb_to_palette(
             palette,
             is_transparent: &opaque,
             transparent_index: None,
+            origin: (0, 0),
         },
-        opts.serpentine,
     );
     Ok(Quantized {
         palette: palette.to_vec(),
@@ -797,8 +873,8 @@ pub fn remap_rgba_to_palette(
     } else {
         None
     };
-    let indices = assign_indices_with_dither(
-        opts.dither,
+    let indices = assign_indices(
+        &opts,
         DitherInput {
             samples: &samples,
             width,
@@ -806,8 +882,8 @@ pub fn remap_rgba_to_palette(
             palette: search,
             is_transparent: &is_transparent,
             transparent_index,
+            origin: (0, 0),
         },
-        opts.serpentine,
     );
     Ok(Quantized {
         palette: palette.to_vec(),
@@ -909,12 +985,8 @@ pub fn quantize_frames_shared(
     };
 
     // One median cut over the union of every frame's opaque pixels.
-    let (mut palette, _pooled_lookup) = median_cut_refined(
-        &pooled,
-        opaque_budget,
-        opts.box_priority,
-        opts.palette_refine_iterations,
-    );
+    let mut palette = choose_palette(&pooled, opaque_budget, &opts);
+    drop(pooled);
     let opaque_len = palette.len();
 
     let transparent_index = if any_transparent {
@@ -938,32 +1010,18 @@ pub fn quantize_frames_shared(
             .iter()
             .map(|p| [p[0], p[1], p[2]])
             .collect();
-        let plane = if opts.dither == Dither::None {
-            samples
-                .iter()
-                .zip(mask)
-                .map(|(&[r, g, b], &transparent)| {
-                    if transparent {
-                        transparent_index.expect("any_transparent implies Some")
-                    } else {
-                        nearest_index(opaque_palette, Rgb::new(r, g, b))
-                    }
-                })
-                .collect()
-        } else {
-            assign_indices_with_dither(
-                opts.dither,
-                DitherInput {
-                    samples: &samples,
-                    width,
-                    height,
-                    palette: opaque_palette,
-                    is_transparent: mask,
-                    transparent_index,
-                },
-                opts.serpentine,
-            )
-        };
+        let plane = assign_indices(
+            &opts,
+            DitherInput {
+                samples: &samples,
+                width,
+                height,
+                palette: opaque_palette,
+                is_transparent: mask,
+                transparent_index,
+                origin: (0, 0),
+            },
+        );
         frame_indices.push(plane);
     }
 
@@ -1107,17 +1165,33 @@ fn median_cut_with_priority(
 /// `budget` is the maximum palette size, already clamped to `1..=256`.
 /// An empty input yields a single placeholder black entry and no
 /// lookups (the caller has no opaque pixels to map).
+#[cfg(test)]
 fn median_cut_refined(
     samples: &[[u8; 3]],
     budget: usize,
     priority: BoxPriority,
     refine_iters: usize,
 ) -> (Vec<Rgb>, Vec<u8>) {
+    let palette = median_cut_palette(samples, budget, priority, refine_iters);
+    // Map every sample to its *nearest* palette entry rather than the box
+    // it fell into: after a box is averaged to one colour, a sample near
+    // a box boundary can be closer to a neighbouring box's average.
+    let lookup = remap_to_nearest(samples, &palette);
+    (palette, lookup)
+}
+
+/// The palette-selection half of [`median_cut_refined`].
+fn median_cut_palette(
+    samples: &[[u8; 3]],
+    budget: usize,
+    priority: BoxPriority,
+    refine_iters: usize,
+) -> Vec<Rgb> {
     if samples.is_empty() {
         // No opaque pixels: still hand back a one-entry palette so a
         // §22 index plane built against it is in range, even though no
         // pixel will reference it.
-        return (vec![Rgb::new(0, 0, 0)], Vec::new());
+        return vec![Rgb::new(0, 0, 0)];
     }
 
     let budget = budget.clamp(1, MAX_PALETTE);
@@ -1174,15 +1248,107 @@ fn median_cut_refined(
         refine_palette_lloyd(samples, &mut palette, refine_iters);
     }
 
-    // Map every sample to its *nearest* palette entry rather than the box
-    // it fell into. After a box is averaged to one colour, a sample near a
-    // box boundary can be closer to a neighbouring box's average than to
-    // its own; nearest-entry remap removes that residual error at no
-    // change to the palette. The box partition is only the colour-selection
-    // step; the index plane is recomputed against the final palette.
-    let lookup = remap_to_nearest(samples, &palette);
+    palette
+}
 
-    (palette, lookup)
+/// Choose the colour table for `samples` (the picture's opaque pixels)
+/// under `opts`, at most `budget` entries and never empty.
+///
+/// A picture with at most `budget` distinct colours gets exactly those
+/// colours. Otherwise [`PaletteMethod::MedianCut`] runs the median cut
+/// over the pixels; [`PaletteMethod::VarianceSplit`] pools the pixels
+/// into a colour census and clusters that (see [`crate::cluster`]).
+fn choose_palette(samples: &[[u8; 3]], budget: usize, opts: &QuantizeOptions) -> Vec<Rgb> {
+    let budget = budget.clamp(1, MAX_PALETTE);
+    match opts.method {
+        PaletteMethod::MedianCut => median_cut_palette(
+            samples,
+            budget,
+            opts.box_priority,
+            opts.palette_refine_iterations,
+        ),
+        PaletteMethod::VarianceSplit => {
+            let mut census = Census::new();
+            for &c in samples {
+                census.add(c);
+            }
+            match palette_from_census(
+                &census,
+                budget,
+                opts.metric.metric(),
+                opts.palette_refine_iterations,
+            ) {
+                p if p.is_empty() => vec![Rgb::new(0, 0, 0)],
+                p => p,
+            }
+        }
+    }
+}
+
+/// [`PaletteMethod::VarianceSplit`] over a gathered census: the exact
+/// colour set (ascending R, G, B order, so the same set always yields the
+/// same table) when it fits `budget`, otherwise the clustered census.
+/// Empty when the census is.
+pub(crate) fn palette_from_census(
+    census: &Census,
+    budget: usize,
+    metric: Metric,
+    kmeans_rounds: usize,
+) -> Vec<Rgb> {
+    if let Some(colors) = census.exact(budget) {
+        return colors
+            .into_iter()
+            .map(|[r, g, b]| Rgb::new(r, g, b))
+            .collect();
+    }
+    palette_from_samples(&census.samples(metric), budget, metric, kmeans_rounds)
+}
+
+/// Cluster census points into at most `budget` distinct 8-bit entries.
+fn palette_from_samples(
+    samples: &[crate::cluster::Sample],
+    budget: usize,
+    metric: Metric,
+    kmeans_rounds: usize,
+) -> Vec<Rgb> {
+    let centres = crate::cluster::select(samples, budget, kmeans_rounds);
+    let mut palette: Vec<Rgb> = Vec::with_capacity(budget);
+    let mut points: Vec<[f32; 3]> = Vec::with_capacity(budget);
+    let push = |c: [f32; 3], palette: &mut Vec<Rgb>, points: &mut Vec<[f32; 3]>| {
+        let [r, g, b] = metric.to_rgb8(c);
+        let entry = Rgb::new(r, g, b);
+        // Two centres can round to the same 8-bit triple; keep one.
+        if palette.contains(&entry) {
+            return false;
+        }
+        palette.push(entry);
+        points.push(metric.point([r, g, b]));
+        true
+    };
+    for c in centres {
+        push(c, &mut palette, &mut points);
+    }
+    // Entries lost to rounding (or to a census with fewer points than the
+    // budget would suggest) are refilled with the census point that is
+    // currently rendered worst, largest weighted squared error first.
+    let mut refills = 0;
+    while palette.len() < budget.min(samples.len()) && refills < budget {
+        refills += 1;
+        let search = crate::nearest::Nearest::new(&points);
+        let worst = samples
+            .iter()
+            .map(|s| (s.weight * search.find(s.at).1, s.at))
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        match worst {
+            Some((err, at)) if err > 0.0 => {
+                if !push(at, &mut palette, &mut points) {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    palette
 }
 
 /// Lloyd (k-means) relaxation of a palette in place, run for at most
@@ -1208,8 +1374,9 @@ fn refine_palette_lloyd(samples: &[[u8; 3]], palette: &mut [Rgb], iters: usize) 
         for a in acc.iter_mut() {
             *a = [0; 4];
         }
+        let mut mapper = Mapper::new(palette, Metric::Rgb);
         for &[r, g, b] in samples {
-            let j = nearest_index(palette, Rgb::new(r, g, b)) as usize;
+            let j = mapper.map([r, g, b]) as usize;
             acc[j][0] += r as u64;
             acc[j][1] += g as u64;
             acc[j][2] += b as u64;
@@ -1246,6 +1413,7 @@ fn refine_palette_lloyd(samples: &[[u8; 3]], palette: &mut [Rgb], iters: usize) 
 /// The palette never exceeds [`MAX_PALETTE`] (256) entries, so the linear
 /// scan per sample is bounded; a `[Rgb; 256]`-cardinality search keeps the
 /// implementation branch-simple and exact rather than approximate.
+#[cfg(test)]
 fn remap_to_nearest(samples: &[[u8; 3]], palette: &[Rgb]) -> Vec<u8> {
     samples
         .iter()
@@ -1257,22 +1425,34 @@ fn remap_to_nearest(samples: &[[u8; 3]], palette: &[Rgb]) -> Vec<u8> {
 /// dimensions, the opaque search palette, and the transparency mask + slot.
 /// Grouped to keep the helper signatures under clippy's argument-count lint.
 #[derive(Clone, Copy)]
-struct DitherInput<'a> {
+pub(crate) struct DitherInput<'a> {
     /// `width * height` source RGB samples, row-major (transparent pixels
     /// carry an arbitrary colour, masked out by `is_transparent`).
-    samples: &'a [[u8; 3]],
-    width: usize,
-    height: usize,
+    pub(crate) samples: &'a [[u8; 3]],
+    pub(crate) width: usize,
+    pub(crate) height: usize,
     /// Opaque search palette — the reserved transparent slot, if any, is
     /// already excluded by the caller.
-    palette: &'a [Rgb],
+    pub(crate) palette: &'a [Rgb],
     /// Per-pixel transparency mask (`true` → route to `transparent_index`).
-    is_transparent: &'a [bool],
+    pub(crate) is_transparent: &'a [bool],
     /// Index transparent pixels emit (`None` when the frame is fully opaque).
-    transparent_index: Option<u8>,
+    pub(crate) transparent_index: Option<u8>,
+    /// Canvas position of the grid's top-left pixel: an ordered dither
+    /// reads its threshold map at canvas coordinates, so a sub-rectangle
+    /// dithers exactly as the same pixels would inside the full picture.
+    pub(crate) origin: (usize, usize),
 }
 
-/// Produce a §22 index plane by Floyd–Steinberg error diffusion.
+/// How strongly a dither acts and where its nearest-entry answers come
+/// from — the per-call state shared by the index-plane helpers.
+struct DitherContext<'m> {
+    mapper: &'m mut PairMapper,
+    /// Strength in percent, `0..=100`.
+    strength: i32,
+}
+
+/// Produce a §22 index plane by error diffusion.
 ///
 /// `samples` is the full `width * height` grid of source RGB colours
 /// (transparent pixels carry an arbitrary colour, masked out by
@@ -1281,32 +1461,34 @@ struct DitherInput<'a> {
 /// never select it for an opaque pixel; `transparent_index` is the index
 /// transparent pixels emit instead.
 ///
-/// Error is carried in a per-channel `i32` working buffer so accumulated
-/// diffusion can exceed the `0..=255` range before it is re-clamped at
-/// the nearest-entry search. The kernel pushes the quantisation error of
-/// each pixel onto its not-yet-visited neighbours per the supplied
-/// [`ErrorDiffusionKernel`], scanning left-to-right, top-to-bottom.
-/// Transparent pixels neither receive nor emit error (they are never
-/// displayed): incoming error to a transparent cell is dropped and no
-/// error is diffused out of one.
+/// Error is carried in a per-channel `i32` working buffer. Before the
+/// nearest-entry search the source colour plus the error diffused into
+/// the cell is clamped back to the displayable `0..=255` range, and the
+/// error passed on is measured from that clamped target — so the error a
+/// pixel hands to its neighbours is bounded by the colour cube and cannot
+/// build up without limit where the palette cannot reach the source
+/// colour. The kernel pushes `strength` percent of each pixel's error
+/// onto its not-yet-visited neighbours per the supplied
+/// [`ErrorDiffusionKernel`]. Transparent pixels neither receive nor emit
+/// error (they are never displayed): incoming error to a transparent cell
+/// is dropped and no error is diffused out of one.
 ///
 /// A ring of `look_ahead_rows + 1` per-row error accumulators is kept live:
 /// `err_rows[0]` is the current row, `err_rows[k]` the `k`-th row below.
 /// After each row the ring rotates so the just-completed look-ahead row 0
 /// is recycled (cleared) to become the new bottom row. Each tap applies the
-/// integer `error * num / divisor`, truncating toward zero independently,
-/// so for the Floyd–Steinberg kernel (`divisor = 16`) this reproduces the
-/// historical `e * 7 / 16` etc. arithmetic byte-for-byte.
+/// integer `error * num / divisor`, truncating toward zero independently.
 ///
 /// When `serpentine` is set, odd rows scan right-to-left and the horizontal
 /// component of each tap is mirrored (`dx → -dx`) so "forward" still means
 /// "the direction the scan is heading" — breaking up the directional worm
 /// artifacts a one-directional scan leaves on smooth gradients. With
-/// `serpentine == false` the scan is the classic left-to-right raster.
+/// `serpentine == false` the scan is the plain left-to-right raster.
 fn dither_samples_error_diffusion(
     kernel: &ErrorDiffusionKernel,
     input: DitherInput<'_>,
     serpentine: bool,
+    ctx: DitherContext<'_>,
 ) -> Vec<u8> {
     let DitherInput {
         samples,
@@ -1315,6 +1497,7 @@ fn dither_samples_error_diffusion(
         palette,
         is_transparent,
         transparent_index,
+        origin: _,
     } = input;
     let pixel_count = width * height;
     let mut indices = vec![0u8; pixel_count];
@@ -1354,18 +1537,24 @@ fn dither_samples_error_diffusion(
                 (sg as i32 + cur[1]).clamp(0, 255),
                 (sb as i32 + cur[2]).clamp(0, 255),
             ];
-            let idx = nearest_index(
-                search,
-                Rgb::new(want[0] as u8, want[1] as u8, want[2] as u8),
-            );
+            let idx = ctx
+                .mapper
+                .nearest([want[0] as u8, want[1] as u8, want[2] as u8]);
             indices[p] = idx;
             let chosen = search[idx as usize];
-            // Quantisation error = what we wanted minus what we picked.
-            let err = [
+            // Quantisation error = what we wanted minus what we picked,
+            // scaled by the dither strength.
+            let mut err = [
                 want[0] - chosen.r as i32,
                 want[1] - chosen.g as i32,
                 want[2] - chosen.b as i32,
             ];
+            if err == [0, 0, 0] {
+                continue;
+            }
+            if ctx.strength != 100 {
+                err = err.map(|e| e * ctx.strength / 100);
+            }
             for &(dx, dy, num) in kernel.taps {
                 let nx = x as i32 + dx * dir;
                 if nx < 0 || nx as usize >= width {
@@ -1376,8 +1565,8 @@ fn dither_samples_error_diffusion(
                     continue;
                 }
                 let row = &mut err_rows[dy as usize][nx as usize];
-                for c in 0..3 {
-                    row[c] += err[c] * num / kernel.divisor;
+                for (acc, e) in row.iter_mut().zip(err) {
+                    *acc += e * num / kernel.divisor;
                 }
             }
         }
@@ -1393,9 +1582,8 @@ fn dither_samples_error_diffusion(
     indices
 }
 
-/// Floyd–Steinberg dispatch wrapper kept for the call sites that always use
-/// FS (none currently — all routes go through the `Dither` dispatcher — but
-/// retained as the canonical FS entry point for clarity and tests).
+/// Floyd–Steinberg dispatch wrapper kept as the canonical FS entry point
+/// for the tests.
 #[cfg(test)]
 fn dither_samples_floyd_steinberg(
     samples: &[[u8; 3]],
@@ -1405,6 +1593,7 @@ fn dither_samples_floyd_steinberg(
     is_transparent: &[bool],
     transparent_index: Option<u8>,
 ) -> Vec<u8> {
+    let mut mapper = PairMapper::new(palette, Metric::Rgb, 100);
     dither_samples_error_diffusion(
         &FLOYD_STEINBERG,
         DitherInput {
@@ -1414,34 +1603,66 @@ fn dither_samples_floyd_steinberg(
             palette,
             is_transparent,
             transparent_index,
+            origin: (0, 0),
         },
         false,
+        DitherContext {
+            mapper: &mut mapper,
+            strength: 100,
+        },
     )
 }
 
-/// Ordered (Bayer) dithering: map each pixel to a palette entry after adding
-/// a fixed per-position bias drawn from the 8×8 [`BAYER_8X8`] threshold
-/// matrix. No inter-pixel coupling — every pixel is independent, so this is
-/// cheap and deterministic. The bias is centred on zero (`matrix/64 - 0.5`)
-/// and scaled by `strength`, a per-channel magnitude in code units; passing
-/// the mean inter-entry palette spacing makes the bias proportional to how
-/// coarse the palette is. Transparent pixels emit `transparent_index`.
-fn dither_samples_ordered_bayer(input: DitherInput<'_>, strength: i32) -> Vec<u8> {
+/// The threshold map an ordered dither draws its per-position offsets
+/// from.
+#[derive(Clone, Copy)]
+enum ThresholdMap {
+    /// The 8×8 recursive [`BAYER_8X8`] matrix (64 ranks).
+    Bayer,
+    /// The 64×64 blue-noise map of [`crate::bluenoise`] (4096 ranks).
+    BlueNoise,
+}
+
+impl ThresholdMap {
+    /// `(rank, rank count)` at a pixel position.
+    #[inline]
+    fn rank(self, x: usize, y: usize) -> (i32, i32) {
+        match self {
+            ThresholdMap::Bayer => (BAYER_8X8[y & 7][x & 7], 64),
+            ThresholdMap::BlueNoise => (
+                i32::from(crate::bluenoise::rank(x, y)),
+                crate::bluenoise::RANKS,
+            ),
+        }
+    }
+}
+
+/// Ordered dithering: render each pixel as a two-entry mix (see
+/// [`PairMapper`]) and pick between the two entries by comparing the
+/// mix's share with the threshold map's rank at the pixel's canvas
+/// position. No inter-pixel coupling — every pixel is decided on its
+/// own, so the result is deterministic per position (an unchanged region
+/// of an animation dithers identically in every frame).
+///
+/// A pixel that *is* a palette colour has no second entry, so flat areas
+/// of exact colours (text, line art, interface chrome) stay clean, while
+/// a ramp between two entries mixes them in proportion. Transparent
+/// pixels emit `transparent_index`.
+fn dither_samples_ordered(
+    map: ThresholdMap,
+    input: DitherInput<'_>,
+    pairs: &mut PairMapper,
+) -> Vec<u8> {
     let DitherInput {
         samples,
         width,
         height,
-        palette,
         is_transparent,
         transparent_index,
+        origin,
+        ..
     } = input;
-    let pixel_count = width * height;
-    let mut indices = vec![0u8; pixel_count];
-    let search = if palette.is_empty() {
-        &[Rgb::new(0, 0, 0)][..]
-    } else {
-        palette
-    };
+    let mut indices = vec![0u8; width * height];
     for y in 0..height {
         for x in 0..width {
             let p = y * width + x;
@@ -1449,86 +1670,99 @@ fn dither_samples_ordered_bayer(input: DitherInput<'_>, strength: i32) -> Vec<u8
                 indices[p] = transparent_index.expect("transparent pixel needs reserved index");
                 continue;
             }
-            // Bayer threshold in 0..=63 → bias in roughly [-strength/2,
-            // +strength/2]: (m * 2 - 63) * strength / 64.
-            let m = BAYER_8X8[y & 7][x & 7];
-            let bias = (m * 2 - 63) * strength / 64;
-            let [sr, sg, sb] = samples[p];
-            let want = [
-                (sr as i32 + bias).clamp(0, 255),
-                (sg as i32 + bias).clamp(0, 255),
-                (sb as i32 + bias).clamp(0, 255),
-            ];
-            indices[p] = nearest_index(
-                search,
-                Rgb::new(want[0] as u8, want[1] as u8, want[2] as u8),
-            );
+            let mix = pairs.mix(samples[p]);
+            indices[p] = if mix.share == 0 {
+                mix.first
+            } else {
+                // The rank's midpoint `(rank + ½) / ranks` against the
+                // share `share / 256`.
+                let (rank, ranks) = map.rank(x + origin.0, y + origin.1);
+                if (2 * rank + 1) * 128 < i32::from(mix.share) * ranks {
+                    mix.second
+                } else {
+                    mix.first
+                }
+            };
         }
     }
     indices
 }
 
-/// Mean nearest-neighbour spacing between palette entries, used to scale the
-/// ordered-dither bias to the palette's coarseness. Returns a conservative
-/// default for a degenerate (≤1 entry) palette so a flat image gets no bias.
-fn palette_mean_spacing(palette: &[Rgb]) -> i32 {
-    if palette.len() < 2 {
-        return 0;
-    }
-    // Average over each entry's nearest other entry (Euclidean in RGB).
-    let mut total = 0i64;
-    for (i, a) in palette.iter().enumerate() {
-        let mut best = i64::MAX;
-        for (j, b) in palette.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            let dr = a.r as i64 - b.r as i64;
-            let dg = a.g as i64 - b.g as i64;
-            let db = a.b as i64 - b.b as i64;
-            let d2 = dr * dr + dg * dg + db * db;
-            if d2 < best {
-                best = d2;
-            }
-        }
-        total += (best as f64).sqrt() as i64;
-    }
-    (total / palette.len() as i64) as i32
+/// The per-palette search state an index-plane assignment draws on,
+/// kept by callers that map several frames against one table so the
+/// colour memos carry over.
+pub(crate) struct PaletteSearch {
+    pairs: PairMapper,
 }
 
-/// Index-plane assignment for a chosen palette + dither, the shared core
-/// behind every `quantize_*` entry point's non-`None` paths.
-fn assign_indices_with_dither(dither: Dither, input: DitherInput<'_>, serpentine: bool) -> Vec<u8> {
+impl PaletteSearch {
+    pub(crate) fn new(palette: &[Rgb], opts: &QuantizeOptions) -> Self {
+        PaletteSearch {
+            pairs: PairMapper::new(
+                palette,
+                opts.metric.metric(),
+                u32::from(opts.dither_strength.min(100)),
+            ),
+        }
+    }
+
+    /// Index of the entry nearest to `rgb`.
+    #[inline]
+    pub(crate) fn nearest(&mut self, rgb: [u8; 3]) -> u8 {
+        self.pairs.nearest(rgb)
+    }
+}
+
+/// Index-plane assignment for a chosen palette under `opts` (dither,
+/// scan order, strength, colour-difference space) — the shared core
+/// behind every `quantize_*` / `remap_*` entry point.
+fn assign_indices(opts: &QuantizeOptions, input: DitherInput<'_>) -> Vec<u8> {
+    let mut search = PaletteSearch::new(input.palette, opts);
+    assign_indices_with(opts, input, &mut search)
+}
+
+/// [`assign_indices`] against a caller-held [`PaletteSearch`] built for
+/// `input.palette` and `opts`.
+pub(crate) fn assign_indices_with(
+    opts: &QuantizeOptions,
+    input: DitherInput<'_>,
+    search: &mut PaletteSearch,
+) -> Vec<u8> {
+    let strength = i32::from(opts.dither_strength.min(100));
+    let dither = if strength == 0 {
+        Dither::None
+    } else {
+        opts.dither
+    };
     if let Some(kernel) = dither.error_diffusion_kernel() {
-        return dither_samples_error_diffusion(kernel, input, serpentine);
+        let ctx = DitherContext {
+            mapper: &mut search.pairs,
+            strength,
+        };
+        return dither_samples_error_diffusion(kernel, input, opts.serpentine, ctx);
     }
     match dither {
         Dither::OrderedBayer8x8 => {
-            let strength = palette_mean_spacing(input.palette);
-            dither_samples_ordered_bayer(input, strength)
+            dither_samples_ordered(ThresholdMap::Bayer, input, &mut search.pairs)
+        }
+        Dither::BlueNoise => {
+            dither_samples_ordered(ThresholdMap::BlueNoise, input, &mut search.pairs)
         }
         // Dither::None: flat nearest-entry assignment.
-        _ => {
-            let search = if input.palette.is_empty() {
-                &[Rgb::new(0, 0, 0)][..]
-            } else {
-                input.palette
-            };
-            input
-                .samples
-                .iter()
-                .zip(input.is_transparent)
-                .map(|(&[r, g, b], &transparent)| {
-                    if transparent {
-                        input
-                            .transparent_index
-                            .expect("transparent pixel needs reserved index")
-                    } else {
-                        nearest_index(search, Rgb::new(r, g, b))
-                    }
-                })
-                .collect()
-        }
+        _ => input
+            .samples
+            .iter()
+            .zip(input.is_transparent)
+            .map(|(&rgb, &transparent)| {
+                if transparent {
+                    input
+                        .transparent_index
+                        .expect("transparent pixel needs reserved index")
+                } else {
+                    search.nearest(rgb)
+                }
+            })
+            .collect(),
     }
 }
 
@@ -1822,7 +2056,13 @@ mod tests {
             let v = x * 17; // 0..255 ramp
             rgb.extend_from_slice(&[v, v, v]);
         }
-        let flat = quantize_rgb(&rgb, 16, 1, 2).unwrap();
+        let flat = quantize_rgb_with_options(
+            &rgb,
+            16,
+            1,
+            QuantizeOptions::with_max_colors(2).dither(Dither::None),
+        )
+        .unwrap();
         let dithered = quantize_rgb_with_options(
             &rgb,
             16,
@@ -1977,6 +2217,7 @@ mod tests {
         Dither::Sierra,
         Dither::Atkinson,
         Dither::OrderedBayer8x8,
+        Dither::BlueNoise,
     ];
 
     #[test]
@@ -1999,8 +2240,8 @@ mod tests {
         let (pal, _) = median_cut(&samples, 6);
         let mask = vec![false; 64];
         let via_wrapper = dither_samples_floyd_steinberg(&samples, 8, 8, &pal, &mask, None);
-        let via_dispatch = assign_indices_with_dither(
-            Dither::FloydSteinberg,
+        let via_dispatch = assign_indices(
+            &QuantizeOptions::median_cut().dither(Dither::FloydSteinberg),
             DitherInput {
                 samples: &samples,
                 width: 8,
@@ -2008,8 +2249,8 @@ mod tests {
                 palette: &pal,
                 is_transparent: &mask,
                 transparent_index: None,
+                origin: (0, 0),
             },
-            false,
         );
         assert_eq!(via_wrapper, via_dispatch);
     }
@@ -2100,7 +2341,13 @@ mod tests {
             let v = x * 17;
             rgb.extend_from_slice(&[v, v, v]);
         }
-        let flat = quantize_rgb(&rgb, 16, 1, 2).unwrap();
+        let flat = quantize_rgb_with_options(
+            &rgb,
+            16,
+            1,
+            QuantizeOptions::with_max_colors(2).dither(Dither::None),
+        )
+        .unwrap();
         let ordered = quantize_rgb_with_options(
             &rgb,
             16,
@@ -2217,7 +2464,8 @@ mod tests {
             240, 10, 10, // -> red (2)
             130, 130, 130, // -> nearer white than black (1)
         ];
-        let q = remap_rgb_to_palette(&rgb, 2, 2, &pal, QuantizeOptions::default()).unwrap();
+        let flat = QuantizeOptions::default().dither(Dither::None);
+        let q = remap_rgb_to_palette(&rgb, 2, 2, &pal, flat).unwrap();
         assert_eq!(q.palette, pal, "palette is echoed unchanged");
         assert_eq!(q.indices, vec![0, 1, 2, 1]);
         assert_eq!(q.transparent_index, None);
@@ -2240,7 +2488,14 @@ mod tests {
             let v = x * 17;
             rgb.extend_from_slice(&[v, v, v]);
         }
-        let flat = remap_rgb_to_palette(&rgb, 16, 1, &pal, QuantizeOptions::default()).unwrap();
+        let flat = remap_rgb_to_palette(
+            &rgb,
+            16,
+            1,
+            &pal,
+            QuantizeOptions::default().dither(Dither::None),
+        )
+        .unwrap();
         let dith = remap_rgb_to_palette(
             &rgb,
             16,
@@ -2319,9 +2574,10 @@ mod tests {
     // ----- serpentine error-diffusion scan -----
 
     #[test]
-    fn serpentine_default_is_off_and_byte_stable() {
-        // The default options have serpentine = false, so a dithered run
-        // with explicit serpentine(false) is byte-identical to the default.
+    fn serpentine_default_is_on_and_median_cut_keeps_the_raster_scan() {
+        // The default options scan in serpentine order, so a dithered run
+        // with explicit serpentine(true) is byte-identical to the default;
+        // the historical configuration keeps the one-directional scan.
         let mut rgb = Vec::new();
         for y in 0..12u8 {
             for x in 0..12u8 {
@@ -2330,9 +2586,10 @@ mod tests {
         }
         let base = QuantizeOptions::with_max_colors(6).dither(Dither::FloydSteinberg);
         let a = quantize_rgb_with_options(&rgb, 12, 12, base).unwrap();
-        let b = quantize_rgb_with_options(&rgb, 12, 12, base.serpentine(false)).unwrap();
+        let b = quantize_rgb_with_options(&rgb, 12, 12, base.serpentine(true)).unwrap();
         assert_eq!(a.indices, b.indices);
-        assert!(!QuantizeOptions::default().serpentine);
+        assert!(QuantizeOptions::default().serpentine);
+        assert!(!QuantizeOptions::median_cut().serpentine);
     }
 
     #[test]
@@ -2351,7 +2608,9 @@ mod tests {
             &rgb,
             16,
             16,
-            QuantizeOptions::with_max_colors(4).dither(Dither::FloydSteinberg),
+            QuantizeOptions::with_max_colors(4)
+                .dither(Dither::FloydSteinberg)
+                .serpentine(false),
         )
         .unwrap();
         let serp = quantize_rgb_with_options(
@@ -2632,12 +2891,13 @@ mod tests {
     // ----- Lloyd palette refinement -----
 
     #[test]
-    fn refine_iterations_default_is_zero() {
-        assert_eq!(QuantizeOptions::default().palette_refine_iterations, 0);
+    fn refine_iterations_defaults() {
+        assert_eq!(QuantizeOptions::default().palette_refine_iterations, 8);
         assert_eq!(
             QuantizeOptions::with_max_colors(16).palette_refine_iterations,
-            0
+            8
         );
+        assert_eq!(QuantizeOptions::median_cut().palette_refine_iterations, 0);
     }
 
     #[test]

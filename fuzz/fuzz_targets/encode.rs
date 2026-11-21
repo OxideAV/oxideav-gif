@@ -28,9 +28,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_gif::{
-    AnimationBuilder, BoxPriority, DisposalMethod, Dither, GifFile, QuantizeOptions, compose,
-    encode_file, image::Rgb, parse, parse_first_frame, parse_lenient, playback::Playback,
-    quantize_frames_shared, quantize_rgba_with_options,
+    AnimationBuilder, BoxPriority, ColorMetric, DisposalMethod, Dither, GifFile, PaletteMethod,
+    QuantizeOptions, compose, encode_file, image::Rgb, parse, parse_first_frame, parse_lenient,
+    playback::Playback, quantize_frames_shared, quantize_rgba_with_options,
 };
 
 // Cap downstream work on suspiciously large screens so the harness
@@ -271,6 +271,22 @@ fuzz_target!(|data: &[u8]| {
     };
     let refine = (data[3] >> 1) as usize % 5; // 0..=4
     let serpentine = data[3] & 0x10 != 0;
+    // Palette method, colour-difference space and dither strength.
+    let method = if data[3] & 0x20 == 0 {
+        PaletteMethod::VarianceSplit
+    } else {
+        PaletteMethod::MedianCut
+    };
+    let metric = if data[3] & 0x40 == 0 {
+        ColorMetric::Perceptual
+    } else {
+        ColorMetric::Rgb
+    };
+    let strength = if data[3] & 0x80 == 0 {
+        100
+    } else {
+        data[2] % 101
+    };
 
     for dither in [
         Dither::None,
@@ -281,12 +297,16 @@ fuzz_target!(|data: &[u8]| {
         Dither::Sierra,
         Dither::Atkinson,
         Dither::OrderedBayer8x8,
+        Dither::BlueNoise,
     ] {
         let opts = QuantizeOptions::with_max_colors(max_colors)
             .dither(dither)
             .box_priority(priority)
             .palette_refine_iterations(refine)
-            .serpentine(serpentine);
+            .serpentine(serpentine)
+            .method(method)
+            .metric(metric)
+            .dither_strength(strength);
 
         // Per-frame quantiser: index plane must stay in palette range.
         if let Ok(q) = quantize_rgba_with_options(&frame_a, qw, qh, opts) {

@@ -46,7 +46,7 @@ if oxideav_gif::probe(&bytes) {
 | `decode_all(&[u8]) -> Result<Vec<Frame>>` (+ `decode_all_with`) | Every graphic-rendering block (§20 images and §25 Plain Text) as a composited `Rgba` canvas per the §23 disposal-method state machine, with `Frame { image, delay, disposal, user_input }`. |
 | `decode_from<R: Read>` | Reads to end, then `decode`. |
 | `encode(&GifImage, &EncodeOptions) -> Result<Vec<u8>>` | Single-image GIF. `Pal8` palette written as given; `Rgb24` / `Rgba` quantised (see *Supported layouts*). |
-| `encode_rgb8(w, h, &[u8], &opts)` / `encode_rgba8(..)` | The one-call raw paths: median-cut to ≤ 256 colours; alpha < 128 → the one Transparency Index. |
+| `encode_rgb8(w, h, &[u8], &opts)` / `encode_rgba8(..)` | The one-call raw paths: quantised to ≤ 256 colours (exact when the picture has no more); alpha < 128 → the one Transparency Index. |
 | `encode_to<W: Write>` | `encode` into a writer. |
 | `encode_all(&[Frame], &EncodeOptions)` (alias `encode_animation`) | Full-canvas frames (the `decode_all` shape) → animated GIF with per-frame Local Color Tables, delays, disposals, NETSCAPE2.0 loop count. Lossless for opaque frames of ≤ 256 colours each: `decode_all(encode_all(frames)) == frames`. |
 | `GifImage` | `{ width: u32, height: u32, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette> }` — `new(..) -> Result` (validates geometry), `packed`, `from_rgb8`, `from_rgba8`, `from_indexed`, `with_color` / `with_metadata` / `with_palette`, `width()`, `height()`, `format()`, `as_bytes() -> Option<&[u8]>`, `into_raw()`, `to_rgb8()`, `to_rgba8()`, `has_alpha()`. |
@@ -83,8 +83,9 @@ per frame in any of the 21 declared input layouts (`Pal8` / `Rgba` /
 `Rgb24` and their reorderings, grey, mono, 16-bit — see *Supported
 layouts*; `encode` after normalisation), with `params.options` parsed
 into `EncodeOptions` (`lzw_strategy`, `interlace`, `max_colors`,
-`dither`, `loop_count`, `embed_metadata`, `quality`, `version`,
-`background_index`, `pixel_aspect_ratio`, `color_table`); its `output_params` label the
+`dither`, `dither_strength`, `serpentine`, `palette`, `color_metric`,
+`palette_refine_iterations`, `loop_count`, `embed_metadata`, `quality`,
+`version`, `background_index`, `pixel_aspect_ratio`, `color_table`); its `output_params` label the
 coded layout, `Pal8`. Drained, `receive_frame` /
 `receive_packet` return `NeedMore` until `flush`, then `Eof`.
 
@@ -166,7 +167,7 @@ Encode:
 | Input | Written as |
 |---|---|
 | `Pal8` | The palette's RGB as the Global Color Table, exactly as given (1–256 entries, zero-padded to the wire's power of two). The first entry with alpha < 128 becomes the Transparency Index; pixels at any *other* such entry are re-pointed to it (GIF has one transparent index per image). Indices past the palette: `Error::InvalidInput`. |
-| `Rgb24` | Reduced to ≤ `quantize.max_colors` entries by the deterministic median-cut quantiser (lossless when the input has that many distinct colours or fewer) — the same conversion `encode_rgb8` performs. GIF has no truecolour layout, so this is documented, not refused. |
+| `Rgb24` | Reduced to ≤ `quantize.max_colors` entries by the deterministic quantiser (lossless when the input has that many distinct colours or fewer) — the same conversion `encode_rgb8` performs. GIF has no truecolour layout, so this is documented, not refused. |
 | `Rgba` | As `Rgb24`, with every pixel of alpha < 128 routed to the one Transparency Index (one slot of the colour budget), the rest opaque — the `encode_rgba8` conversion. |
 | width or height > 65 535 | `Error::Unsupported` (the §18 / §20 fields are 16-bit). |
 
@@ -220,7 +221,7 @@ Image Descriptor **before** any raster is allocated.
 |---|---|---|
 | `lzw_strategy: LzwStrategy` | `DeferredClear` | Appendix F table-full strategy (`ClearOnFull` re-adapts after 4096 entries). |
 | `interlace: bool` | `false` | §20.c.vii Interlace Flag for encoder-built images. |
-| `quantize: QuantizeOptions` | 256 colours, no dither, extent priority, no Lloyd refinement | Reduction of `Rgb24` / `Rgba` input (`with_max_colors`, `with_dither` shortcuts). |
+| `quantize: QuantizeOptions` | 256 colours, variance-split palette refined by k-means in CIE L\*a\*b\*, blue-noise ordered dither | Reduction of `Rgb24` / `Rgba` input (`with_max_colors`, `with_dither` shortcuts). `QuantizeOptions::median_cut()` is the plain median-cut configuration. |
 | `loop_count: Option<u16>` | `Some(0)` (forever) | NETSCAPE2.0 loop count for `encode_all`; `None` plays once. |
 | `embed_metadata: bool` | `true` | Write ICC / Exif / XMP Application Extensions from `GifImage::metadata`. |
 | `version: Option<Version>` | `None` | §17 header version; `None` = earliest covering every block (§7), `Some(Gif87a)` is refused when an 89a block is needed. |
@@ -239,7 +240,7 @@ forwards it) is the budget `round(256 × quality / 100)` entries, at
 least 2 — `quality_to_max_colors`: `100` is the full 256-entry table
 (the default; lossless for input of ≤ 256 colours), `90` → 230, `50` →
 128, `10` → 26, `0` → 2. Monotone: a lower quality never yields a
-larger table, and the median-cut reduction gives smaller LZW output
+larger table, and the reduction gives smaller LZW output
 for truecolour input (`quality` 100 / 90 / 50 / 10 of a 272-colour
 picture are four different byte streams). An explicit `max_colors`
 always wins, whatever the option order; input with fewer distinct

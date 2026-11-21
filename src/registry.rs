@@ -44,7 +44,7 @@ use crate::app_ext::{
 use crate::encoder::{ColorTableMode, EncodeOptions, LzwStrategy};
 use crate::error::GifError;
 use crate::image::{Application, Block, GifFile, Version};
-use crate::quantize::Dither;
+use crate::quantize::{ColorMetric, Dither, PaletteMethod};
 use crate::types::{ColorInfo, ColorRange, GifImage, GifPixelFormat, Metadata, Palette};
 
 /// Canonical codec id for GIF image frames.
@@ -697,9 +697,9 @@ impl CodecOptionsStruct for EncodeOptions {
             kind: OptionKind::U32,
             default: OptionValue::U32(256),
             help: "Colour budget for truecolour input (1..=256); the \
-                   median-cut quantiser reduces to at most this many \
-                   colour-table entries (one is reserved for transparency \
-                   when the frame has transparent pixels).",
+                   quantiser reduces to at most this many colour-table \
+                   entries (one is reserved for transparency when the \
+                   frame has transparent pixels).",
         },
         OptionField {
             name: "dither",
@@ -712,11 +712,50 @@ impl CodecOptionsStruct for EncodeOptions {
                 "sierra",
                 "atkinson",
                 "ordered_bayer8x8",
+                "blue_noise",
             ]),
             default: OptionValue::String(String::new()),
-            help: "Index-plane assignment for truecolour input: `none` \
-                   (default, nearest entry), an error-diffusion kernel, or \
-                   `ordered_bayer8x8`.",
+            help: "Index-plane assignment for truecolour input: `blue_noise` \
+                   (default; ordered dither on a blue-noise threshold map, \
+                   stable between animation frames), `ordered_bayer8x8`, an \
+                   error-diffusion kernel, or `none` (nearest entry).",
+        },
+        OptionField {
+            name: "dither_strength",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(100),
+            help: "Dither strength in percent (0..=100): the share of each \
+                   pixel's error an error-diffusion kernel passes on, or the \
+                   scale of an ordered dither's mix. 0 = no dither.",
+        },
+        OptionField {
+            name: "serpentine",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(true),
+            help: "Scan the error-diffusion kernels in alternating row \
+                   directions (ignored by the ordered dithers and `none`).",
+        },
+        OptionField {
+            name: "palette",
+            kind: OptionKind::Enum(&["variance_split", "median_cut"]),
+            default: OptionValue::String(String::new()),
+            help: "Colour-table selection for input over the colour budget: \
+                   `variance_split` (default; variance-minimising box \
+                   splitting refined by k-means) or `median_cut`.",
+        },
+        OptionField {
+            name: "color_metric",
+            kind: OptionKind::Enum(&["perceptual", "rgb"]),
+            default: OptionValue::String(String::new()),
+            help: "Colour-difference space for clustering and nearest-entry \
+                   search: `perceptual` (default; CIE L*a*b*) or `rgb`.",
+        },
+        OptionField {
+            name: "palette_refine_iterations",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(8),
+            help: "Upper bound on the k-means rounds refining the colour \
+                   table (0 disables the refinement).",
         },
         OptionField {
             name: "loop_count",
@@ -794,7 +833,8 @@ impl CodecOptionsStruct for EncodeOptions {
             }
             "dither" => {
                 self.quantize.dither = match v.as_str()? {
-                    "" | "none" => Dither::None,
+                    "" | "blue_noise" => Dither::BlueNoise,
+                    "none" => Dither::None,
                     "floyd_steinberg" => Dither::FloydSteinberg,
                     "jarvis_judice_ninke" => Dither::JarvisJudiceNinke,
                     "stucki" => Dither::Stucki,
@@ -804,6 +844,33 @@ impl CodecOptionsStruct for EncodeOptions {
                     "ordered_bayer8x8" => Dither::OrderedBayer8x8,
                     _ => unreachable!("guarded by SCHEMA"),
                 }
+            }
+            "dither_strength" => {
+                let n = v.as_u32()?;
+                if n > 100 {
+                    return Err(CoreError::invalid(format!(
+                        "GIF encoder: option `dither_strength` got {n}; expected 0..=100"
+                    )));
+                }
+                self.quantize.dither_strength = n as u8;
+            }
+            "serpentine" => self.quantize.serpentine = v.as_bool()?,
+            "palette" => {
+                self.quantize.method = match v.as_str()? {
+                    "" | "variance_split" => PaletteMethod::VarianceSplit,
+                    "median_cut" => PaletteMethod::MedianCut,
+                    _ => unreachable!("guarded by SCHEMA"),
+                }
+            }
+            "color_metric" => {
+                self.quantize.metric = match v.as_str()? {
+                    "" | "perceptual" => ColorMetric::Perceptual,
+                    "rgb" => ColorMetric::Rgb,
+                    _ => unreachable!("guarded by SCHEMA"),
+                }
+            }
+            "palette_refine_iterations" => {
+                self.quantize.palette_refine_iterations = v.as_u32()?.min(64) as usize;
             }
             "loop_count" => {
                 let n = v.as_i32()?;
@@ -1576,6 +1643,28 @@ mod tests {
         assert_eq!(opts.lzw_strategy, LzwStrategy::ClearOnFull);
         assert_eq!(opts.loop_count, None);
         assert!(!opts.embed_metadata);
+        // The quantiser settings.
+        let mut q = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        let defaults = parse_options::<EncodeOptions>(&q.options).unwrap();
+        assert_eq!(defaults.quantize, crate::QuantizeOptions::default());
+        assert_eq!(defaults.quantize.dither, Dither::BlueNoise);
+        q.options.insert("dither", "none");
+        q.options.insert("dither_strength", "40");
+        q.options.insert("serpentine", "false");
+        q.options.insert("palette", "median_cut");
+        q.options.insert("color_metric", "rgb");
+        q.options.insert("palette_refine_iterations", "3");
+        let o = parse_options::<EncodeOptions>(&q.options).unwrap().quantize;
+        assert_eq!(o.dither, Dither::None);
+        assert_eq!(o.dither_strength, 40);
+        assert!(!o.serpentine);
+        assert_eq!(o.method, PaletteMethod::MedianCut);
+        assert_eq!(o.metric, ColorMetric::Rgb);
+        assert_eq!(o.palette_refine_iterations, 3);
+        q.options.insert("dither", "blue_noise");
+        q.options.insert("dither_strength", "101");
+        assert!(parse_options::<EncodeOptions>(&q.options).is_err());
+
         params.options.insert("max_colors", "0");
         assert!(make_encoder(&params).is_err());
         params.options.insert("max_colors", "2");

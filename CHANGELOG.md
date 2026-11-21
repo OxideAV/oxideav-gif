@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Truecolour input is reduced to a colour table by a new default quantiser: variance-minimising box splitting over the picture's colour census, refined by weighted k-means, with every distance measured in CIE L\*a\*b\*; the index plane is dithered against a 64×64 blue-noise threshold map. On the synthetic 640×480 set the mean colour difference (ΔE\*ab) drops from 3.71 to 2.20 on the photograph, 2.80 to 2.10 on the gradient and 0.26 to 0.10 on the screen capture before dithering, and the encode runs about three times faster. `QuantizeOptions::median_cut()` is the previous configuration (median cut, R, G, B distances, no dither) and reproduces its output byte for byte.
+- A picture with no more distinct colours than the budget gets exactly those colours, one table entry each, in ascending R, G, B order (the same colour set always yields the same table).
+- Error diffusion scans in serpentine order by default and measures the error it passes on from the clamped target colour. Ordered dithering renders each pixel as a mix of its nearest entry and the neighbouring entry that brings the mix closest, thresholded per position; a pixel within one just-noticeable difference of a table entry is not dithered.
+
+### Added
+
+- `QuantizeOptions::method` (`PaletteMethod::{VarianceSplit, MedianCut}`), `QuantizeOptions::metric` (`ColorMetric::{Perceptual, Rgb}`), `QuantizeOptions::dither_strength` (percent) and `QuantizeOptions::median_cut()`.
+- `Dither::BlueNoise`: ordered dithering on a void-and-cluster rank map built on first use; position-stable, so an unchanged region dithers identically in every frame of an animation.
+- Registry encoder options `dither = blue_noise`, `dither_strength`, `serpentine`, `palette` (`variance_split` / `median_cut`), `color_metric` (`perceptual` / `rgb`) and `palette_refine_iterations`.
+
 ## [0.0.16](https://github.com/OxideAV/oxideav-gif/compare/v0.0.15...v0.0.16) - 2026-11-07
 
 ### Other

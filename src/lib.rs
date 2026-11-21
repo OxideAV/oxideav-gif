@@ -163,7 +163,10 @@
 
 mod api;
 pub mod app_ext;
+mod bluenoise;
 pub mod builder;
+mod cluster;
+mod colorspace;
 pub mod compose;
 pub mod conformance;
 #[cfg(feature = "registry")]
@@ -180,6 +183,7 @@ pub mod image;
 pub mod interlace;
 #[doc(hidden)]
 pub mod lzw;
+mod nearest;
 pub mod options;
 pub mod playback;
 pub mod quantize;
@@ -218,9 +222,9 @@ pub use image::{
 };
 pub use playback::{FrameIter, LoopingFrameIter, Playback, PlaybackFrame};
 pub use quantize::{
-    BoxPriority, Dither, QuantizeOptions, Quantized, SharedQuantized, quantize_frames_shared,
-    quantize_rgb, quantize_rgb_with_options, quantize_rgba, quantize_rgba_with_options,
-    remap_rgb_to_palette, remap_rgba_to_palette,
+    BoxPriority, ColorMetric, Dither, PaletteMethod, QuantizeOptions, Quantized, SharedQuantized,
+    quantize_frames_shared, quantize_rgb, quantize_rgb_with_options, quantize_rgba,
+    quantize_rgba_with_options, remap_rgb_to_palette, remap_rgba_to_palette,
 };
 
 // Registry-gated public surface. The `__oxideav_entry` re-export is

@@ -298,7 +298,9 @@ fn serpentine_dither_round_trips_through_the_encode_constructor() {
             rgba.extend_from_slice(&[v, v, v, 255]);
         }
     }
-    let raster = QuantizeOptions::with_max_colors(4).dither(Dither::FloydSteinberg);
+    let raster = QuantizeOptions::with_max_colors(4)
+        .dither(Dither::FloydSteinberg)
+        .serpentine(false);
     let serp = raster.serpentine(true);
 
     let img_r = GifFile::from_rgba_frame_with_options(&rgba, w as u16, h as u16, raster).unwrap();
