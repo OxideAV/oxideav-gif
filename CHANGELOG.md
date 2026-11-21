@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/OxideAV/oxideav-gif/compare/v0.0.16...v0.0.17) - 2026-11-21
+
+### Other
+
+- candidate grid of the nearest search is set up only after enough queries
+- optimize() returns a mislabelled stream unchanged or rebuilt, never an error
+- faster exact nearest-entry search; memory bounds and max_frames in the README
+- animations as inter-frame deltas, lossless re-optimisation of existing GIFs
+- adaptive LZW clear, copy-from-output LZW decoder, in-place de-interlace
+- perceptual variance-split quantiser, k-means refinement, blue-noise dither
+
 ### Changed
 
 - Truecolour input is reduced to a colour table by a new default quantiser: variance-minimising box splitting over the picture's colour census, refined by weighted k-means, with every distance measured in CIE L\*a\*b\*; the index plane is dithered against a 64×64 blue-noise threshold map. On the synthetic 640×480 set the mean colour difference (ΔE\*ab) drops from 3.71 to 2.20 on the photograph, 2.80 to 2.10 on the gradient and 0.26 to 0.10 on the screen capture before dithering, and the encode runs about three times faster. `QuantizeOptions::median_cut()` is the previous configuration (median cut, R, G, B distances, no dither) and reproduces its output byte for byte.
